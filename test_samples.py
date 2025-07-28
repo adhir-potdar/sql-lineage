@@ -372,6 +372,147 @@ def test_output_formats():
         return False
 
 
+def test_complex_multi_cte_union():
+    """Test sample3.sql - Complex multi-CTE query with UNION and advanced analytics."""
+    print_subsection_header("Sample 3: Complex Multi-CTE with UNION")
+    
+    analyzer = SQLLineageAnalyzer(dialect="trino")
+    analyzer.set_metadata_registry(SampleMetadataRegistry())
+    
+    sql = """
+    WITH OrderSummary AS (
+        SELECT
+            "schema1"."orders"."order_id",
+            "schema1"."orders"."customer_id",
+            "schema1"."orders"."product_id",
+            SUM("schema1"."orders"."order_total") AS total_order_value,
+            COUNT(DISTINCT "schema1"."orders"."order_id") AS order_count,
+            CASE
+                WHEN SUM("schema1"."orders"."order_total") > 1000 THEN 'High'
+                WHEN SUM("schema1"."orders"."order_total") BETWEEN 500 AND 1000 THEN 'Medium'
+                ELSE 'Low'
+            END AS order_priority
+        FROM
+            "schema1"."orders"
+        INNER JOIN
+            "schema1"."products" ON "schema1"."orders"."product_id" = "schema1"."products"."product_id"
+        WHERE
+            "schema1"."orders"."order_date" >= DATEADD(YEAR, -1, CURRENT_DATE)
+        GROUP BY
+            "schema1"."orders"."order_id",
+            "schema1"."orders"."customer_id",
+            "schema1"."orders"."product_id"
+    ),
+    TopCustomers AS (
+        SELECT
+            "schema1"."customers"."customer_id",
+            CONCAT("schema1"."customers"."first_name", ' ', "schema1"."customers"."last_name") AS customer_name,
+            SUM("schema1"."orders"."order_total") AS customer_spent,
+            RANK() OVER (
+                ORDER BY SUM("schema1"."orders"."order_total") DESC
+            ) AS spending_rank
+        FROM
+            "schema1"."orders"
+        INNER JOIN
+            "schema1"."customers" ON "schema1"."orders"."customer_id" = "schema1"."customers"."customer_id"
+        WHERE
+            "schema1"."orders"."order_date" >= DATEADD(YEAR, -1, CURRENT_DATE)
+        GROUP BY
+            "schema1"."customers"."customer_id", "schema1"."customers"."first_name", "schema1"."customers"."last_name"
+    ),
+    TopProductsInCategory AS (
+        SELECT
+            "schema1"."categories"."category_name",
+            "schema1"."products"."product_id",
+            COUNT("schema1"."orders"."order_id") AS total_orders,
+            RANK() OVER (
+                PARTITION BY "schema1"."categories"."category_name"
+                ORDER BY COUNT("schema1"."orders"."order_id") DESC
+            ) AS product_rank
+        FROM
+            "schema1"."products"
+        INNER JOIN
+            "schema1"."categories" ON "schema1"."products"."category_id" = "schema1"."categories"."category_id"
+        LEFT JOIN
+            "schema1"."orders" ON "schema1"."products"."product_id" = "schema1"."orders"."product_id"
+        WHERE
+            "schema1"."orders"."order_date" >= DATEADD(YEAR, -1, CURRENT_DATE)
+        GROUP BY
+            "schema1"."categories"."category_name", "schema1"."products"."product_id"
+    ),
+    CombinedResults AS (
+        SELECT
+            os.customer_id,
+            os.order_id,
+            os.product_id,
+            os.total_order_value,
+            os.order_priority,
+            NULL AS product_rank,
+            NULL AS category_name,
+            tc.customer_spent,
+            tc.spending_rank
+        FROM
+            OrderSummary os
+        LEFT JOIN
+            TopCustomers tc ON os.customer_id = tc.customer_id
+
+        UNION ALL
+
+        SELECT
+            NULL AS customer_id,
+            NULL AS order_id,
+            tp.product_id,
+            NULL AS total_order_value,
+            NULL AS order_priority,
+            tp.product_rank,
+            tp.category_name,
+            NULL AS customer_spent,
+            NULL AS spending_rank
+        FROM
+            TopProductsInCategory tp
+    ),
+    FinalResults AS (
+        SELECT
+            cr.customer_id,
+            cr.order_id,
+            cr.product_id,
+            cr.total_order_value,
+            cr.order_priority,
+            cr.product_rank,
+            cr.category_name,
+            cr.customer_spent,
+            cr.spending_rank,
+            CASE
+                WHEN cr.spending_rank IS NOT NULL AND cr.spending_rank <= 5 THEN 'VIP'
+                WHEN cr.customer_spent IS NOT NULL THEN 'Premium'
+                WHEN cr.product_rank IS NOT NULL AND cr.product_rank <= 3 THEN 'Top Product'
+                ELSE 'Standard'
+            END AS tag
+        FROM
+            CombinedResults cr
+    )
+    SELECT
+        fr.customer_id,
+        fr.order_id,
+        fr.product_id,
+        fr.category_name,
+        fr.total_order_value,
+        fr.customer_spent,
+        fr.spending_rank,
+        fr.product_rank,
+        fr.order_priority,
+        fr.tag
+    FROM
+        FinalResults fr
+    ORDER BY
+        fr.spending_rank ASC,
+        fr.product_rank ASC,
+        fr.total_order_value DESC
+    """
+    
+    return analyze_and_display(analyzer, sql, "Complex Multi-CTE with UNION and Analytics")
+
+
 def test_column_lineage_flag_control():
     """Test column lineage flag control in formatters."""
     print_subsection_header("Column Lineage Flag Control")
@@ -410,6 +551,7 @@ def main():
     results.append(test_original_sample1())
     results.append(test_original_sample2()) 
     results.append(test_original_sample3())
+    results.append(test_complex_multi_cte_union())
     
     print_section_header("SQLGLOT-TEST PATTERNS")
     results.append(test_sqlglot_test_queries())
