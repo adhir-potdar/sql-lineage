@@ -1,0 +1,2 @@
+# Minimal dependencies for basic SQL Lineage Analyzer functionality
+sqlglot>=20.0.0
