@@ -7,7 +7,11 @@ from collections import defaultdict
 import sqlglot
 from sqlglot import Expression, exp
 
-from .models import TableLineage, ColumnLineage
+from .models import (
+    TableLineage, ColumnLineage, TableTransformation, ColumnTransformation,
+    JoinCondition, FilterCondition, AggregateFunction, WindowFunction, CaseExpression,
+    JoinType, AggregateType, OperatorType
+)
 
 
 class LineageExtractor:
@@ -55,6 +59,11 @@ class LineageExtractor:
             else:
                 for source in source_tables:
                     lineage.add_dependency(cte_name, source)
+                    
+                    # Extract transformation details for this CTE
+                    transformation = self._extract_table_transformation(cte.this, source, cte_name, alias_mappings)
+                    if transformation:
+                        lineage.add_transformation(cte_name, transformation)
             
             # Add this CTE to the processed set
             processed_ctes[cte_name] = cte
@@ -72,6 +81,11 @@ class LineageExtractor:
                         lineage.add_dependency(target_name, skipped_cte_dependency)
                 else:
                     lineage.add_dependency(target_name, source)
+                    
+                    # Extract transformation details for main query
+                    transformation = self._extract_table_transformation(expression, source, target_name, alias_mappings)
+                    if transformation:
+                        lineage.add_transformation(target_name, transformation)
         
         # Handle UNION queries
         elif isinstance(expression, exp.Union):
@@ -104,6 +118,11 @@ class LineageExtractor:
                                 lineage.add_dependency(target_name, skipped_cte_dependency)
                         else:
                             lineage.add_dependency(target_name, source)
+                            
+                            # Extract transformation details for CREATE TABLE AS SELECT
+                            transformation = self._extract_table_transformation(select, source, target_name, alias_mappings)
+                            if transformation:
+                                lineage.add_transformation(target_name, transformation)
         
         return lineage
     
@@ -281,6 +300,11 @@ class LineageExtractor:
                     
                     for source in source_columns:
                         lineage.add_dependency(target_column, source)
+                        
+                        # Extract column transformation details
+                        transformation = self._extract_column_transformation(projection, source, target_column, alias_mappings)
+                        if transformation:
+                            lineage.add_transformation(target_column, transformation)
                 
                 elif isinstance(projection, exp.Column):
                     target_column = f"{target_prefix}.{projection.name}"
@@ -291,6 +315,14 @@ class LineageExtractor:
                     resolved_source = self._clean_column_reference(resolved_source)
                     
                     lineage.add_dependency(target_column, resolved_source)
+                    
+                    # Create simple transformation for direct column reference
+                    transformation = ColumnTransformation(
+                        source_column=resolved_source,
+                        target_column=target_column,
+                        expression=str(projection)
+                    )
+                    lineage.add_transformation(target_column, transformation)
     
     def _extract_source_columns(
         self, 
@@ -472,3 +504,247 @@ class LineageExtractor:
             pass
             
         return ctes_to_skip
+    
+    def _extract_table_transformation(
+        self, 
+        select_node: Expression, 
+        source_table: str, 
+        target_table: str, 
+        alias_mappings: Dict[str, str]
+    ) -> Optional[TableTransformation]:
+        """Extract table-level transformation details."""
+        try:
+            transformation = TableTransformation(
+                source_table=source_table,
+                target_table=target_table
+            )
+            
+            # Extract JOIN information
+            for join in select_node.find_all(exp.Join):
+                join_type = self._get_join_type(join)
+                join_conditions = self._extract_join_conditions(join, alias_mappings)
+                
+                transformation.join_type = join_type
+                transformation.join_conditions.extend(join_conditions)
+            
+            # Extract WHERE conditions
+            where_clause = select_node.find(exp.Where)
+            if where_clause:
+                filter_conditions = self._extract_filter_conditions(where_clause, alias_mappings)
+                transformation.filter_conditions.extend(filter_conditions)
+            
+            # Extract GROUP BY
+            group_by = select_node.find(exp.Group)
+            if group_by:
+                group_columns = [self._resolve_column_reference(str(expr), alias_mappings) 
+                               for expr in group_by.expressions]
+                transformation.group_by_columns = group_columns
+            
+            # Extract HAVING conditions
+            having = select_node.find(exp.Having)
+            if having:
+                having_conditions = self._extract_filter_conditions(having, alias_mappings)
+                transformation.having_conditions.extend(having_conditions)
+            
+            # Extract ORDER BY
+            order_by = select_node.find(exp.Order)
+            if order_by:
+                order_columns = [self._resolve_column_reference(str(expr), alias_mappings) 
+                               for expr in order_by.expressions]
+                transformation.order_by_columns = order_columns
+            
+            return transformation
+            
+        except Exception:
+            return None
+    
+    def _extract_column_transformation(
+        self, 
+        projection: Expression, 
+        source_column: str, 
+        target_column: str, 
+        alias_mappings: Dict[str, str]
+    ) -> Optional[ColumnTransformation]:
+        """Extract column-level transformation details."""
+        try:
+            transformation = ColumnTransformation(
+                source_column=source_column,
+                target_column=target_column,
+                expression=str(projection.this) if hasattr(projection, 'this') else str(projection)
+            )
+            
+            # Check for aggregate functions
+            for agg in projection.find_all(exp.AggFunc):
+                agg_type = self._get_aggregate_type(agg)
+                agg_column = None
+                distinct = False
+                
+                if agg.expressions:
+                    agg_column = str(agg.expressions[0])
+                    agg_column = self._resolve_column_reference(agg_column, alias_mappings)
+                
+                if hasattr(agg, 'distinct') and agg.distinct:
+                    distinct = True
+                
+                transformation.aggregate_function = AggregateFunction(
+                    function_type=agg_type,
+                    column=agg_column,
+                    distinct=distinct
+                )
+                break  # Only handle first aggregate for now
+            
+            # Check for window functions
+            for window in projection.find_all(exp.Window):
+                window_func = WindowFunction(
+                    function_name=str(window.this) if hasattr(window, 'this') else 'UNKNOWN'
+                )
+                
+                # Extract window spec
+                spec = window.args.get('spec')
+                if spec:
+                    if spec.partition_by:
+                        window_func.partition_by = [
+                            self._resolve_column_reference(str(p), alias_mappings) 
+                            for p in spec.partition_by
+                        ]
+                    if spec.order:
+                        window_func.order_by = [
+                            self._resolve_column_reference(str(o), alias_mappings) 
+                            for o in spec.order.expressions
+                        ]
+                
+                transformation.window_function = window_func
+                break  # Only handle first window function for now
+            
+            # Check for CASE expressions
+            for case in projection.find_all(exp.Case):
+                case_expr = CaseExpression()
+                
+                # Extract WHEN conditions (simplified)
+                when_conditions = []
+                then_values = []
+                
+                # Get the case conditions from args
+                if hasattr(case, 'ifs') and case.ifs:
+                    for if_clause in case.ifs:
+                        # This is a simplified extraction - in reality, CASE conditions can be very complex
+                        when_conditions.append(FilterCondition(
+                            column="CASE_CONDITION",
+                            operator=OperatorType.EQ,
+                            value=str(if_clause.this)
+                        ))
+                        then_values.append(str(if_clause.expression))
+                
+                if case.default:
+                    case_expr.else_value = str(case.default)
+                
+                case_expr.when_conditions = when_conditions
+                case_expr.then_values = then_values
+                
+                transformation.case_expression = case_expr
+                break  # Only handle first CASE for now
+            
+            return transformation
+            
+        except Exception:
+            return None
+    
+    def _get_join_type(self, join: exp.Join) -> JoinType:
+        """Extract JOIN type from JOIN expression."""
+        join_side = getattr(join, 'side', None)
+        if join_side == 'LEFT':
+            return JoinType.LEFT
+        elif join_side == 'RIGHT':
+            return JoinType.RIGHT
+        elif join_side == 'FULL':
+            return JoinType.FULL
+        elif join_side == 'CROSS':
+            return JoinType.CROSS
+        else:
+            return JoinType.INNER
+    
+    def _extract_join_conditions(self, join: exp.Join, alias_mappings: Dict[str, str]) -> List[JoinCondition]:
+        """Extract JOIN conditions."""
+        conditions = []
+        
+        on_condition = join.args.get('on')
+        if on_condition:
+            # Extract equality conditions from JOIN ON clause
+            for eq in on_condition.find_all(exp.EQ):
+                left_col = self._resolve_column_reference(str(eq.this), alias_mappings)
+                right_col = self._resolve_column_reference(str(eq.expression), alias_mappings)
+                
+                conditions.append(JoinCondition(
+                    left_column=left_col,
+                    operator=OperatorType.EQ,
+                    right_column=right_col
+                ))
+        
+        return conditions
+    
+    def _extract_filter_conditions(self, filter_node: Expression, alias_mappings: Dict[str, str]) -> List[FilterCondition]:
+        """Extract filter conditions from WHERE or HAVING clause."""
+        conditions = []
+        
+        try:
+            # Extract various comparison operators
+            comparison_types = [
+                (exp.EQ, OperatorType.EQ),
+                (exp.NEQ, OperatorType.NEQ),
+                (exp.GT, OperatorType.GT),
+                (exp.GTE, OperatorType.GTE),
+                (exp.LT, OperatorType.LT),
+                (exp.LTE, OperatorType.LTE),
+                (exp.In, OperatorType.IN),
+                (exp.Like, OperatorType.LIKE),
+                (exp.Between, OperatorType.BETWEEN)
+            ]
+            
+            for exp_type, op_type in comparison_types:
+                for comp in filter_node.find_all(exp_type):
+                    if exp_type == exp.Between:
+                        # Handle BETWEEN specially
+                        column = self._resolve_column_reference(str(comp.this), alias_mappings)
+                        value = [str(comp.low), str(comp.high)]
+                    elif exp_type == exp.In:
+                        # Handle IN specially
+                        column = self._resolve_column_reference(str(comp.this), alias_mappings)
+                        value = [str(expr) for expr in comp.expressions]
+                    else:
+                        # Handle regular binary comparisons
+                        column = self._resolve_column_reference(str(comp.this), alias_mappings)
+                        value = str(comp.expression)
+                    
+                    conditions.append(FilterCondition(
+                        column=column,
+                        operator=op_type,
+                        value=value
+                    ))
+        
+        except Exception:
+            pass
+        
+        return conditions
+    
+    def _get_aggregate_type(self, agg: exp.AggFunc) -> AggregateType:
+        """Get aggregate function type."""
+        agg_name = type(agg).__name__.upper()
+        
+        if agg_name == 'COUNT':
+            return AggregateType.COUNT
+        elif agg_name == 'SUM':
+            return AggregateType.SUM
+        elif agg_name == 'AVG':
+            return AggregateType.AVG
+        elif agg_name == 'MIN':
+            return AggregateType.MIN
+        elif agg_name == 'MAX':
+            return AggregateType.MAX
+        elif agg_name == 'STDDEV':
+            return AggregateType.STDDEV
+        elif agg_name == 'VARIANCE':
+            return AggregateType.VARIANCE
+        elif 'APPROX' in agg_name and 'DISTINCT' in agg_name:
+            return AggregateType.APPROX_DISTINCT
+        else:
+            return AggregateType.OTHER

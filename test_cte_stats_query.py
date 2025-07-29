@@ -164,8 +164,75 @@ def test_cte_stats_query():
     result = analyzer.analyze(sql)
     json_outputs.append((query_name, analyzer.get_lineage_json(sql)))
     
-    if not print_lineage_analysis(result, sql, "CTE Statistics Query Analysis"):
+    if not print_lineage_analysis(result, sql, "CTE Statistics Query Analysis", show_column_lineage=True):
         return False
+    
+    # Show transformation details
+    if not result.has_errors():
+        print("\n" + "="*80)
+        print("🔄 TRANSFORMATION DETAILS")
+        print("="*80)
+        
+        # Show table transformations
+        if hasattr(result.table_lineage, 'transformations') and result.table_lineage.transformations:
+            print("\n📊 TABLE TRANSFORMATIONS:")
+            for target_table, transformations in result.table_lineage.transformations.items():
+                print(f"\n  🎯 Target: {target_table}")
+                for i, transform in enumerate(transformations, 1):
+                    print(f"    Transform {i}: {transform.source_table} → {transform.target_table}")
+                    if transform.join_type:
+                        print(f"      JOIN: {transform.join_type.value}")
+                        for jc in transform.join_conditions:
+                            print(f"        {jc.left_column} {jc.operator.value} {jc.right_column}")
+                    if transform.filter_conditions:
+                        print(f"      WHERE: {len(transform.filter_conditions)} conditions")
+                        for fc in transform.filter_conditions[:3]:
+                            print(f"        {fc.column} {fc.operator.value} {fc.value}")
+                        if len(transform.filter_conditions) > 3:
+                            print(f"        ... and {len(transform.filter_conditions) - 3} more")
+                    if transform.group_by_columns:
+                        print(f"      GROUP BY: {', '.join(transform.group_by_columns[:3])}")
+                    if transform.having_conditions:
+                        print(f"      HAVING: {len(transform.having_conditions)} conditions")
+                        for hc in transform.having_conditions[:2]:
+                            print(f"        {hc.column} {hc.operator.value} {hc.value}")
+                    if transform.order_by_columns:
+                        print(f"      ORDER BY: {', '.join(transform.order_by_columns[:3])}")
+        
+        # Show column transformations (limited to avoid too much output)
+        if hasattr(result.column_lineage, 'transformations') and result.column_lineage.transformations:
+            print("\n🔍 COLUMN TRANSFORMATIONS (showing first 8):")
+            shown_count = 0
+            for target_column, transformations in result.column_lineage.transformations.items():
+                if shown_count >= 8:
+                    remaining = len(result.column_lineage.transformations) - 8
+                    print(f"  ... and {remaining} more column transformations")
+                    break
+                print(f"\n  🎯 Target: {target_column}")
+                for i, transform in enumerate(transformations, 1):
+                    print(f"    Transform {i}: {transform.source_column} → {transform.target_column}")
+                    if transform.expression:
+                        print(f"      Expression: {transform.expression}")
+                    if transform.aggregate_function:
+                        agg = transform.aggregate_function
+                        print(f"      Aggregate: {agg.function_type.value}({agg.column if agg.column else '*'})")
+                        if agg.distinct:
+                            print(f"        DISTINCT: Yes")
+                    if transform.window_function:
+                        wf = transform.window_function
+                        print(f"      Window: {wf.function_name}")
+                        if wf.partition_by:
+                            print(f"        PARTITION BY: {', '.join(wf.partition_by[:3])}")
+                        if wf.order_by:
+                            print(f"        ORDER BY: {', '.join(wf.order_by[:3])}")
+                    if transform.case_expression:
+                        ce = transform.case_expression
+                        print(f"      CASE: {len(ce.when_conditions)} conditions")
+                        if ce.else_value:
+                            print(f"        ELSE: {ce.else_value}")
+                shown_count += 1
+        
+        print("\n" + "="*80)
     
     # Test table lineage chains with different depths
     print("\n📊 Testing Table Lineage Chains...")
@@ -385,6 +452,15 @@ def performance_test():
     print(f"✅ Upstream relationships: {len(result.table_lineage.upstream)}")
     print(f"✅ Downstream relationships: {len(result.table_lineage.downstream)}")
     print(f"✅ Column relationships: {len(result.column_lineage.upstream)}")
+    
+    # Show transformation counts
+    if hasattr(result.table_lineage, 'transformations') and result.table_lineage.transformations:
+        table_transforms = sum(len(transforms) for transforms in result.table_lineage.transformations.values())
+        print(f"✅ Table transformations: {table_transforms}")
+    
+    if hasattr(result.column_lineage, 'transformations') and result.column_lineage.transformations:
+        column_transforms = sum(len(transforms) for transforms in result.column_lineage.transformations.values())
+        print(f"✅ Column transformations: {column_transforms}")
     
     # Test chain generation performance
     print("\n⚡ Chain Generation Performance:")
