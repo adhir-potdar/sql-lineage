@@ -44,13 +44,13 @@ class SQLLineageVisualizer:
                     'fontcolor': '#F57C00'
                 },
                 'query_result': {
-                    'shape': 'box',
+                    'shape': 'doublecircle',
                     'style': 'filled,bold',
                     'fillcolor': '#E8F5E8',
-                    'color': '#388E3C',
+                    'color': '#2E7D32',
                     'fontname': 'Arial Bold',
-                    'fontsize': '14',
-                    'fontcolor': '#388E3C'
+                    'fontsize': '12',
+                    'fontcolor': '#1B5E20'
                 }
             },
             'edge_style': {
@@ -77,6 +77,41 @@ class SQLLineageVisualizer:
             }
         }
     
+    def _format_sql_for_display(self, sql_query: str) -> str:
+        """
+        Format SQL query for display in diagram label.
+        
+        Args:
+            sql_query: Raw SQL query string
+            
+        Returns:
+            Formatted SQL query string suitable for display
+        """
+        if not sql_query:
+            return ""
+        
+        # Clean the query
+        lines = sql_query.strip().split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            # Remove excessive whitespace but preserve indentation
+            stripped_line = line.rstrip()
+            if stripped_line:  # Skip empty lines
+                cleaned_lines.append(stripped_line)
+        
+        # Join lines for display - show full query without truncation
+        cleaned_query = '\n'.join(cleaned_lines)
+        
+        # Escape special characters for Graphviz
+        cleaned_query = cleaned_query.replace('"', '\\"')
+        cleaned_query = cleaned_query.replace('{', '\\{')
+        cleaned_query = cleaned_query.replace('}', '\\}')
+        cleaned_query = cleaned_query.replace('<', '\\<')
+        cleaned_query = cleaned_query.replace('>', '\\>')
+        
+        return cleaned_query
+    
     def create_lineage_diagram(self, 
                              table_chain_json: str,
                              column_chain_json: Optional[str] = None,
@@ -84,7 +119,8 @@ class SQLLineageVisualizer:
                              output_format: str = "png",
                              config: Optional[Dict] = None,
                              show_columns: bool = True,
-                             layout: str = "horizontal") -> str:
+                             layout: str = "horizontal",
+                             sql_query: Optional[str] = None) -> str:
         """
         Create a lineage diagram from JSON chain data.
         
@@ -96,6 +132,7 @@ class SQLLineageVisualizer:
             config: Custom configuration dictionary
             show_columns: Whether to include column lineage in diagram
             layout: Layout direction ('horizontal' or 'vertical', default: 'horizontal')
+            sql_query: Optional SQL query text to display at the top of the diagram
             
         Returns:
             Path to generated diagram file
@@ -114,7 +151,7 @@ class SQLLineageVisualizer:
             rankdir = 'BT' if chain_type == 'upstream' else 'TB'
         
         # Create Graphviz digraph
-        dot = self._create_digraph(table_chain, rankdir, config)
+        dot = self._create_digraph(table_chain, rankdir, config, sql_query)
         
         # Determine if we have column lineage to integrate
         has_column_lineage = column_chain and show_columns
@@ -136,7 +173,8 @@ class SQLLineageVisualizer:
                                 output_path: str = "table_lineage",
                                 output_format: str = "png",
                                 config: Optional[Dict] = None,
-                                layout: str = "horizontal") -> str:
+                                layout: str = "horizontal",
+                                sql_query: Optional[str] = None) -> str:
         """
         Create a table-only lineage diagram.
         
@@ -146,6 +184,7 @@ class SQLLineageVisualizer:
             output_format: Output format ('png', 'svg', 'pdf', 'jpg', 'jpeg')
             config: Custom configuration dictionary
             layout: Layout direction ('horizontal' or 'vertical', default: 'horizontal')
+            sql_query: Optional SQL query text to display at the top of the diagram
             
         Returns:
             Path to generated diagram file
@@ -157,7 +196,8 @@ class SQLLineageVisualizer:
             output_format=output_format,
             config=config,
             show_columns=False,
-            layout=layout
+            layout=layout,
+            sql_query=sql_query
         )
     
     def create_column_focused_diagram(self,
@@ -166,7 +206,8 @@ class SQLLineageVisualizer:
                                     output_path: str = "column_lineage",
                                     output_format: str = "png",
                                     config: Optional[Dict] = None,
-                                    layout: str = "horizontal") -> str:
+                                    layout: str = "horizontal",
+                                    sql_query: Optional[str] = None) -> str:
         """
         Create a column-focused lineage diagram with tables as containers.
         
@@ -177,6 +218,7 @@ class SQLLineageVisualizer:
             output_format: Output format ('png', 'svg', 'pdf', 'jpg', 'jpeg')
             config: Custom configuration dictionary
             layout: Layout direction ('horizontal' or 'vertical', default: 'horizontal')
+            sql_query: Optional SQL query text to display at the top of the diagram
             
         Returns:
             Path to generated diagram file
@@ -188,10 +230,11 @@ class SQLLineageVisualizer:
             output_format=output_format,
             config=config,
             show_columns=True,
-            layout=layout
+            layout=layout,
+            sql_query=sql_query
         )
     
-    def _create_digraph(self, table_chain: Dict, rankdir: str, config: Optional[Dict]) -> Digraph:
+    def _create_digraph(self, table_chain: Dict, rankdir: str, config: Optional[Dict], sql_query: Optional[str] = None) -> Digraph:
         """Create and configure the Graphviz digraph."""
         # Merge configuration
         graph_config = self.default_config.copy()
@@ -208,16 +251,24 @@ class SQLLineageVisualizer:
         graph_attrs = graph_config['graph_attributes']
         dot.graph_attr.update(graph_attrs)
         
-        # Add title
+        # Add title with optional SQL query
         title = f"SQL Lineage Chain ({table_chain.get('chain_type', 'unknown').title()})"
         if table_chain.get('max_depth'):
             title += f" - Depth: {table_chain['max_depth']}"
         
+        # Include SQL query if provided
+        if sql_query:
+            # Clean and format the SQL query
+            cleaned_query = self._format_sql_for_display(sql_query)
+            full_label = f"SQL Query:\n{cleaned_query}\n\n{title}"
+        else:
+            full_label = title
+        
         dot.graph_attr.update({
-            'label': title,
+            'label': full_label,
             'labelloc': 't',
-            'fontsize': '16',
-            'fontname': 'Arial Bold'
+            'fontsize': '12',  # Reduced to accommodate longer text
+            'fontname': 'Arial'
         })
         
         return dot
@@ -237,7 +288,8 @@ class SQLLineageVisualizer:
         if not has_column_lineage:
             for table_name, table_info in chains.items():
                 node_style = self._get_node_style(table_name, node_config)
-                dot.node(table_name, table_name, **node_style)
+                display_name = self._get_display_name(table_name, table_chain)
+                dot.node(table_name, display_name, **node_style)
         
         # Add table-to-table edges
         for table_name, table_info in chains.items():
@@ -276,11 +328,12 @@ class SQLLineageVisualizer:
                 cluster_name = f"cluster_{table_name}"
                 with dot.subgraph(name=cluster_name) as table_subgraph:
                     # Configure subgraph for vertical column layout within horizontal table flow
+                    display_name = self._get_display_name(table_name, table_chain)
                     table_subgraph.attr(
                         style='filled,rounded',
                         fillcolor='#F8F9FA',
                         color='#6C757D',
-                        label=table_name,
+                        label=display_name,
                         fontname='Arial Bold',
                         fontsize='14',
                         labelloc='t',
@@ -385,6 +438,10 @@ class SQLLineageVisualizer:
         else:
             return "source_columns"
     
+    def _get_display_name(self, table_name: str, table_chain: Dict = None) -> str:
+        """Get appropriate display name for table."""
+        return table_name
+    
     def _get_node_style(self, table_name: str, node_config: Dict) -> Dict:
         """Get appropriate node style based on table type."""
         if table_name == 'QUERY_RESULT':
@@ -456,7 +513,8 @@ def create_lineage_visualization(table_chain_json: str,
                                output_path: str = "sql_lineage",
                                output_format: str = "png",
                                show_columns: bool = True,
-                               layout: str = "horizontal") -> str:
+                               layout: str = "horizontal",
+                               sql_query: Optional[str] = None) -> str:
     """
     Convenience function to create lineage visualization.
     
@@ -467,6 +525,7 @@ def create_lineage_visualization(table_chain_json: str,
         output_format: Output format ('png', 'svg', 'pdf', 'jpg', 'jpeg')
         show_columns: Whether to include column lineage
         layout: Layout direction ('vertical' or 'horizontal')
+        sql_query: Optional SQL query text to display at the top
         
     Returns:
         Path to generated visualization file
@@ -478,5 +537,6 @@ def create_lineage_visualization(table_chain_json: str,
         output_path=output_path,
         output_format=output_format,
         show_columns=show_columns,
-        layout=layout
+        layout=layout,
+        sql_query=sql_query
     )

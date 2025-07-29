@@ -113,23 +113,25 @@ def create_visualizations(analyzer, test_name):
                 table_json = analyzer.get_table_lineage_chain_json(sql, chain_type, 3)
                 column_json = analyzer.get_column_lineage_chain_json(sql, chain_type, 3)
                 
-                # Create table-only visualization
+                # Create table-only visualization (JPEG only)
                 table_output = visualizer.create_table_only_diagram(
                     table_chain_json=table_json,
                     output_path=f"{output_dir}/{test_name}_{query_name}_{chain_type}_table",
-                    output_format="png",
-                    layout="horizontal"
+                    output_format="jpeg",
+                    layout="horizontal",
+                    sql_query=sql
                 )
                 print(f"   ✅ {chain_type.title()} table diagram: {os.path.basename(table_output)}")
                 
-                # Create integrated table + column visualization
+                # Create integrated table + column visualization (JPEG only)
                 integrated_output = visualizer.create_lineage_diagram(
                     table_chain_json=table_json,
                     column_chain_json=column_json,
                     output_path=f"{output_dir}/{test_name}_{query_name}_{chain_type}_integrated",
-                    output_format="png",
+                    output_format="jpeg",
                     show_columns=True,
-                    layout="horizontal"
+                    layout="horizontal",
+                    sql_query=sql
                 )
                 print(f"   ✅ {chain_type.title()} integrated diagram: {os.path.basename(integrated_output)}")
                 
@@ -337,17 +339,21 @@ def test_complex_multi_cte():
     
     runner.assert_true(not result.has_errors(), "Query should not have errors")
     
-    # Check all CTEs exist
-    expected_ctes = ["order_stats", "customer_segments", "segment_summary"]
+    # Check remaining CTEs exist (segment_summary should be eliminated as pass-through)
+    expected_ctes = ["order_stats", "customer_segments"]
     for cte in expected_ctes:
         runner.assert_in(cte, result.table_lineage.upstream, f"Should have {cte} CTE")
+    
+    # Check that segment_summary was eliminated as a pass-through CTE
+    runner.assert_true("segment_summary" not in result.table_lineage.upstream, "segment_summary should be eliminated as pass-through CTE")
     
     # Check dependencies
     runner.assert_in("orders", result.table_lineage.upstream["order_stats"], "order_stats should depend on orders")
     runner.assert_in("users", result.table_lineage.upstream["customer_segments"], "customer_segments should depend on users")
     runner.assert_in("order_stats", result.table_lineage.upstream["customer_segments"], "customer_segments should depend on order_stats")
-    runner.assert_in("customer_segments", result.table_lineage.upstream["segment_summary"], "segment_summary should depend on customer_segments")
-    runner.assert_in("segment_summary", result.table_lineage.upstream["QUERY_RESULT"], "main query should depend on segment_summary")
+    
+    # QUERY_RESULT should now connect directly to customer_segments (skipping eliminated segment_summary)
+    runner.assert_in("customer_segments", result.table_lineage.upstream["QUERY_RESULT"], "main query should connect directly to customer_segments")
     
     print(f"✓ SQL: Complex multi-CTE query")
     print(f"✓ Found CTEs: {[cte for cte in expected_ctes if cte in result.table_lineage.upstream]}")
@@ -707,7 +713,13 @@ def main():
     global runner
     runner = SimpleTestRunner()
     
-    print_section_header("SQL Lineage Analyzer - Simple Tests")
+    print("🚀 SQL Lineage Simple Test Suite")
+    print("=" * 60)
+    
+    # Create output directory with absolute path
+    output_dir = os.path.join(os.path.dirname(__file__), "output")
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"📁 Output directory: {output_dir}")
     
     # Collect JSON outputs for key test queries
     analyzer = SQLLineageAnalyzer(dialect="trino")
@@ -835,6 +847,77 @@ def main():
     
     # Create visualizations for key queries
     create_visualizations(analyzer, "simple_test")
+    
+    print("\n🎉 All simple tests completed!")
+    print(f"\n📁 Check the '{output_dir}' directory for generated files.")
+    
+    # List generated files with better organization
+    if os.path.exists(output_dir):
+        files = [f for f in os.listdir(output_dir) if f.endswith(('.jpeg', '.json'))]
+        if files:
+            print(f"\n📄 Generated files ({len(files)}):")
+            
+            # Categorize files
+            visualization_files = [f for f in files if f.endswith('.jpeg')]
+            json_files = [f for f in files if f.endswith('.json')]
+            
+            # Further categorize visualization files
+            table_diagrams = [f for f in visualization_files if 'table' in f and 'integrated' not in f]
+            integrated_diagrams = [f for f in visualization_files if 'integrated' in f]
+            other_visualizations = [f for f in visualization_files if f not in table_diagrams and f not in integrated_diagrams]
+            
+            if integrated_diagrams:
+                print(f"\n   🎨 Integrated Column+Table Diagrams ({len(integrated_diagrams)}):")
+                for file in sorted(integrated_diagrams):
+                    file_path = os.path.join(output_dir, file)
+                    size = os.path.getsize(file_path)
+                    print(f"     • {file} ({size:,} bytes)")
+            
+            if table_diagrams:
+                print(f"\n   📊 Table-Only Diagrams ({len(table_diagrams)}):")
+                for file in sorted(table_diagrams)[:5]:  # Show first 5
+                    file_path = os.path.join(output_dir, file)
+                    size = os.path.getsize(file_path)
+                    print(f"     • {file} ({size:,} bytes)")
+                if len(table_diagrams) > 5:
+                    print(f"     ... and {len(table_diagrams) - 5} more table diagrams")
+            
+            if other_visualizations:
+                print(f"\n   🔧 Other Visualization Files ({len(other_visualizations)}):")
+                for file in sorted(other_visualizations)[:3]:  # Show first 3
+                    file_path = os.path.join(output_dir, file)
+                    size = os.path.getsize(file_path)
+                    print(f"     • {file} ({size:,} bytes)")
+                if len(other_visualizations) > 3:
+                    print(f"     ... and {len(other_visualizations) - 3} more files")
+            
+            if json_files:
+                print(f"\n   📋 JSON Data Files ({len(json_files)}):")
+                chain_json_files = [f for f in json_files if 'chain' in f]
+                regular_json_files = [f for f in json_files if 'chain' not in f]
+                
+                if regular_json_files:
+                    print(f"     📊 Analysis Results ({len(regular_json_files)}):")
+                    for file in sorted(regular_json_files)[:3]:
+                        file_path = os.path.join(output_dir, file)
+                        size = os.path.getsize(file_path)
+                        print(f"       • {file} ({size:,} bytes)")
+                    if len(regular_json_files) > 3:
+                        print(f"       ... and {len(regular_json_files) - 3} more analysis files")
+                
+                if chain_json_files:
+                    print(f"     🔗 Lineage Chain Data ({len(chain_json_files)}):")
+                    for file in sorted(chain_json_files)[:5]:
+                        file_path = os.path.join(output_dir, file)
+                        size = os.path.getsize(file_path)
+                        print(f"       • {file} ({size:,} bytes)")
+                    if len(chain_json_files) > 5:
+                        print(f"       ... and {len(chain_json_files) - 5} more chain files")
+            
+            print(f"\n✨ Simple tests demonstrate core lineage functionality with")
+            print(f"   comprehensive SQL pattern coverage and query-contextualized visualizations!")
+        else:
+            print("\n⚠️  No files were generated")
     
     # Print final summary
     runner.print_summary()

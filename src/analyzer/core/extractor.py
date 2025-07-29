@@ -27,6 +27,12 @@ class LineageExtractor:
             cte_name = cte.alias
             cte_mapping[cte_name] = cte
         
+        # Check if we should skip any CTEs that are simple pass-throughs
+        ctes_to_skip = self._identify_passthrough_ctes(expression, cte_mapping)
+        
+        # Track dependencies of skipped CTEs so we can use them later
+        skipped_cte_dependencies = {}
+        
         # Process CTEs in order (they can reference earlier CTEs)
         processed_ctes = {}
         for cte in expression.find_all(exp.CTE):
@@ -35,6 +41,11 @@ class LineageExtractor:
             # Find source tables in this CTE, allowing references to previous CTEs
             source_tables = self._get_source_tables_from_node(cte.this, alias_mappings, processed_ctes, cte_name)
             
+            # If this CTE should be skipped, store its dependencies but don't add to lineage
+            if cte_name in ctes_to_skip:
+                skipped_cte_dependencies[cte_name] = source_tables
+                processed_ctes[cte_name] = cte
+                continue
             
             # Always create an entry for this CTE, even if it has no sources
             if not source_tables:
@@ -54,7 +65,13 @@ class LineageExtractor:
             source_tables = self._get_source_tables_from_node(expression, alias_mappings, cte_mapping)
             
             for source in source_tables:
-                lineage.add_dependency(target_name, source)
+                # If this source is a skipped CTE, replace it with its dependencies
+                if source in ctes_to_skip and source in skipped_cte_dependencies:
+                    # Add the dependencies of the skipped CTE instead
+                    for skipped_cte_dependency in skipped_cte_dependencies[source]:
+                        lineage.add_dependency(target_name, skipped_cte_dependency)
+                else:
+                    lineage.add_dependency(target_name, source)
         
         # Handle UNION queries
         elif isinstance(expression, exp.Union):
@@ -62,7 +79,13 @@ class LineageExtractor:
             source_tables = self._get_source_tables_from_node(expression, alias_mappings, cte_mapping)
             
             for source in source_tables:
-                lineage.add_dependency(target_name, source)
+                # If this source is a skipped CTE, replace it with its dependencies
+                if source in ctes_to_skip and source in skipped_cte_dependencies:
+                    # Add the dependencies of the skipped CTE instead
+                    for skipped_cte_dependency in skipped_cte_dependencies[source]:
+                        lineage.add_dependency(target_name, skipped_cte_dependency)
+                else:
+                    lineage.add_dependency(target_name, source)
         
         # Handle CREATE TABLE AS SELECT
         elif isinstance(expression, exp.Create):
@@ -74,7 +97,13 @@ class LineageExtractor:
                 for select in expression.find_all(exp.Select):
                     source_tables = self._get_source_tables_from_node(select, alias_mappings, cte_mapping)
                     for source in source_tables:
-                        lineage.add_dependency(target_name, source)
+                        # If this source is a skipped CTE, replace it with its dependencies
+                        if source in ctes_to_skip and source in skipped_cte_dependencies:
+                            # Add the dependencies of the skipped CTE instead
+                            for skipped_cte_dependency in skipped_cte_dependencies[source]:
+                                lineage.add_dependency(target_name, skipped_cte_dependency)
+                        else:
+                            lineage.add_dependency(target_name, source)
         
         return lineage
     
@@ -83,11 +112,22 @@ class LineageExtractor:
         lineage = ColumnLineage()
         alias_mappings = self._extract_table_alias_mappings(expression)
         
-        # Process CTEs
+        # First, collect all CTE names
         cte_mapping = {}
         for cte in expression.find_all(exp.CTE):
             cte_name = cte.alias
             cte_mapping[cte_name] = cte
+        
+        # Check if we should skip any CTEs that are simple pass-throughs
+        ctes_to_skip = self._identify_passthrough_ctes(expression, cte_mapping)
+        
+        # Process CTEs (skip the ones identified as pass-throughs)
+        for cte in expression.find_all(exp.CTE):
+            cte_name = cte.alias
+            
+            # Skip this CTE if it's a simple pass-through to the main query
+            if cte_name in ctes_to_skip:
+                continue
             
             self._process_select_for_column_lineage(
                 cte, lineage, alias_mappings, target_prefix=cte_name
@@ -345,3 +385,90 @@ class LineageExtractor:
             return f"{table_ref}.{column_name}"
         
         return column_ref
+    
+    def _is_simple_cte_select(self, select_node: Expression, cte_name: str) -> bool:
+        """
+        Check if this is a simple "SELECT * FROM cte_name" or similar simple case.
+        
+        Args:
+            select_node: The SELECT expression node
+            cte_name: The CTE name to check against
+            
+        Returns:
+            True if this is a simple select from the single CTE
+        """
+        try:
+            # Check if the FROM clause references only the CTE
+            from_clause = select_node.find(exp.From)
+            if not from_clause:
+                return False
+            
+            # Get the table referenced in FROM
+            table_ref = from_clause.this
+            if not table_ref:
+                return False
+            
+            # Clean the table name
+            table_name = str(table_ref)
+            clean_name = self._clean_table_reference(table_name)
+            
+            # Check if it's referencing our CTE and nothing else complex
+            return (clean_name == cte_name and 
+                    not select_node.find(exp.Join) and  # No JOINs
+                    not select_node.find(exp.Where) and # No complex WHERE
+                    not select_node.find(exp.Group))    # No GROUP BY
+        
+        except Exception:
+            # If we can't determine, err on the side of caution
+            return False
+    
+
+    def _identify_passthrough_ctes(self, expression: Expression, cte_mapping: Dict[str, Expression]) -> Set[str]:
+        """
+        Identify CTEs that are simple pass-throughs to the main query and should be skipped.
+        
+        Args:
+            expression: The main SQL expression
+            cte_mapping: Dictionary mapping CTE names to their expressions
+            
+        Returns:
+            Set of CTE names that should be skipped from lineage
+        """
+        ctes_to_skip = set()
+        
+        try:
+            if not isinstance(expression, exp.Select):
+                return ctes_to_skip
+            
+            # Convert to string and analyze the pattern
+            sql_str = str(expression).strip()
+            
+            # Look for the pattern: WITH ... ) SELECT ... FROM cte_name
+            # We want to identify when the main SELECT is just "SELECT * FROM cte_name" (possibly with ORDER BY)
+            
+            # Find the last ) before SELECT to identify where CTEs end and main query begins
+            import re
+            
+            # Pattern to match: WITH ... ) SELECT ... FROM table_name
+            # We're looking for the main SELECT after all CTEs
+            cte_pattern = r'WITH\s+.*?\)\s*(SELECT\s+.*)'
+            match = re.search(cte_pattern, sql_str, re.IGNORECASE | re.DOTALL)
+            
+            if match:
+                main_query_part = match.group(1).strip()
+                
+                # Check if this is a simple "SELECT * FROM cte_name" possibly with ORDER BY
+                simple_pattern = r'SELECT\s+\*\s+FROM\s+(\w+)(?:\s+ORDER\s+BY\s+.*)?$'
+                simple_match = re.match(simple_pattern, main_query_part, re.IGNORECASE | re.DOTALL)
+                
+                if simple_match:
+                    cte_name = simple_match.group(1)
+                    
+                    if cte_name in cte_mapping:
+                        ctes_to_skip.add(cte_name)
+                
+        except Exception:
+            # If we can't determine, err on the side of caution and don't skip
+            pass
+            
+        return ctes_to_skip

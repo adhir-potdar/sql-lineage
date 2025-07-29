@@ -65,49 +65,50 @@ def test_basic_visualization():
     # Create visualizer
     visualizer = SQLLineageVisualizer()
     
-    # Test comprehensive format generation for table and column chains
-    formats = ['png', 'jpeg', 'pdf']
+    # Test comprehensive JPEG generation for table and column chains
     chain_types = ['upstream', 'downstream']
     lineage_types = ['table', 'column', 'combined']
     
     for chain_type in chain_types:
         for lineage_type in lineage_types:
-            for fmt in formats:
-                print(f"\n📊 Creating {chain_type} {lineage_type} chain visualization ({fmt.upper()})...")
-                try:
-                    if lineage_type == 'table':
-                        # Table-only visualization
-                        chain_json = analyzer.get_table_lineage_chain_json(sql, chain_type, 3)
-                        output_file = visualizer.create_table_only_diagram(
-                            table_chain_json=chain_json,
-                            output_path=os.path.join(output_dir, f"{chain_type}_table_lineage_{fmt}"),
-                            output_format=fmt
-                        )
-                    elif lineage_type == 'column':
-                        # Column-focused visualization
-                        table_chain_json = analyzer.get_table_lineage_chain_json(sql, chain_type, 3)
-                        column_chain_json = analyzer.get_column_lineage_chain_json(sql, chain_type, 3)
-                        output_file = visualizer.create_column_focused_diagram(
-                            table_chain_json=table_chain_json,
-                            column_chain_json=column_chain_json,
-                            output_path=os.path.join(output_dir, f"{chain_type}_column_lineage_{fmt}"),
-                            output_format=fmt
-                        )
-                    else:  # combined
-                        # Combined table + column visualization
-                        table_chain_json = analyzer.get_table_lineage_chain_json(sql, chain_type, 3)
-                        column_chain_json = analyzer.get_column_lineage_chain_json(sql, chain_type, 3)
-                        output_file = visualizer.create_lineage_diagram(
-                            table_chain_json=table_chain_json,
-                            column_chain_json=column_chain_json,
-                            output_path=os.path.join(output_dir, f"{chain_type}_combined_lineage_{fmt}"),
-                            output_format=fmt,
-                            show_columns=True
-                        )
-                    
-                    print(f"✅ Created {chain_type} {lineage_type} {fmt.upper()}: {output_file}")
-                except Exception as e:
-                    print(f"❌ Failed to create {chain_type} {lineage_type} {fmt.upper()}: {e}")
+            print(f"\n📊 Creating {chain_type} {lineage_type} chain visualization (JPEG)...")
+            try:
+                if lineage_type == 'table':
+                    # Table-only visualization
+                    chain_json = analyzer.get_table_lineage_chain_json(sql, chain_type, 3)
+                    output_file = visualizer.create_table_only_diagram(
+                        table_chain_json=chain_json,
+                        output_path=os.path.join(output_dir, f"{chain_type}_table_lineage_jpeg"),
+                        output_format="jpeg",
+                        sql_query=sql
+                    )
+                elif lineage_type == 'column':
+                    # Column-focused visualization
+                    table_chain_json = analyzer.get_table_lineage_chain_json(sql, chain_type, 3)
+                    column_chain_json = analyzer.get_column_lineage_chain_json(sql, chain_type, 3)
+                    output_file = visualizer.create_column_focused_diagram(
+                        table_chain_json=table_chain_json,
+                        column_chain_json=column_chain_json,
+                        output_path=os.path.join(output_dir, f"{chain_type}_column_lineage_jpeg"),
+                        output_format="jpeg",
+                        sql_query=sql
+                    )
+                else:  # combined
+                    # Combined table + column visualization
+                    table_chain_json = analyzer.get_table_lineage_chain_json(sql, chain_type, 3)
+                    column_chain_json = analyzer.get_column_lineage_chain_json(sql, chain_type, 3)
+                    output_file = visualizer.create_lineage_diagram(
+                        table_chain_json=table_chain_json,
+                        column_chain_json=column_chain_json,
+                        output_path=os.path.join(output_dir, f"{chain_type}_combined_lineage_jpeg"),
+                        output_format="jpeg",
+                        show_columns=True,
+                        sql_query=sql
+                    )
+                
+                print(f"✅ Created {chain_type} {lineage_type} JPEG: {output_file}")
+            except Exception as e:
+                print(f"❌ Failed to create {chain_type} {lineage_type} JPEG: {e}")
     
     # Test convenience function
     print("\n📊 Testing convenience function...")
@@ -117,8 +118,9 @@ def test_basic_visualization():
         output_file = create_lineage_visualization(
             table_chain_json=upstream_table_json,
             output_path=os.path.join(output_dir, "convenience_test"),
-            output_format="svg",
-            show_columns=False
+            output_format="jpeg",
+            show_columns=False,
+            sql_query=sql
         )
         print(f"✅ Created diagram using convenience function: {output_file}")
     except Exception as e:
@@ -133,8 +135,9 @@ def test_basic_visualization():
         horizontal_file = visualizer.create_table_only_diagram(
             table_chain_json=upstream_table_json,
             output_path=os.path.join(output_dir, "layout_horizontal"),
-            output_format="png",
-            layout="horizontal"
+            output_format="jpeg",
+            layout="horizontal",
+            sql_query=sql
         )
         print(f"✅ Created horizontal layout: {horizontal_file}")
         
@@ -142,8 +145,9 @@ def test_basic_visualization():
         vertical_file = visualizer.create_table_only_diagram(
             table_chain_json=upstream_table_json,
             output_path=os.path.join(output_dir, "layout_vertical"),
-            output_format="png",
-            layout="vertical"
+            output_format="jpeg",
+            layout="vertical",
+            sql_query=sql
         )
         print(f"✅ Created vertical layout: {vertical_file}")
         
@@ -161,9 +165,10 @@ def test_basic_visualization():
             table_chain_json=upstream_table_json,
             column_chain_json=upstream_column_json,
             output_path=os.path.join(output_dir, "integrated_column_lineage"),
-            output_format="png",
+            output_format="jpeg",
             show_columns=True,
-            layout="horizontal"
+            layout="horizontal",
+            sql_query=sql
         )
         print(f"✅ Created integrated column lineage: {integrated_file}")
         
@@ -248,27 +253,17 @@ def test_basic_visualization():
             table_json = analyzer.get_table_lineage_chain_json(test_sql, "upstream", 3)
             column_json = analyzer.get_column_lineage_chain_json(test_sql, "upstream", 3)
             
-            # Create combined column lineage diagram (like the sample image)
+            # Create combined column lineage diagram (like the sample image) - JPEG only
             combined_output = visualizer.create_lineage_diagram(
                 table_chain_json=table_json,
                 column_chain_json=column_json,
                 output_path=os.path.join(output_dir, f"combined_column_lineage_{query_name}"),
-                output_format="png",
+                output_format="jpeg",
                 show_columns=True,  # This creates the integrated column+table view
-                layout="horizontal"  # Tables flow horizontally, columns vertically within tables
+                layout="horizontal",  # Tables flow horizontally, columns vertically within tables
+                sql_query=test_sql
             )
             print(f"   ✅ Created combined column lineage: {os.path.basename(combined_output)}")
-            
-            # Also create SVG version for better quality
-            svg_output = visualizer.create_lineage_diagram(
-                table_chain_json=table_json,
-                column_chain_json=column_json,
-                output_path=os.path.join(output_dir, f"combined_column_lineage_{query_name}"),
-                output_format="svg",
-                show_columns=True,
-                layout="horizontal"
-            )
-            print(f"   ✅ Created SVG version: {os.path.basename(svg_output)}")
             
         except Exception as e:
             print(f"   ❌ Failed to create {query_name}: {e}")
@@ -330,8 +325,9 @@ def test_custom_styling():
         output_file = visualizer.create_table_only_diagram(
             table_chain_json=upstream_table_json,
             output_path=os.path.join(output_dir, "custom_styled_lineage"),
-            output_format="png",
-            config=custom_config
+            output_format="jpeg",
+            config=custom_config,
+            sql_query=sql
         )
         print(f"✅ Created custom styled diagram: {output_file}")
     except Exception as e:
@@ -356,18 +352,17 @@ def test_different_formats():
     visualizer = SQLLineageVisualizer()
     upstream_table_json = analyzer.get_table_lineage_chain_json(sql, "upstream", 2)
     
-    formats = ['png', 'svg', 'pdf', 'jpg']
-    
-    for fmt in formats:
-        try:
-            output_file = visualizer.create_table_only_diagram(
-                table_chain_json=upstream_table_json,
-                output_path=os.path.join(output_dir, f"format_test_{fmt}"),
-                output_format=fmt
-            )
-            print(f"✅ Created {fmt.upper()} format: {output_file}")
-        except Exception as e:
-            print(f"❌ Failed to create {fmt.upper()} format: {e}")
+    # Test only JPEG format now
+    try:
+        output_file = visualizer.create_table_only_diagram(
+            table_chain_json=upstream_table_json,
+            output_path=os.path.join(output_dir, "format_test_jpeg"),
+            output_format="jpeg",
+            sql_query=sql
+        )
+        print(f"✅ Created JPEG format: {output_file}")
+    except Exception as e:
+        print(f"❌ Failed to create JPEG format: {e}")
 
 
 def main():
@@ -398,7 +393,7 @@ def main():
         
         # List generated files with categories
         if os.path.exists(output_dir):
-            files = [f for f in os.listdir(output_dir) if f.endswith(('.png', '.svg', '.pdf', '.jpg', '.jpeg'))]
+            files = [f for f in os.listdir(output_dir) if f.endswith('.jpeg')]
             if files:
                 print(f"\n📄 Generated files ({len(files)}):")
                 
@@ -432,9 +427,9 @@ def main():
                     if len(other_files) > 3:
                         print(f"     ... and {len(other_files) - 3} more files")
                 
-                print(f"\n✨ **NEW**: Combined column lineage diagrams show tables horizontally")
-                print(f"   with columns listed vertically within each table container,")
-                print(f"   exactly like the sample image you provided!")
+                print(f"\n✨ **ENHANCED**: Combined column lineage diagrams show SQL query context")
+                print(f"   at the top, with clear distinction between CTEs, source tables, and")
+                print(f"   'Final Query Result' for complete lineage traceability!")
             else:
                 print("\n⚠️  No visualization files were generated")
         
