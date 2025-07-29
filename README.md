@@ -121,6 +121,15 @@ class SQLLineageAnalyzer:
     def analyze_multiple(self, queries: List[str]) -> List[LineageResult]
     def set_metadata_registry(self, registry: MetadataRegistry) -> None
     def add_metadata_provider(self, provider: MetadataProvider) -> None
+    
+    # JSON output methods
+    def get_lineage_json(self, sql: str) -> str
+    
+    # Lineage chain methods
+    def get_table_lineage_chain(self, sql: str, chain_type: str, depth: int) -> Dict
+    def get_table_lineage_chain_json(self, sql: str, chain_type: str, depth: int) -> str
+    def get_column_lineage_chain(self, sql: str, chain_type: str, depth: int) -> Dict
+    def get_column_lineage_chain_json(self, sql: str, chain_type: str, depth: int) -> str
 ```
 
 ### LineageResult
@@ -139,6 +148,41 @@ class LineageResult:
     def has_warnings(self) -> bool
     def to_dict(self) -> Dict[str, Any]
 ```
+
+### JSON Output
+
+Get complete lineage analysis as JSON:
+
+```python
+# Get JSON representation of lineage result
+json_output = analyzer.get_lineage_json(sql)
+
+# Contains table_lineage, column_lineage, metadata, etc.
+# Useful for storing results or API responses
+```
+
+### Lineage Chains
+
+Build hierarchical dependency chains with configurable depth:
+
+```python
+# Table lineage chains
+upstream_chain = analyzer.get_table_lineage_chain(sql, "upstream", depth=3)
+downstream_chain = analyzer.get_table_lineage_chain(sql, "downstream", depth=2)
+
+# Column lineage chains  
+column_chain = analyzer.get_column_lineage_chain(sql, "upstream", depth=2)
+
+# JSON representation
+chain_json = analyzer.get_table_lineage_chain_json(sql, "upstream", depth=4)
+column_json = analyzer.get_column_lineage_chain_json(sql, "upstream", depth=3)
+```
+
+**Chain Features:**
+- **Configurable Direction**: `upstream` or `downstream` 
+- **Depth Control**: Limit traversal depth (1-N levels)
+- **Cycle Prevention**: Handles circular dependencies
+- **JSON Export**: Complete serialization for storage/analysis
 
 ## Testing
 
