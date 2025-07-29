@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from analyzer import SQLLineageAnalyzer
 from analyzer.metadata import SampleMetadataRegistry
 from analyzer.formatters import ConsoleFormatter
+from analyzer.visualization import SQLLineageVisualizer
 from test_formatter import print_lineage_analysis, print_section_header, print_subsection_header, print_test_summary
 
 
@@ -46,6 +47,159 @@ def save_chain_outputs(chain_outputs, test_name):
             print(f"📁 Saved {lineage_type} chain JSON to: {filename}")
         except Exception as e:
             print(f"❌ Failed to save {lineage_type} chain {filename}: {e}")
+
+def create_visualizations(analyzer, test_name):
+    """Create visualization outputs for key sample queries."""
+    try:
+        visualizer = SQLLineageVisualizer()
+    except ImportError as e:
+        print(f"⚠️  Visualization not available: {e}")
+        return
+    
+    output_dir = "output"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Key sample queries for visualization
+    visualization_queries = [
+        ("sample1_complex_cte", """
+        WITH order_summary AS (
+            SELECT 
+                customer_id,
+                COUNT(*) as total_orders,
+                SUM(order_total) as total_spent,
+                AVG(order_total) as avg_order_value
+            FROM orders 
+            WHERE order_date >= '2023-01-01'
+            GROUP BY customer_id
+        ),
+        customer_tiers AS (
+            SELECT 
+                os.customer_id,
+                u.name as customer_name,
+                os.total_orders,
+                os.total_spent,
+                os.avg_order_value,
+                CASE 
+                    WHEN os.total_spent > 5000 THEN 'Platinum'
+                    WHEN os.total_spent > 2000 THEN 'Gold'
+                    WHEN os.total_spent > 500 THEN 'Silver'
+                    ELSE 'Bronze'
+                END as tier
+            FROM order_summary os
+            JOIN users u ON os.customer_id = u.id
+            WHERE u.active = true
+        ),
+        tier_analytics AS (
+            SELECT 
+                tier,
+                COUNT(*) as customer_count,
+                AVG(total_spent) as avg_lifetime_value,
+                MIN(total_spent) as min_spent,
+                MAX(total_spent) as max_spent
+            FROM customer_tiers
+            GROUP BY tier
+        )
+        SELECT 
+            ta.tier,
+            ta.customer_count,
+            ta.avg_lifetime_value,
+            ROUND(ta.customer_count * 100.0 / SUM(ta.customer_count) OVER (), 2) as percentage
+        FROM tier_analytics ta
+        ORDER BY ta.avg_lifetime_value DESC
+        """),
+        ("sample4_complex_multi_cte_union", """
+        WITH regional_sales AS (
+            SELECT 
+                u.region,
+                DATE_TRUNC('month', o.order_date) as month,
+                SUM(o.order_total) as monthly_sales,
+                COUNT(DISTINCT o.customer_id) as unique_customers
+            FROM orders o
+            JOIN users u ON o.customer_id = u.id
+            WHERE o.order_date >= '2023-01-01'
+            GROUP BY u.region, DATE_TRUNC('month', o.order_date)
+        ),
+        product_performance AS (
+            SELECT 
+                p.category,
+                p.name as product_name,
+                SUM(oi.quantity * oi.price) as product_revenue,
+                COUNT(DISTINCT oi.order_id) as order_frequency
+            FROM order_items oi
+            JOIN products p ON oi.product_id = p.id
+            JOIN orders o ON oi.order_id = o.id
+            WHERE o.order_date >= '2023-01-01'
+            GROUP BY p.category, p.name
+        ),
+        combined_metrics AS (
+            SELECT 
+                'Regional' as metric_type,
+                region as dimension,
+                month as time_period,
+                monthly_sales as value,
+                unique_customers as secondary_metric
+            FROM regional_sales
+            
+            UNION ALL
+            
+            SELECT 
+                'Product' as metric_type,
+                category as dimension,
+                DATE_TRUNC('month', CURRENT_DATE) as time_period,
+                product_revenue as value,
+                order_frequency as secondary_metric
+            FROM product_performance
+            WHERE product_revenue > 1000
+        )
+        SELECT 
+            metric_type,
+            dimension,
+            time_period,
+            SUM(value) as total_value,
+            AVG(secondary_metric) as avg_secondary
+        FROM combined_metrics
+        GROUP BY metric_type, dimension, time_period
+        ORDER BY total_value DESC
+        """)
+    ]
+    
+    print_section_header("Creating Sample Visualizations", 50)
+    
+    for query_name, sql in visualization_queries:
+        print(f"\n📊 Creating visualizations for {query_name}...")
+        
+        try:
+            # Create visualizations for both upstream and downstream
+            for chain_type in ["upstream", "downstream"]:
+                # Get chain data with depth 4 for complex samples
+                table_json = analyzer.get_table_lineage_chain_json(sql, chain_type, 4)
+                column_json = analyzer.get_column_lineage_chain_json(sql, chain_type, 3)
+                
+                # Create table-only visualization
+                table_output = visualizer.create_table_only_diagram(
+                    table_chain_json=table_json,
+                    output_path=f"{output_dir}/{test_name}_{query_name}_{chain_type}_table",
+                    output_format="png",
+                    layout="horizontal"
+                )
+                print(f"   ✅ {chain_type.title()} table diagram: {os.path.basename(table_output)}")
+                
+                # Create integrated table + column visualization
+                integrated_output = visualizer.create_lineage_diagram(
+                    table_chain_json=table_json,
+                    column_chain_json=column_json,
+                    output_path=f"{output_dir}/{test_name}_{query_name}_{chain_type}_integrated",
+                    output_format="png",
+                    show_columns=True,
+                    layout="horizontal"
+                )
+                print(f"   ✅ {chain_type.title()} integrated diagram: {os.path.basename(integrated_output)}")
+                
+        except Exception as e:
+            print(f"   ❌ Failed to create visualizations for {query_name}: {e}")
+    
+    print("\n🎨 Sample visualization creation completed!")
 
 
 def analyze_and_display(analyzer, sql, title, show_details=True, show_column_lineage=True):
@@ -839,6 +993,9 @@ def main():
     # Save chain outputs to files
     if chain_outputs:
         save_chain_outputs(chain_outputs, "sample_test")
+    
+    # Create visualizations for key sample queries
+    create_visualizations(analyzer, "sample_test")
     
     # Summary
     passed = sum(results)

@@ -9,6 +9,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from analyzer import SQLLineageAnalyzer
 from analyzer.metadata import SampleMetadataRegistry
+from analyzer.visualization import SQLLineageVisualizer
 from test_formatter import print_quick_result, print_section_header, print_test_summary, print_lineage_analysis
 
 
@@ -43,6 +44,88 @@ def save_chain_outputs(chain_outputs, test_name):
             print(f"📁 Saved {lineage_type} chain JSON to: {filename}")
         except Exception as e:
             print(f"❌ Failed to save {lineage_type} chain {filename}: {e}")
+
+def create_visualizations(analyzer, test_name):
+    """Create visualization outputs for key test queries."""
+    try:
+        from analyzer.visualization import SQLLineageVisualizer
+        visualizer = SQLLineageVisualizer()
+    except ImportError as e:
+        print(f"⚠️  Visualization not available: {e}")
+        return
+    
+    output_dir = "output"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Key queries for visualization
+    visualization_queries = [
+        ("cte_query", """
+        WITH active_users AS (SELECT id, name FROM users WHERE active = true)
+        SELECT * FROM active_users WHERE name LIKE 'A%'
+        """),
+        ("complex_multi_cte_query", """
+        WITH order_stats AS (
+            SELECT customer_id, COUNT(*) as orders, SUM(total) as spent
+            FROM orders WHERE order_date >= '2023-01-01'
+            GROUP BY customer_id
+        ),
+        customer_tiers AS (
+            SELECT 
+                os.customer_id,
+                os.orders,
+                os.spent,
+                CASE WHEN os.spent > 1000 THEN 'Premium' ELSE 'Standard' END as tier
+            FROM order_stats os
+        ),
+        tier_summary AS (
+            SELECT tier, COUNT(*) as customer_count, AVG(spent) as avg_spent
+            FROM customer_tiers
+            GROUP BY tier
+        )
+        SELECT ts.tier, ts.customer_count, ts.avg_spent, u.name
+        FROM tier_summary ts
+        JOIN customer_tiers ct ON ts.tier = ct.tier
+        JOIN users u ON ct.customer_id = u.id
+        """)
+    ]
+    
+    print_section_header("Creating Visualizations", 50)
+    
+    for query_name, sql in visualization_queries:
+        print(f"\n📊 Creating visualizations for {query_name}...")
+        
+        try:
+            # Create visualizations for both upstream and downstream with depth 3
+            for chain_type in ["upstream", "downstream"]:
+                # Get chain data
+                table_json = analyzer.get_table_lineage_chain_json(sql, chain_type, 3)
+                column_json = analyzer.get_column_lineage_chain_json(sql, chain_type, 3)
+                
+                # Create table-only visualization
+                table_output = visualizer.create_table_only_diagram(
+                    table_chain_json=table_json,
+                    output_path=f"{output_dir}/{test_name}_{query_name}_{chain_type}_table",
+                    output_format="png",
+                    layout="horizontal"
+                )
+                print(f"   ✅ {chain_type.title()} table diagram: {os.path.basename(table_output)}")
+                
+                # Create integrated table + column visualization
+                integrated_output = visualizer.create_lineage_diagram(
+                    table_chain_json=table_json,
+                    column_chain_json=column_json,
+                    output_path=f"{output_dir}/{test_name}_{query_name}_{chain_type}_integrated",
+                    output_format="png",
+                    show_columns=True,
+                    layout="horizontal"
+                )
+                print(f"   ✅ {chain_type.title()} integrated diagram: {os.path.basename(integrated_output)}")
+                
+        except Exception as e:
+            print(f"   ❌ Failed to create visualizations for {query_name}: {e}")
+    
+    print("\n🎨 Visualization creation completed!")
 
 
 def quick_test():
@@ -149,6 +232,9 @@ def quick_test():
     # Save JSON outputs to files
     save_json_outputs(json_outputs, "quick_test")
     save_chain_outputs(chain_outputs, "quick_test")
+    
+    # Create visualizations for key queries
+    create_visualizations(analyzer, "quick_test")
     
     print("\n🎉 All quick tests passed!")
     return True

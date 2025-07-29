@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from analyzer import SQLLineageAnalyzer
 from analyzer.metadata import SampleMetadataRegistry
 from analyzer.formatters import ConsoleFormatter, JSONFormatter
+from analyzer.visualization import SQLLineageVisualizer
 from test_formatter import print_lineage_analysis, print_test_summary, print_section_header
 
 
@@ -45,6 +46,97 @@ def save_chain_outputs(chain_outputs, test_name):
             print(f"📁 Saved {lineage_type} chain JSON to: {filename}")
         except Exception as e:
             print(f"❌ Failed to save {lineage_type} chain {filename}: {e}")
+
+def create_visualizations(analyzer, test_name):
+    """Create visualization outputs for key test queries."""
+    try:
+        visualizer = SQLLineageVisualizer()
+    except ImportError as e:
+        print(f"⚠️  Visualization not available: {e}")
+        return
+    
+    output_dir = "output"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Key queries for visualization
+    visualization_queries = [
+        ("simple_cte", """
+        WITH active_users AS (
+            SELECT id, name, email FROM users WHERE active = true
+        )
+        SELECT * FROM active_users WHERE email LIKE '%@company.com'
+        """),
+        ("complex_multi_cte", """
+        WITH sales_data AS (
+            SELECT 
+                customer_id,
+                product_id,
+                SUM(quantity * price) AS total_sales,
+                COUNT(*) AS order_count
+            FROM orders o
+            JOIN order_items oi ON o.id = oi.order_id
+            GROUP BY customer_id, product_id
+        ),
+        customer_summary AS (
+            SELECT 
+                sd.customer_id,
+                u.name AS customer_name,
+                SUM(sd.total_sales) AS lifetime_value,
+                COUNT(DISTINCT sd.product_id) AS unique_products
+            FROM sales_data sd
+            JOIN users u ON sd.customer_id = u.id
+            GROUP BY sd.customer_id, u.name
+        ),
+        top_customers AS (
+            SELECT 
+                customer_name,
+                lifetime_value,
+                unique_products,
+                RANK() OVER (ORDER BY lifetime_value DESC) AS customer_rank
+            FROM customer_summary
+            WHERE lifetime_value > 1000
+        )
+        SELECT * FROM top_customers WHERE customer_rank <= 10
+        """)
+    ]
+    
+    print_section_header("Creating Visualizations", 50)
+    
+    for query_name, sql in visualization_queries:
+        print(f"\n📊 Creating visualizations for {query_name}...")
+        
+        try:
+            # Create visualizations for both upstream and downstream
+            for chain_type in ["upstream", "downstream"]:
+                # Get chain data with depth 3
+                table_json = analyzer.get_table_lineage_chain_json(sql, chain_type, 3)
+                column_json = analyzer.get_column_lineage_chain_json(sql, chain_type, 3)
+                
+                # Create table-only visualization
+                table_output = visualizer.create_table_only_diagram(
+                    table_chain_json=table_json,
+                    output_path=f"{output_dir}/{test_name}_{query_name}_{chain_type}_table",
+                    output_format="png",
+                    layout="horizontal"
+                )
+                print(f"   ✅ {chain_type.title()} table diagram: {os.path.basename(table_output)}")
+                
+                # Create integrated table + column visualization
+                integrated_output = visualizer.create_lineage_diagram(
+                    table_chain_json=table_json,
+                    column_chain_json=column_json,
+                    output_path=f"{output_dir}/{test_name}_{query_name}_{chain_type}_integrated",
+                    output_format="png",
+                    show_columns=True,
+                    layout="horizontal"
+                )
+                print(f"   ✅ {chain_type.title()} integrated diagram: {os.path.basename(integrated_output)}")
+                
+        except Exception as e:
+            print(f"   ❌ Failed to create visualizations for {query_name}: {e}")
+    
+    print("\n🎨 Visualization creation completed!")
 
 
 class SimpleTestRunner:
@@ -740,6 +832,9 @@ def main():
     # Save chain outputs to files
     if chain_outputs:
         save_chain_outputs(chain_outputs, "simple_test")
+    
+    # Create visualizations for key queries
+    create_visualizations(analyzer, "simple_test")
     
     # Print final summary
     runner.print_summary()

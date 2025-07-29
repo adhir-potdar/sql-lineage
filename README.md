@@ -21,13 +21,21 @@ A production-quality SQL lineage analysis tool that extracts table and column de
 git clone https://github.com/adhir-potdar/sql-lineage.git
 cd sql-lineage
 
-# Install dependencies
+# Install system dependencies first (for visualization)
+# macOS
+brew install graphviz
+
+# Linux (Ubuntu/Debian)
+sudo apt-get install graphviz
+
+# Install Python dependencies
 ./install.sh
 
 # Or manually with virtual environment
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+pip install graphviz  # For visualization features
 ```
 
 ### Basic Usage
@@ -132,6 +140,20 @@ class SQLLineageAnalyzer:
     def get_column_lineage_chain_json(self, sql: str, chain_type: str, depth: int) -> str
 ```
 
+### SQLLineageVisualizer
+
+```python
+class SQLLineageVisualizer:
+    def __init__(self)
+    def create_lineage_diagram(self, table_chain_json: str, column_chain_json: str, 
+                              output_path: str, output_format: str) -> str
+    def create_table_only_diagram(self, table_chain_json: str, output_path: str, 
+                                 output_format: str) -> str
+    def create_column_focused_diagram(self, table_chain_json: str, column_chain_json: str,
+                                    output_path: str, output_format: str) -> str
+    def get_supported_formats(self) -> List[str]
+```
+
 ### LineageResult
 
 ```python
@@ -184,6 +206,48 @@ column_json = analyzer.get_column_lineage_chain_json(sql, "upstream", depth=3)
 - **Cycle Prevention**: Handles circular dependencies
 - **JSON Export**: Complete serialization for storage/analysis
 
+### Lineage Visualization
+
+Create visual diagrams from lineage chains using Graphviz:
+
+```python
+from analyzer.visualization import SQLLineageVisualizer
+
+# Create visualizer
+visualizer = SQLLineageVisualizer()
+
+# Get chain data
+table_json = analyzer.get_table_lineage_chain_json(sql, "upstream", depth=3)
+column_json = analyzer.get_column_lineage_chain_json(sql, "upstream", depth=3)
+
+# Create table-only diagram (upstream: right-to-left flow)
+visualizer.create_table_only_diagram(
+    table_chain_json=table_json,
+    output_path="lineage_diagram",
+    output_format="png",
+    layout="horizontal"  # default
+)
+
+# Create integrated table + column diagram  
+# (columns appear within their parent tables)
+visualizer.create_lineage_diagram(
+    table_chain_json=table_json,
+    column_chain_json=column_json,
+    output_path="integrated_lineage",
+    output_format="svg",
+    show_columns=True,
+    layout="horizontal"  # shows tables as containers with columns inside
+)
+```
+
+**Visualization Features:**
+- **Direction-Specific Flow**: Upstream (right-to-left), Downstream (left-to-right) by default
+- **Layout Options**: Horizontal (default) or vertical layouts
+- **Integrated Column Lineage**: Columns displayed within their parent tables as containers
+- **Multiple Formats**: PNG, SVG, PDF, JPG output
+- **Custom Styling**: Colors, shapes, fonts configurable
+- **Professional Layout**: Automatic positioning and spacing
+
 ## Testing
 
 ```bash
@@ -196,10 +260,36 @@ column_json = analyzer.get_column_lineage_chain_json(sql, "upstream", depth=3)
 # Comprehensive sample queries
 ./test_samples.py
 
+# Visualization tests (requires system Graphviz + Python package)
+./test_visualization.py
+
 # Pytest suite
 source venv/bin/activate
 PYTHONPATH=src python3 -m pytest tests/ -v
 ```
+
+## Troubleshooting
+
+### Visualization Issues
+
+**Error: `failed to execute PosixPath('dot')`**
+- **Cause**: System Graphviz not installed
+- **Solution**: Install system Graphviz first (see System Requirements section)
+
+**Error: `ModuleNotFoundError: No module named 'graphviz'`**  
+- **Cause**: Python graphviz package not installed in virtual environment
+- **Solution**: `pip install graphviz` in your activated virtual environment
+
+**Error: `attr statement must target graph, node, or edge`**
+- **Cause**: Outdated graphviz package version
+- **Solution**: `pip install --upgrade graphviz`
+
+### General Issues
+
+**Import errors for core analyzer**
+- Ensure you're in the project directory
+- Activate virtual environment: `source venv/bin/activate`
+- Install dependencies: `pip install -r requirements.txt`
 
 ## Dependencies
 
@@ -208,6 +298,37 @@ PYTHONPATH=src python3 -m pytest tests/ -v
 - **click** >= 8.0.0 - CLI interface
 - **pydantic** >= 2.0.0 - Data validation
 - **networkx** >= 3.0 - Graph operations
+- **graphviz** >= 0.20.0 - Lineage visualization (optional)
+
+### System Requirements for Visualization
+
+**Important**: Graphviz requires both system binaries and Python package:
+
+```bash
+# 1. Install system Graphviz executables (REQUIRED)
+# macOS
+brew install graphviz
+
+# Ubuntu/Debian
+sudo apt-get install graphviz
+
+# CentOS/RHEL/Fedora
+sudo yum install graphviz
+# or: sudo dnf install graphviz
+
+# Windows
+choco install graphviz
+# Or download from: https://graphviz.org/download/
+
+# 2. Install Python package (in your virtual environment)
+pip install graphviz
+
+# 3. Verify installation
+dot -V                    # Should show Graphviz version
+python -c "import graphviz"  # Should not error
+```
+
+**Note**: The Python `graphviz` package is a wrapper that calls system `dot` executables. Both components are required for visualization features to work.
 
 ## License
 
