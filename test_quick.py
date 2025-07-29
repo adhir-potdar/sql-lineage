@@ -28,6 +28,22 @@ def save_json_outputs(json_outputs, test_name):
         except Exception as e:
             print(f"❌ Failed to save {filename}: {e}")
 
+def save_chain_outputs(chain_outputs, test_name):
+    """Save chain JSON outputs to files."""
+    import os
+    output_dir = "output"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    for query_name, lineage_type, chain_type, depth, json_output in chain_outputs:
+        filename = f"{output_dir}/{test_name}_{query_name}_{lineage_type}_chain_{chain_type}_depth{depth}.json"
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(json_output)
+            print(f"📁 Saved {lineage_type} chain JSON to: {filename}")
+        except Exception as e:
+            print(f"❌ Failed to save {lineage_type} chain {filename}: {e}")
+
 
 def quick_test():
     """Quick functionality test."""
@@ -37,8 +53,9 @@ def quick_test():
     analyzer = SQLLineageAnalyzer(dialect="trino")
     analyzer.set_metadata_registry(SampleMetadataRegistry())
     
-    # Store all JSON outputs
+    # Store all JSON outputs and chain outputs
     json_outputs = []
+    chain_outputs = []
     
     # Test 1: Simple query
     sql1 = "SELECT name, email FROM users WHERE age > 25"
@@ -75,25 +92,63 @@ def quick_test():
     if not print_lineage_analysis(result4, sql4, "4. CREATE TABLE AS SELECT Query"):
         return False
     
-    # Test 5: Complex query
+    # Test 5: Complex query with deeper chain for testing
     sql5 = """
     WITH order_stats AS (
         SELECT customer_id, COUNT(*) as orders, SUM(total) as spent
         FROM orders WHERE order_date >= '2023-01-01'
         GROUP BY customer_id
+    ),
+    customer_tiers AS (
+        SELECT 
+            os.customer_id,
+            os.orders,
+            os.spent,
+            CASE WHEN os.spent > 1000 THEN 'Premium' ELSE 'Standard' END as tier
+        FROM order_stats os
+    ),
+    tier_summary AS (
+        SELECT tier, COUNT(*) as customer_count, AVG(spent) as avg_spent
+        FROM customer_tiers
+        GROUP BY tier
     )
-    SELECT u.name, os.orders, os.spent
-    FROM users u JOIN order_stats os ON u.id = os.customer_id
-    WHERE os.spent > 1000
+    SELECT ts.tier, ts.customer_count, ts.avg_spent, u.name
+    FROM tier_summary ts
+    JOIN customer_tiers ct ON ts.tier = ct.tier
+    JOIN users u ON ct.customer_id = u.id
     """
     result5 = analyzer.analyze(sql5)
-    json_outputs.append(("complex_cte_query", analyzer.get_lineage_json(sql5)))
+    json_outputs.append(("complex_multi_cte_query", analyzer.get_lineage_json(sql5)))
     
     if not print_lineage_analysis(result5, sql5, "5. Complex Multi-CTE Query"):
         return False
     
+    # Generate chain outputs for key queries
+    chain_test_queries = [
+        ("cte_query", sql3),
+        ("complex_multi_cte_query", sql5)
+    ]
+    
+    for query_name, sql in chain_test_queries:
+        # Test table chains with different depths
+        for depth in [1, 2, 3]:
+            upstream_table_chain = analyzer.get_table_lineage_chain_json(sql, "upstream", depth)
+            chain_outputs.append((query_name, "table", "upstream", depth, upstream_table_chain))
+            
+            downstream_table_chain = analyzer.get_table_lineage_chain_json(sql, "downstream", depth)
+            chain_outputs.append((query_name, "table", "downstream", depth, downstream_table_chain))
+        
+        # Test column chains with different depths
+        for depth in [1, 2, 3]:
+            upstream_column_chain = analyzer.get_column_lineage_chain_json(sql, "upstream", depth)
+            chain_outputs.append((query_name, "column", "upstream", depth, upstream_column_chain))
+            
+            downstream_column_chain = analyzer.get_column_lineage_chain_json(sql, "downstream", depth)
+            chain_outputs.append((query_name, "column", "downstream", depth, downstream_column_chain))
+    
     # Save JSON outputs to files
     save_json_outputs(json_outputs, "quick_test")
+    save_chain_outputs(chain_outputs, "quick_test")
     
     print("\n🎉 All quick tests passed!")
     return True
@@ -221,6 +276,82 @@ def test_column_lineage_flag():
     return True
 
 
+def test_chain_functionality():
+    """Test table and column lineage chain functionality."""
+    print("\n🔗 Chain Functionality Test")
+    print("─" * 40)
+    
+    analyzer = SQLLineageAnalyzer(dialect="trino")
+    analyzer.set_metadata_registry(SampleMetadataRegistry())
+    
+    # Complex multi-level CTE for chain testing
+    sql = """
+    WITH base_data AS (
+        SELECT customer_id, order_total FROM orders WHERE order_date >= '2023-01-01'
+    ),
+    aggregated AS (
+        SELECT customer_id, SUM(order_total) as total_spent FROM base_data GROUP BY customer_id
+    ),
+    classified AS (
+        SELECT customer_id, total_spent,
+               CASE WHEN total_spent > 1000 THEN 'VIP' ELSE 'Regular' END as tier
+        FROM aggregated
+    ),
+    final_report AS (
+        SELECT tier, COUNT(*) as customer_count, AVG(total_spent) as avg_spent
+        FROM classified GROUP BY tier
+    )
+    SELECT * FROM final_report
+    """
+    
+    try:
+        # Test table upstream chain with depth 3
+        upstream_table_chain = analyzer.get_table_lineage_chain(sql, "upstream", 3)
+        print(f"✅ Table upstream chain (depth 3): {len(upstream_table_chain['chains'])} chains")
+        
+        # Test table downstream chain with depth 2
+        downstream_table_chain = analyzer.get_table_lineage_chain(sql, "downstream", 2)
+        print(f"✅ Table downstream chain (depth 2): {len(downstream_table_chain['chains'])} chains")
+        
+        # Test column upstream chain with depth 3
+        upstream_column_chain = analyzer.get_column_lineage_chain(sql, "upstream", 3)
+        print(f"✅ Column upstream chain (depth 3): {len(upstream_column_chain['chains'])} chains")
+        
+        # Test column downstream chain with depth 2
+        downstream_column_chain = analyzer.get_column_lineage_chain(sql, "downstream", 2)
+        print(f"✅ Column downstream chain (depth 2): {len(downstream_column_chain['chains'])} chains")
+        
+        # Test JSON output for both table and column chains
+        table_json_output = analyzer.get_table_lineage_chain_json(sql, "upstream", 4)
+        print(f"✅ Table chain JSON output: {len(table_json_output)} characters")
+        
+        column_json_output = analyzer.get_column_lineage_chain_json(sql, "upstream", 4)
+        print(f"✅ Column chain JSON output: {len(column_json_output)} characters")
+        
+        # Test error handling for table chains
+        try:
+            analyzer.get_table_lineage_chain(sql, "invalid", 1)
+            print("❌ Table chain error handling failed")
+            return False
+        except ValueError:
+            print("✅ Table chain error handling works correctly")
+        
+        # Test error handling for column chains
+        try:
+            analyzer.get_column_lineage_chain(sql, "invalid", 1)
+            print("❌ Column chain error handling failed")
+            return False
+        except ValueError:
+            print("✅ Column chain error handling works correctly")
+        
+        print("✅ Chain functionality test passed")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Chain functionality test failed: {e}")
+        return False
+
+
 def main():
     """Main test runner."""
     success = True
@@ -228,7 +359,7 @@ def main():
     try:
         # Run quick tests
         success_count = 0
-        total_tests = 4
+        total_tests = 5
         
         # Run quick tests
         if quick_test():
@@ -244,6 +375,10 @@ def main():
         
         # Run column lineage flag test
         if test_column_lineage_flag():
+            success_count += 1
+        
+        # Run chain functionality test
+        if test_chain_functionality():
             success_count += 1
         
         # Print summary

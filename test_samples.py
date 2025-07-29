@@ -31,6 +31,22 @@ def save_json_outputs(json_outputs, test_name):
         except Exception as e:
             print(f"❌ Failed to save {filename}: {e}")
 
+def save_chain_outputs(chain_outputs, test_name):
+    """Save chain JSON outputs to files."""
+    import os
+    output_dir = "output"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    for query_name, lineage_type, chain_type, depth, json_output in chain_outputs:
+        filename = f"{output_dir}/{test_name}_{query_name}_{lineage_type}_chain_{chain_type}_depth{depth}.json"
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(json_output)
+            print(f"📁 Saved {lineage_type} chain JSON to: {filename}")
+        except Exception as e:
+            print(f"❌ Failed to save {lineage_type} chain {filename}: {e}")
+
 
 def analyze_and_display(analyzer, sql, title, show_details=True, show_column_lineage=True):
     """Analyze SQL and display results."""
@@ -788,9 +804,41 @@ def main():
     print_section_header("COLUMN LINEAGE FLAG CONTROL")
     results.append(test_column_lineage_flag_control())
     
+    # Generate chain outputs for complex sample queries
+    chain_outputs = []
+    chain_test_queries = [
+        ("sample1_complex_cte", sample_queries[0][1]),
+        ("sample4_complex_multi_cte_union", sample_queries[3][1])
+    ]
+    
+    for query_name, sql in chain_test_queries:
+        try:
+            # Test table chains with different depths
+            for depth in [1, 2, 3, 4]:
+                upstream_table_chain = analyzer.get_table_lineage_chain_json(sql, "upstream", depth)
+                chain_outputs.append((query_name, "table", "upstream", depth, upstream_table_chain))
+            
+            for depth in [1, 2, 3]:
+                downstream_table_chain = analyzer.get_table_lineage_chain_json(sql, "downstream", depth)
+                chain_outputs.append((query_name, "table", "downstream", depth, downstream_table_chain))
+            
+            # Test column chains with different depths
+            for depth in [1, 2, 3]:
+                upstream_column_chain = analyzer.get_column_lineage_chain_json(sql, "upstream", depth)
+                chain_outputs.append((query_name, "column", "upstream", depth, upstream_column_chain))
+                
+                downstream_column_chain = analyzer.get_column_lineage_chain_json(sql, "downstream", depth)
+                chain_outputs.append((query_name, "column", "downstream", depth, downstream_column_chain))
+        except Exception as e:
+            print(f"❌ Failed to generate chain JSON for {query_name}: {e}")
+    
     # Save JSON outputs to files
     if json_outputs:
         save_json_outputs(json_outputs, "sample_test")
+    
+    # Save chain outputs to files
+    if chain_outputs:
+        save_chain_outputs(chain_outputs, "sample_test")
     
     # Summary
     passed = sum(results)

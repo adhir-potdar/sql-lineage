@@ -30,6 +30,22 @@ def save_json_outputs(json_outputs, test_name):
         except Exception as e:
             print(f"❌ Failed to save {filename}: {e}")
 
+def save_chain_outputs(chain_outputs, test_name):
+    """Save chain JSON outputs to files."""
+    import os
+    output_dir = "output"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    for query_name, lineage_type, chain_type, depth, json_output in chain_outputs:
+        filename = f"{output_dir}/{test_name}_{query_name}_{lineage_type}_chain_{chain_type}_depth{depth}.json"
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(json_output)
+            print(f"📁 Saved {lineage_type} chain JSON to: {filename}")
+        except Exception as e:
+            print(f"❌ Failed to save {lineage_type} chain {filename}: {e}")
+
 
 class SimpleTestRunner:
     """Simple test runner without external dependencies."""
@@ -458,6 +474,142 @@ def test_metadata_integration():
         print(f"  - {key}")
 
 
+def test_chain_building():
+    """Test table and column lineage chain building functionality."""
+    analyzer = SQLLineageAnalyzer(dialect="trino")
+    analyzer.set_metadata_registry(SampleMetadataRegistry())
+    
+    # Complex multi-level CTE query for thorough chain testing
+    sql = """
+    WITH order_base AS (
+        SELECT customer_id, order_total, product_id
+        FROM orders 
+        WHERE order_date >= '2023-01-01'
+    ),
+    customer_stats AS (
+        SELECT 
+            customer_id,
+            COUNT(*) as order_count,
+            SUM(order_total) as total_spent,
+            AVG(order_total) as avg_order
+        FROM order_base
+        GROUP BY customer_id
+    ),
+    customer_segments AS (
+        SELECT 
+            cs.customer_id,
+            cs.order_count,
+            cs.total_spent,
+            cs.avg_order,
+            u.name,
+            CASE 
+                WHEN cs.total_spent > 2000 THEN 'Platinum'
+                WHEN cs.total_spent > 1000 THEN 'Gold'
+                WHEN cs.total_spent > 500 THEN 'Silver'
+                ELSE 'Bronze'
+            END as segment
+        FROM customer_stats cs
+        JOIN users u ON cs.customer_id = u.id
+    ),
+    segment_analysis AS (
+        SELECT 
+            segment,
+            COUNT(*) as customer_count,
+            AVG(total_spent) as avg_segment_spend,
+            MIN(total_spent) as min_spend,
+            MAX(total_spent) as max_spend
+        FROM customer_segments
+        GROUP BY segment
+    )
+    SELECT 
+        sa.segment,
+        sa.customer_count,
+        sa.avg_segment_spend,
+        sa.min_spend,
+        sa.max_spend
+    FROM segment_analysis sa
+    ORDER BY sa.avg_segment_spend DESC
+    """
+    
+    result = analyzer.analyze(sql)
+    
+    # Test basic chain functionality
+    runner.assert_true(not result.has_errors(), "Chain test query should not have errors")
+    
+    # Test table upstream chains with different depths
+    upstream_table_chain_1 = analyzer.get_table_lineage_chain(sql, "upstream", 1)
+    runner.assert_true("chains" in upstream_table_chain_1, "Should have chains in upstream table result")
+    runner.assert_true(upstream_table_chain_1["chain_type"] == "upstream", "Should have correct chain type")
+    runner.assert_true(upstream_table_chain_1["max_depth"] == 1, "Should have correct max depth")
+    
+    upstream_table_chain_3 = analyzer.get_table_lineage_chain(sql, "upstream", 3)
+    runner.assert_true(len(upstream_table_chain_3["chains"]) > 0, "Should have table chains for depth 3")
+    
+    # Test table downstream chains
+    downstream_table_chain_2 = analyzer.get_table_lineage_chain(sql, "downstream", 2)
+    runner.assert_true(downstream_table_chain_2["chain_type"] == "downstream", "Should have downstream chain type")
+    
+    # Test column upstream chains with different depths
+    upstream_column_chain_1 = analyzer.get_column_lineage_chain(sql, "upstream", 1)
+    runner.assert_true("chains" in upstream_column_chain_1, "Should have chains in upstream column result")
+    runner.assert_true(upstream_column_chain_1["chain_type"] == "upstream", "Should have correct column chain type")
+    
+    upstream_column_chain_3 = analyzer.get_column_lineage_chain(sql, "upstream", 3)
+    runner.assert_true(len(upstream_column_chain_3["chains"]) >= 0, "Should have column chains for depth 3")
+    
+    # Test column downstream chains
+    downstream_column_chain_2 = analyzer.get_column_lineage_chain(sql, "downstream", 2)
+    runner.assert_true(downstream_column_chain_2["chain_type"] == "downstream", "Should have downstream column chain type")
+    
+    # Test JSON output for table chains
+    table_json_output = analyzer.get_table_lineage_chain_json(sql, "upstream", 4)
+    runner.assert_true(len(table_json_output) > 100, "Table JSON output should be substantial")
+    runner.assert_in("chain_type", table_json_output, "Table JSON should contain chain_type")
+    runner.assert_in("upstream", table_json_output, "Table JSON should contain upstream")
+    
+    # Test JSON output for column chains
+    column_json_output = analyzer.get_column_lineage_chain_json(sql, "upstream", 4)
+    runner.assert_true(len(column_json_output) > 100, "Column JSON output should be substantial")
+    runner.assert_in("chain_type", column_json_output, "Column JSON should contain chain_type")
+    runner.assert_in("upstream", column_json_output, "Column JSON should contain upstream")
+    
+    # Test error handling for table chains
+    try:
+        analyzer.get_table_lineage_chain(sql, "invalid_type", 1)
+        runner.assert_true(False, "Should have raised ValueError for invalid table chain type")
+    except ValueError:
+        pass  # Expected
+    
+    try:
+        analyzer.get_table_lineage_chain(sql, "upstream", 0)
+        runner.assert_true(False, "Should have raised ValueError for invalid table depth")
+    except ValueError:
+        pass  # Expected
+    
+    # Test error handling for column chains
+    try:
+        analyzer.get_column_lineage_chain(sql, "invalid_type", 1)
+        runner.assert_true(False, "Should have raised ValueError for invalid column chain type")
+    except ValueError:
+        pass  # Expected
+    
+    try:
+        analyzer.get_column_lineage_chain(sql, "upstream", 0)
+        runner.assert_true(False, "Should have raised ValueError for invalid column depth")
+    except ValueError:
+        pass  # Expected
+    
+    print("✓ Chain building functionality test passed")
+    print(f"✓ Table upstream chains (depth 1): {len(upstream_table_chain_1['chains'])}")
+    print(f"✓ Table upstream chains (depth 3): {len(upstream_table_chain_3['chains'])}")
+    print(f"✓ Table downstream chains (depth 2): {len(downstream_table_chain_2['chains'])}")
+    print(f"✓ Column upstream chains (depth 1): {len(upstream_column_chain_1['chains'])}")
+    print(f"✓ Column upstream chains (depth 3): {len(upstream_column_chain_3['chains'])}")
+    print(f"✓ Column downstream chains (depth 2): {len(downstream_column_chain_2['chains'])}")
+    print(f"✓ Table JSON output length: {len(table_json_output)} characters")
+    print(f"✓ Column JSON output length: {len(column_json_output)} characters")
+
+
 def main():
     """Main test runner."""
     global runner
@@ -470,6 +622,7 @@ def main():
     analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     json_outputs = []
+    chain_outputs = []
     test_queries = [
         ("simple_select", "SELECT id, name, email FROM users WHERE age > 25"),
         ("simple_join", "SELECT u.name, o.total, o.order_date FROM users u JOIN orders o ON u.id = o.user_id WHERE u.age > 18"),
@@ -532,6 +685,33 @@ def main():
         except Exception as e:
             print(f"❌ Failed to generate JSON for {query_name}: {e}")
     
+    # Generate chain outputs for complex queries
+    chain_test_queries = [
+        ("simple_cte", test_queries[2][1]),
+        ("complex_multi_cte", test_queries[4][1])
+    ]
+    
+    for query_name, sql in chain_test_queries:
+        try:
+            # Test table chains with different depths
+            for depth in [1, 2, 3, 4]:
+                upstream_table_chain = analyzer.get_table_lineage_chain_json(sql, "upstream", depth)
+                chain_outputs.append((query_name, "table", "upstream", depth, upstream_table_chain))
+            
+            for depth in [1, 2, 3]:
+                downstream_table_chain = analyzer.get_table_lineage_chain_json(sql, "downstream", depth)
+                chain_outputs.append((query_name, "table", "downstream", depth, downstream_table_chain))
+            
+            # Test column chains with different depths
+            for depth in [1, 2, 3]:
+                upstream_column_chain = analyzer.get_column_lineage_chain_json(sql, "upstream", depth)
+                chain_outputs.append((query_name, "column", "upstream", depth, upstream_column_chain))
+                
+                downstream_column_chain = analyzer.get_column_lineage_chain_json(sql, "downstream", depth)
+                chain_outputs.append((query_name, "column", "downstream", depth, downstream_column_chain))
+        except Exception as e:
+            print(f"❌ Failed to generate chain JSON for {query_name}: {e}")
+    
     # Run all tests
     test_functions = [
         (test_simple_select, "Simple SELECT Query"),
@@ -546,7 +726,8 @@ def main():
         (test_error_handling, "Error Handling"),
         (test_different_dialects, "Different Dialects"),
         (test_json_output, "JSON Output"),
-        (test_metadata_integration, "Metadata Integration")
+        (test_metadata_integration, "Metadata Integration"),
+        (test_chain_building, "Chain Building Functionality")
     ]
     
     for test_func, test_name in test_functions:
@@ -555,6 +736,10 @@ def main():
     # Save JSON outputs to files
     if json_outputs:
         save_json_outputs(json_outputs, "simple_test")
+    
+    # Save chain outputs to files
+    if chain_outputs:
+        save_chain_outputs(chain_outputs, "simple_test")
     
     # Print final summary
     runner.print_summary()
