@@ -727,6 +727,274 @@ def test_column_lineage_flag_control():
     return success1 and success2
 
 
+def test_ctas_queries():
+    """Test CREATE TABLE AS SELECT queries with comprehensive lineage chain and diagram generation."""
+    print_subsection_header("CREATE TABLE AS SELECT (CTAS) Queries")
+    
+    analyzer = SQLLineageAnalyzer(dialect="trino")
+    analyzer.set_metadata_registry(SampleMetadataRegistry())
+    
+    # Test various CTAS patterns
+    ctas_queries = [
+        ("simple_ctas", """
+        CREATE TABLE user_summary AS
+        SELECT 
+            id, 
+            name, 
+            email,
+            age,
+            created_at
+        FROM users 
+        WHERE age >= 18 AND active = true
+        """),
+        
+        ("aggregated_ctas", """
+        CREATE TABLE customer_metrics AS
+        SELECT 
+            u.id,
+            u.name,
+            u.region,
+            COUNT(o.id) as order_count,
+            SUM(o.total) as total_spent,
+            AVG(o.total) as avg_order_value,
+            MAX(o.order_date) as last_order_date,
+            MIN(o.order_date) as first_order_date
+        FROM users u
+        LEFT JOIN orders o ON u.id = o.user_id
+        WHERE u.active = true
+        GROUP BY u.id, u.name, u.region
+        HAVING COUNT(o.id) >= 1
+        """),
+        
+        ("complex_ctas_with_cte", """
+        CREATE TABLE premium_customer_analysis AS
+        WITH order_stats AS (
+            SELECT 
+                customer_id,
+                COUNT(*) as total_orders,
+                SUM(order_total) as lifetime_value,
+                AVG(order_total) as avg_order_value,
+                MAX(order_date) as last_order_date
+            FROM orders 
+            WHERE order_date >= '2023-01-01'
+            GROUP BY customer_id
+        ),
+        customer_segments AS (
+            SELECT 
+                u.id as customer_id,
+                u.name,
+                u.email,
+                u.region,
+                u.age,
+                os.total_orders,
+                os.lifetime_value,
+                os.avg_order_value,
+                os.last_order_date,
+                CASE 
+                    WHEN os.lifetime_value > 10000 THEN 'Platinum'
+                    WHEN os.lifetime_value > 5000 THEN 'Gold'
+                    WHEN os.lifetime_value > 2000 THEN 'Silver'
+                    ELSE 'Bronze'
+                END as tier,
+                ROW_NUMBER() OVER (
+                    PARTITION BY u.region 
+                    ORDER BY os.lifetime_value DESC
+                ) as region_rank
+            FROM users u
+            INNER JOIN order_stats os ON u.id = os.customer_id
+            WHERE u.active = true
+        )
+        SELECT 
+            customer_id,
+            name,
+            email,
+            region,
+            age,
+            total_orders,
+            lifetime_value,
+            avg_order_value,
+            last_order_date,
+            tier,
+            region_rank
+        FROM customer_segments 
+        WHERE tier IN ('Platinum', 'Gold')
+          AND region_rank <= 10
+        ORDER BY lifetime_value DESC
+        """),
+        
+        ("cross_schema_ctas", """
+        CREATE TABLE analytics.user_order_summary AS
+        SELECT 
+            u.id,
+            u.name,
+            u.region,
+            COUNT(DISTINCT o.id) as unique_orders,
+            COUNT(DISTINCT p.product_id) as unique_products,
+            SUM(o.order_total) as total_revenue,
+            ARRAY_AGG(DISTINCT c.category_name) as purchased_categories
+        FROM production.users u
+        LEFT JOIN production.orders o ON u.id = o.user_id
+        LEFT JOIN production.products p ON o.product_id = p.product_id
+        LEFT JOIN production.categories c ON p.category_id = c.category_id
+        WHERE u.created_at >= '2023-01-01'
+        GROUP BY u.id, u.name, u.region
+        """)
+    ]
+    
+    results = []
+    json_outputs = []
+    chain_outputs = []
+    
+    print(f"\n🧪 Testing {len(ctas_queries)} CTAS Query Patterns:")
+    print("─" * 60)
+    
+    for query_name, sql in ctas_queries:
+        print(f"\n📋 Testing: {query_name}")
+        print("─" * 40)
+        
+        try:
+            # Analyze the CTAS query
+            result = analyzer.analyze(sql)
+            success = not result.has_errors()
+            
+            if success:
+                print(f"✅ {query_name}: Analysis successful")
+                
+                # Show basic lineage info
+                print(f"   • Table lineage relationships: {len(result.table_lineage.upstream)}")
+                print(f"   • Column lineage relationships: {len(result.column_lineage.upstream)}")
+                
+                # Show transformation details if available
+                if hasattr(result.table_lineage, 'transformations') and result.table_lineage.transformations:
+                    total_transformations = sum(len(transforms) for transforms in result.table_lineage.transformations.values())
+                    print(f"   • Table transformations: {total_transformations}")
+                
+                if hasattr(result.column_lineage, 'transformations') and result.column_lineage.transformations:
+                    total_col_transformations = sum(len(transforms) for transforms in result.column_lineage.transformations.values())
+                    print(f"   • Column transformations: {total_col_transformations}")
+                
+                # Generate JSON output
+                json_output = analyzer.get_lineage_json(sql)
+                json_outputs.append((f"ctas_{query_name}", json_output))
+                print(f"   • JSON output: {len(json_output)} characters")
+                
+                # Generate lineage chains with multiple depths
+                print(f"   • Generating lineage chains...")
+                
+                # Table chains
+                for chain_type in ["upstream", "downstream"]:
+                    for depth in [1, 2, 3, 4]:
+                        try:
+                            table_chain_json = analyzer.get_table_lineage_chain_json(sql, chain_type, depth)
+                            chain_outputs.append((f"ctas_{query_name}", "table", chain_type, depth, table_chain_json))
+                        except Exception as e:
+                            print(f"     ⚠️  Table {chain_type} chain (depth {depth}) failed: {e}")
+                
+                # Column chains
+                for chain_type in ["upstream", "downstream"]:
+                    for depth in [1, 2, 3]:
+                        try:
+                            column_chain_json = analyzer.get_column_lineage_chain_json(sql, chain_type, depth)
+                            chain_outputs.append((f"ctas_{query_name}", "column", chain_type, depth, column_chain_json))
+                        except Exception as e:
+                            print(f"     ⚠️  Column {chain_type} chain (depth {depth}) failed: {e}")
+                
+                print(f"   • Generated {len([c for c in chain_outputs if c[0] == f'ctas_{query_name}'])} chain files")
+                
+                # Show detailed lineage for the first query as example
+                if query_name == "simple_ctas":
+                    print_lineage_analysis(result, sql, f"CTAS Example: {query_name}", show_column_lineage=True)
+                
+            else:
+                print(f"❌ {query_name}: {result.errors[0] if result.errors else 'Unknown error'}")
+            
+            results.append(success)
+            
+        except Exception as e:
+            print(f"💥 {query_name} - EXCEPTION: {str(e)}")
+            results.append(False)
+    
+    # Create visualizations for CTAS queries
+    print(f"\n📊 Creating CTAS Visualizations:")
+    print("─" * 40)
+    
+    try:
+        visualizer = SQLLineageVisualizer()
+        output_dir = "output"
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        # Create visualizations for key CTAS queries
+        visualization_queries = [
+            ("ctas_simple", ctas_queries[0][1]),
+            ("ctas_aggregated", ctas_queries[1][1]),
+            ("ctas_complex_cte", ctas_queries[2][1])
+        ]
+        
+        for viz_name, sql in visualization_queries:
+            print(f"\n📈 Creating diagrams for {viz_name}...")
+            
+            try:
+                # Create visualizations for both upstream and downstream
+                for chain_type in ["upstream", "downstream"]:
+                    # Get chain data
+                    table_json = analyzer.get_table_lineage_chain_json(sql, chain_type, 4)
+                    column_json = analyzer.get_column_lineage_chain_json(sql, chain_type, 3)
+                    
+                    # Create table-only visualization
+                    table_output = visualizer.create_table_only_diagram(
+                        table_chain_json=table_json,
+                        output_path=f"{output_dir}/sample_test_{viz_name}_{chain_type}_table",
+                        output_format="jpeg",
+                        layout="horizontal",
+                        sql_query=sql
+                    )
+                    print(f"   ✅ {chain_type.title()} table diagram: {os.path.basename(table_output)}")
+                    
+                    # Create integrated table + column visualization
+                    integrated_output = visualizer.create_lineage_diagram(
+                        table_chain_json=table_json,
+                        column_chain_json=column_json,
+                        output_path=f"{output_dir}/sample_test_{viz_name}_{chain_type}_integrated",
+                        output_format="jpeg",
+                        show_columns=True,
+                        layout="horizontal",
+                        sql_query=sql
+                    )
+                    print(f"   ✅ {chain_type.title()} integrated diagram: {os.path.basename(integrated_output)}")
+                    
+            except Exception as e:
+                print(f"   ❌ Failed to create visualizations for {viz_name}: {e}")
+        
+        print(f"\n✅ CTAS visualization creation completed!")
+        
+    except ImportError as e:
+        print(f"⚠️  Visualization not available: {e}")
+    except Exception as e:
+        print(f"❌ Visualization creation failed: {e}")
+    
+    # Save CTAS-specific outputs
+    if json_outputs:
+        save_json_outputs(json_outputs, "sample_test")
+        print(f"\n📁 Saved {len(json_outputs)} CTAS JSON files")
+    
+    if chain_outputs:
+        save_chain_outputs(chain_outputs, "sample_test")
+        print(f"📁 Saved {len(chain_outputs)} CTAS chain files")
+    
+    # Summary
+    success_count = sum(results)
+    total_count = len(results)
+    
+    print(f"\n📊 CTAS Test Results: {success_count}/{total_count} queries successful")
+    print(f"   • Simple CTAS: {'✅' if results[0] else '❌'}")
+    print(f"   • Aggregated CTAS: {'✅' if results[1] else '❌'}")
+    print(f"   • Complex CTAS with CTE: {'✅' if results[2] else '❌'}")
+    print(f"   • Cross-schema CTAS: {'✅' if results[3] else '❌'}")
+    
+    return success_count == total_count
+
+
 def main():
     """Main test runner."""
     print("🚀 SQL Lineage Sample Queries Test Suite")
@@ -950,6 +1218,9 @@ def main():
     results.append(test_original_sample2()) 
     results.append(test_original_sample3())
     results.append(test_complex_multi_cte_union())
+    
+    print_section_header("CREATE TABLE AS SELECT (CTAS) QUERIES")
+    results.append(test_ctas_queries())
     
     print_section_header("SQLGLOT-TEST PATTERNS")
     results.append(test_sqlglot_test_queries())
