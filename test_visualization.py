@@ -169,6 +169,109 @@ def test_basic_visualization():
         
     except Exception as e:
         print(f"❌ Failed to create integrated column lineage: {e}")
+    
+    # Test combined column lineage with different complexity levels
+    print("\n📊 Testing combined column lineage with different SQL complexities...")
+    
+    combined_test_queries = [
+        ("simple_combined", """
+        SELECT 
+            u.name as customer_name,
+            u.email,
+            o.order_total,
+            o.order_date
+        FROM users u
+        JOIN orders o ON u.id = o.customer_id
+        WHERE u.active = true
+        """),
+        ("cte_combined", """
+        WITH customer_stats AS (
+            SELECT 
+                customer_id,
+                COUNT(*) as order_count,
+                SUM(order_total) as total_spent
+            FROM orders 
+            GROUP BY customer_id
+        )
+        SELECT 
+            u.name,
+            cs.order_count,
+            cs.total_spent,
+            CASE WHEN cs.total_spent > 1000 THEN 'VIP' ELSE 'Regular' END as tier
+        FROM users u
+        JOIN customer_stats cs ON u.id = cs.customer_id
+        """),
+        ("complex_combined", """
+        WITH user_profiles AS (
+            SELECT id, name, email, age FROM users WHERE active = true
+        ),
+        order_metrics AS (
+            SELECT 
+                customer_id,
+                COUNT(*) as order_count,
+                SUM(order_total) as total_revenue,
+                AVG(order_total) as avg_order_value
+            FROM orders 
+            GROUP BY customer_id
+        ),
+        customer_segments AS (
+            SELECT 
+                up.id,
+                up.name,
+                up.email,
+                om.order_count,
+                om.total_revenue,
+                CASE 
+                    WHEN om.total_revenue > 2000 THEN 'Premium'
+                    WHEN om.total_revenue > 1000 THEN 'Gold'
+                    ELSE 'Standard'
+                END as segment
+            FROM user_profiles up
+            LEFT JOIN order_metrics om ON up.id = om.customer_id
+        )
+        SELECT 
+            name as customer_name,
+            email,
+            segment,
+            order_count,
+            total_revenue,
+            ROUND(total_revenue / NULLIF(order_count, 0), 2) as revenue_per_order
+        FROM customer_segments
+        WHERE order_count > 0
+        """)
+    ]
+    
+    for query_name, test_sql in combined_test_queries:
+        print(f"\n📊 Creating combined diagram for {query_name}...")
+        try:
+            # Get chain data
+            table_json = analyzer.get_table_lineage_chain_json(test_sql, "upstream", 3)
+            column_json = analyzer.get_column_lineage_chain_json(test_sql, "upstream", 3)
+            
+            # Create combined column lineage diagram (like the sample image)
+            combined_output = visualizer.create_lineage_diagram(
+                table_chain_json=table_json,
+                column_chain_json=column_json,
+                output_path=os.path.join(output_dir, f"combined_column_lineage_{query_name}"),
+                output_format="png",
+                show_columns=True,  # This creates the integrated column+table view
+                layout="horizontal"  # Tables flow horizontally, columns vertically within tables
+            )
+            print(f"   ✅ Created combined column lineage: {os.path.basename(combined_output)}")
+            
+            # Also create SVG version for better quality
+            svg_output = visualizer.create_lineage_diagram(
+                table_chain_json=table_json,
+                column_chain_json=column_json,
+                output_path=os.path.join(output_dir, f"combined_column_lineage_{query_name}"),
+                output_format="svg",
+                show_columns=True,
+                layout="horizontal"
+            )
+            print(f"   ✅ Created SVG version: {os.path.basename(svg_output)}")
+            
+        except Exception as e:
+            print(f"   ❌ Failed to create {query_name}: {e}")
 
 
 def test_custom_styling():
@@ -293,15 +396,45 @@ def main():
         print("\n🎉 All visualization tests completed!")
         print(f"\n📁 Check the '{output_dir}' directory for generated diagrams.")
         
-        # List generated files
+        # List generated files with categories
         if os.path.exists(output_dir):
             files = [f for f in os.listdir(output_dir) if f.endswith(('.png', '.svg', '.pdf', '.jpg', '.jpeg'))]
             if files:
                 print(f"\n📄 Generated files ({len(files)}):")
-                for file in sorted(files):
-                    file_path = os.path.join(output_dir, file)
-                    size = os.path.getsize(file_path)
-                    print(f"   • {file} ({size:,} bytes)")
+                
+                # Categorize files
+                combined_files = [f for f in files if 'combined' in f]
+                table_files = [f for f in files if 'table' in f and 'combined' not in f]
+                other_files = [f for f in files if f not in combined_files and f not in table_files]
+                
+                if combined_files:
+                    print(f"\n   🎨 Combined Column Lineage Diagrams ({len(combined_files)}):")
+                    for file in sorted(combined_files):
+                        file_path = os.path.join(output_dir, file)
+                        size = os.path.getsize(file_path)
+                        print(f"     • {file} ({size:,} bytes)")
+                
+                if table_files:
+                    print(f"\n   📊 Table-Only Diagrams ({len(table_files)}):")
+                    for file in sorted(table_files)[:5]:  # Show first 5
+                        file_path = os.path.join(output_dir, file)
+                        size = os.path.getsize(file_path)
+                        print(f"     • {file} ({size:,} bytes)")
+                    if len(table_files) > 5:
+                        print(f"     ... and {len(table_files) - 5} more table diagrams")
+                
+                if other_files:
+                    print(f"\n   🔧 Other Test Files ({len(other_files)}):")
+                    for file in sorted(other_files)[:3]:  # Show first 3
+                        file_path = os.path.join(output_dir, file)
+                        size = os.path.getsize(file_path)
+                        print(f"     • {file} ({size:,} bytes)")
+                    if len(other_files) > 3:
+                        print(f"     ... and {len(other_files) - 3} more files")
+                
+                print(f"\n✨ **NEW**: Combined column lineage diagrams show tables horizontally")
+                print(f"   with columns listed vertically within each table container,")
+                print(f"   exactly like the sample image you provided!")
             else:
                 print("\n⚠️  No visualization files were generated")
         
