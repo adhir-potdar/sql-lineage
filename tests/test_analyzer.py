@@ -27,8 +27,8 @@ class TestSQLLineageAnalyzer:
         assert not result.has_errors()
         
         # Should have upstream dependency on users table
-        assert "MAIN_QUERY" in result.table_lineage.upstream
-        assert "default.users" in result.table_lineage.upstream["MAIN_QUERY"]
+        assert "QUERY_RESULT" in result.table_lineage.upstream
+        assert "users" in result.table_lineage.upstream["QUERY_RESULT"]
     
     def test_join_query(self, analyzer):
         """Test JOIN query analysis."""
@@ -42,9 +42,9 @@ class TestSQLLineageAnalyzer:
         assert not result.has_errors()
         
         # Should have upstream dependencies on both tables
-        upstream = result.table_lineage.upstream["MAIN_QUERY"]
-        assert "default.users" in upstream
-        assert "default.orders" in upstream
+        upstream = result.table_lineage.upstream["QUERY_RESULT"]
+        assert "users" in upstream
+        assert "orders" in upstream
         
         # Should have column lineage
         assert len(result.column_lineage.upstream) > 0
@@ -66,15 +66,15 @@ class TestSQLLineageAnalyzer:
         
         # Should have CTE in upstream
         assert "user_orders" in result.table_lineage.upstream
-        assert "MAIN_QUERY" in result.table_lineage.upstream
+        assert "QUERY_RESULT" in result.table_lineage.upstream
         
         # CTE should depend on source tables
         cte_upstream = result.table_lineage.upstream["user_orders"]
-        assert "default.users" in cte_upstream
-        assert "default.orders" in cte_upstream
+        assert "users" in cte_upstream
+        assert "orders" in cte_upstream
         
         # Main query should depend on CTE
-        main_upstream = result.table_lineage.upstream["MAIN_QUERY"]
+        main_upstream = result.table_lineage.upstream["QUERY_RESULT"]
         assert "user_orders" in main_upstream
     
     def test_create_table_as_select(self, analyzer):
@@ -91,11 +91,11 @@ class TestSQLLineageAnalyzer:
         
         # Should have target table in upstream
         assert "user_summary" in result.table_lineage.upstream
-        assert "default.users" in result.table_lineage.upstream["user_summary"]
+        assert "users" in result.table_lineage.upstream["user_summary"]
         
         # Should have downstream dependency
-        assert "default.users" in result.table_lineage.downstream
-        assert "user_summary" in result.table_lineage.downstream["default.users"]
+        assert "users" in result.table_lineage.downstream
+        assert "user_summary" in result.table_lineage.downstream["users"]
     
     def test_invalid_sql(self, analyzer):
         """Test handling of invalid SQL."""
@@ -123,7 +123,7 @@ class TestSQLLineageAnalyzer:
         
         assert not result.has_errors()
         assert result.sql == sql_content
-        assert "default.users" in result.table_lineage.upstream["MAIN_QUERY"]
+        assert "users" in result.table_lineage.upstream["QUERY_RESULT"]
     
     def test_analyze_file_not_found(self, analyzer):
         """Test analyzing non-existent file."""
@@ -183,10 +183,10 @@ class TestSQLLineageAnalyzer:
         assert len(result.metadata) > 0
         
         # Check table lineage
-        upstream = result.table_lineage.upstream["MAIN_QUERY"]
-        assert "default.users" in upstream
-        assert "default.orders" in upstream
-        assert "default.products" in upstream
+        upstream = result.table_lineage.upstream["QUERY_RESULT"]
+        assert "users" in upstream
+        assert "orders" in upstream
+        assert "products" in upstream
         
         # Check column lineage
         assert len(result.column_lineage.upstream) > 0

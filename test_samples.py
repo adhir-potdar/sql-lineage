@@ -15,6 +15,22 @@ from test_formatter import print_lineage_analysis, print_section_header, print_s
 
 # Use the enhanced formatters instead of local ones
 
+def save_json_outputs(json_outputs, test_name):
+    """Save JSON outputs to files."""
+    import os
+    output_dir = "output"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    for query_name, json_output in json_outputs:
+        filename = f"{output_dir}/{test_name}_{query_name}.json"
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(json_output)
+            print(f"📁 Saved JSON output to: {filename}")
+        except Exception as e:
+            print(f"❌ Failed to save {filename}: {e}")
+
 
 def analyze_and_display(analyzer, sql, title, show_details=True, show_column_lineage=True):
     """Analyze SQL and display results."""
@@ -545,6 +561,210 @@ def main():
     print("Testing all original sample queries and patterns...")
     
     results = []
+    json_outputs = []
+    
+    # Initialize analyzer for JSON collection
+    analyzer = SQLLineageAnalyzer(dialect="trino")
+    analyzer.set_metadata_registry(SampleMetadataRegistry())
+    
+    # Collect JSON outputs for key sample queries
+    sample_queries = [
+        ("sample1_complex_cte", """
+        WITH CategorySales AS (SELECT c.category_name,
+                                      p.product_id,
+                                      p.product_name,
+                                      SUM(o.order_total)         AS total_sales,
+                                      COUNT(DISTINCT o.order_id) AS total_orders,
+                                      AVG(o.order_total)         AS avg_order_value
+                               FROM orders o
+                                        INNER JOIN
+                                    products p ON o.product_id = p.product_id
+                                        INNER JOIN
+                                    categories c ON p.category_id = c.category_id
+                               WHERE o.order_date >= DATEADD(YEAR, -1, GETDATE())
+                               GROUP BY c.category_name, p.product_id, p.product_name),
+             TopCustomers AS (SELECT c.category_name,
+                                     o.customer_id,
+                                     SUM(o.order_total) AS customer_total,
+                                     RANK()                OVER (
+                        PARTITION BY c.category_name
+                        ORDER BY SUM(o.order_total) DESC
+                    ) AS rank
+                              FROM orders o
+                                       INNER JOIN
+                                   products p ON o.product_id = p.product_id
+                                       INNER JOIN
+                                   categories c ON p.category_id = c.category_id
+                              WHERE o.order_date >= DATEADD(YEAR, -1, GETDATE())
+                              GROUP BY c.category_name, o.customer_id)
+        SELECT cs.category_name,
+               cs.product_id,
+               cs.product_name,
+               cs.total_sales,
+               cs.total_orders,
+               cs.avg_order_value,
+               tc.customer_id    AS top_customer_id,
+               tc.customer_total AS top_customer_revenue
+        FROM CategorySales cs
+                 LEFT JOIN
+             TopCustomers tc
+             ON
+                 cs.category_name = tc.category_name
+        WHERE tc.rank <= 3
+        ORDER BY cs.category_name,
+                 cs.total_sales DESC
+        """),
+        ("sample2_qualified_names", """SELECT u.name, COUNT(o.id) FROM users u JOIN orders o ON u.id = o.user_id GROUP BY u.name"""),
+        ("sample3_union_cte", """
+        WITH OrderSummary AS (
+            SELECT order_id, customer_id, product_id, SUM(order_total) AS total_order_value
+            FROM orders WHERE order_date >= '2023-01-01'
+            GROUP BY order_id, customer_id, product_id
+        ),
+        TopCustomers AS (
+            SELECT customer_id, SUM(order_total) AS customer_spent
+            FROM orders WHERE order_date >= '2023-01-01'
+            GROUP BY customer_id
+        )
+        SELECT os.customer_id, os.order_id, os.product_id, os.total_order_value, tc.customer_spent
+        FROM OrderSummary os LEFT JOIN TopCustomers tc ON os.customer_id = tc.customer_id
+        """),
+        ("sample4_complex_multi_cte_union", """
+        WITH OrderSummary AS (
+            SELECT
+                "schema1"."orders"."order_id",
+                "schema1"."orders"."customer_id",
+                "schema1"."orders"."product_id",
+                SUM("schema1"."orders"."order_total") AS total_order_value,
+                COUNT(DISTINCT "schema1"."orders"."order_id") AS order_count,
+                CASE
+                    WHEN SUM("schema1"."orders"."order_total") > 1000 THEN 'High'
+                    WHEN SUM("schema1"."orders"."order_total") BETWEEN 500 AND 1000 THEN 'Medium'
+                    ELSE 'Low'
+                END AS order_priority
+            FROM
+                "schema1"."orders"
+            INNER JOIN
+                "schema1"."products" ON "schema1"."orders"."product_id" = "schema1"."products"."product_id"
+            WHERE
+                "schema1"."orders"."order_date" >= DATEADD(YEAR, -1, CURRENT_DATE)
+            GROUP BY
+                "schema1"."orders"."order_id",
+                "schema1"."orders"."customer_id",
+                "schema1"."orders"."product_id"
+        ),
+        TopCustomers AS (
+            SELECT
+                "schema1"."customers"."customer_id",
+                CONCAT("schema1"."customers"."first_name", ' ', "schema1"."customers"."last_name") AS customer_name,
+                SUM("schema1"."orders"."order_total") AS customer_spent,
+                RANK() OVER (
+                    ORDER BY SUM("schema1"."orders"."order_total") DESC
+                ) AS spending_rank
+            FROM
+                "schema1"."orders"
+            INNER JOIN
+                "schema1"."customers" ON "schema1"."orders"."customer_id" = "schema1"."customers"."customer_id"
+            WHERE
+                "schema1"."orders"."order_date" >= DATEADD(YEAR, -1, CURRENT_DATE)
+            GROUP BY
+                "schema1"."customers"."customer_id", "schema1"."customers"."first_name", "schema1"."customers"."last_name"
+        ),
+        TopProductsInCategory AS (
+            SELECT
+                "schema1"."categories"."category_name",
+                "schema1"."products"."product_id",
+                COUNT("schema1"."orders"."order_id") AS total_orders,
+                RANK() OVER (
+                    PARTITION BY "schema1"."categories"."category_name"
+                    ORDER BY COUNT("schema1"."orders"."order_id") DESC
+                ) AS product_rank
+            FROM
+                "schema1"."products"
+            INNER JOIN
+                "schema1"."categories" ON "schema1"."products"."category_id" = "schema1"."categories"."category_id"
+            LEFT JOIN
+                "schema1"."orders" ON "schema1"."products"."product_id" = "schema1"."orders"."product_id"
+            WHERE
+                "schema1"."orders"."order_date" >= DATEADD(YEAR, -1, CURRENT_DATE)
+            GROUP BY
+                "schema1"."categories"."category_name", "schema1"."products"."product_id"
+        ),
+        CombinedResults AS (
+            SELECT
+                os.customer_id,
+                os.order_id,
+                os.product_id,
+                os.total_order_value,
+                os.order_priority,
+                NULL AS product_rank,
+                NULL AS category_name,
+                tc.customer_spent,
+                tc.spending_rank
+            FROM
+                OrderSummary os
+            LEFT JOIN
+                TopCustomers tc ON os.customer_id = tc.customer_id
+            UNION ALL
+            SELECT
+                NULL AS customer_id,
+                NULL AS order_id,
+                tp.product_id,
+                NULL AS total_order_value,
+                NULL AS order_priority,
+                tp.product_rank,
+                tp.category_name,
+                NULL AS customer_spent,
+                NULL AS spending_rank
+            FROM
+                TopProductsInCategory tp
+        ),
+        FinalResults AS (
+            SELECT
+                cr.customer_id,
+                cr.order_id,
+                cr.product_id,
+                cr.total_order_value,
+                cr.order_priority,
+                cr.product_rank,
+                cr.category_name,
+                cr.customer_spent,
+                cr.spending_rank,
+                CASE
+                    WHEN cr.spending_rank IS NOT NULL AND cr.spending_rank <= 5 THEN 'VIP'
+                    WHEN cr.customer_spent IS NOT NULL THEN 'Premium'
+                    WHEN cr.product_rank IS NOT NULL AND cr.product_rank <= 3 THEN 'Top Product'
+                    ELSE 'Standard'
+                END AS tag
+            FROM
+                CombinedResults cr
+        )
+        SELECT
+            fr.customer_id,
+            fr.order_id,
+            fr.product_id,
+            fr.category_name,
+            fr.total_order_value,
+            fr.customer_spent,
+            fr.spending_rank,
+            fr.product_rank,
+            fr.order_priority,
+            fr.tag
+        FROM
+            FinalResults fr
+        ORDER BY
+            fr.spending_rank ASC,
+            fr.product_rank ASC,
+            fr.total_order_value DESC
+        """)
+    ]
+    
+    for query_name, sql in sample_queries:
+        try:
+            json_output = analyzer.get_lineage_json(sql)
+            json_outputs.append((query_name, json_output))
+        except Exception as e:
+            print(f"❌ Failed to generate JSON for {query_name}: {e}")
     
     # Run all test sections
     print_section_header("ORIGINAL SAMPLE FILES")
@@ -567,6 +787,10 @@ def main():
     
     print_section_header("COLUMN LINEAGE FLAG CONTROL")
     results.append(test_column_lineage_flag_control())
+    
+    # Save JSON outputs to files
+    if json_outputs:
+        save_json_outputs(json_outputs, "sample_test")
     
     # Summary
     passed = sum(results)

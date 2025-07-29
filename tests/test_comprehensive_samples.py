@@ -66,12 +66,12 @@ class TestComprehensiveSamples:
         # Should have CTEs in lineage
         assert "CategorySales" in result.table_lineage.upstream
         assert "TopCustomers" in result.table_lineage.upstream
-        assert "MAIN_QUERY" in result.table_lineage.upstream
+        assert "QUERY_RESULT" in result.table_lineage.upstream
         
         # CTEs should depend on source tables
-        assert "default.orders" in result.table_lineage.upstream["CategorySales"]
-        assert "default.products" in result.table_lineage.upstream["CategorySales"]
-        assert "default.categories" in result.table_lineage.upstream["CategorySales"]
+        assert "orders" in result.table_lineage.upstream["CategorySales"]
+        assert "products" in result.table_lineage.upstream["CategorySales"]
+        assert "categories" in result.table_lineage.upstream["CategorySales"]
         
         # Column lineage should exist
         assert len(result.column_lineage.upstream) > 0
@@ -299,8 +299,8 @@ class TestComprehensiveSamples:
             assert cte in result.table_lineage.upstream
         
         # Should have main query depending on final CTE
-        assert "MAIN_QUERY" in result.table_lineage.upstream
-        assert "FinalResults" in result.table_lineage.upstream["MAIN_QUERY"]
+        assert "QUERY_RESULT" in result.table_lineage.upstream
+        assert "FinalResults" in result.table_lineage.upstream["QUERY_RESULT"]
     
     def test_sqlglot_test_basic_queries(self, analyzer):
         """Test basic queries from sqlglot-test folder."""
@@ -313,8 +313,8 @@ class TestComprehensiveSamples:
         for sql in basic_queries:
             result = analyzer.analyze(sql)
             assert not result.has_errors()
-            assert "MAIN_QUERY" in result.table_lineage.upstream
-            assert len(result.table_lineage.upstream["MAIN_QUERY"]) > 0
+            assert "QUERY_RESULT" in result.table_lineage.upstream
+            assert len(result.table_lineage.upstream["QUERY_RESULT"]) > 0
     
     def test_sqlglot_test_complex_join(self, analyzer):
         """Test complex JOIN query from sqlglot-test folder."""
@@ -337,9 +337,9 @@ class TestComprehensiveSamples:
         assert not result.has_errors()
         
         # Should have both tables in upstream
-        upstream = result.table_lineage.upstream["MAIN_QUERY"]
-        assert "default.users" in upstream
-        assert "default.orders" in upstream
+        upstream = result.table_lineage.upstream["QUERY_RESULT"]
+        assert "users" in upstream
+        assert "orders" in upstream
         
         # Should have column lineage
         assert len(result.column_lineage.upstream) > 0
@@ -365,7 +365,7 @@ class TestComprehensiveSamples:
             assert not result.has_errors()
             
             # Should have target table in upstream lineage
-            target_tables = [k for k in result.table_lineage.upstream.keys() if k != "MAIN_QUERY"]
+            target_tables = [k for k in result.table_lineage.upstream.keys() if k != "QUERY_RESULT"]
             assert len(target_tables) > 0
     
     def test_trino_specific_queries(self, analyzer):
@@ -374,7 +374,7 @@ class TestComprehensiveSamples:
             ("SELECT customer_id, ROW_NUMBER() OVER (PARTITION BY region ORDER BY revenue DESC) as rank FROM sales", "trino"),
             ("SELECT APPROX_DISTINCT(user_id) FROM events", "trino"),
             ("SELECT JSON_EXTRACT(metadata, '$.user.id') FROM logs", "trino"),
-            ("SELECT * FROM hive.default.users", "trino"),
+            ("SELECT * FROM hive.users", "trino"),
             ("SELECT * FROM mysql.sales_db.orders", "trino")
         ]
         
@@ -422,4 +422,4 @@ class TestComprehensiveSamples:
         assert "ranked_users" in result.table_lineage.upstream
         
         # Main query should depend on final CTE
-        assert "ranked_users" in result.table_lineage.upstream["MAIN_QUERY"]
+        assert "ranked_users" in result.table_lineage.upstream["QUERY_RESULT"]

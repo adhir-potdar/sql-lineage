@@ -27,7 +27,7 @@ class SampleMetadataRegistry(MetadataRegistry):
             ColumnMetadata("user_id", "BIGINT", False, description="Alternative user ID reference")
         ]
         
-        self.tables["default.users"] = TableMetadata(
+        users_metadata = TableMetadata(
             catalog=None, schema="default", table="users",
             columns=users_columns,
             description="User profile information",
@@ -35,6 +35,8 @@ class SampleMetadataRegistry(MetadataRegistry):
             row_count=150000,
             storage_format="PARQUET"
         )
+        self.tables["default.users"] = users_metadata
+        self.tables["users"] = users_metadata
         
         # Orders table
         orders_columns = [
@@ -49,7 +51,7 @@ class SampleMetadataRegistry(MetadataRegistry):
             ColumnMetadata("product_id", "BIGINT", False, description="Product identifier")
         ]
         
-        self.tables["default.orders"] = TableMetadata(
+        orders_metadata = TableMetadata(
             catalog=None, schema="default", table="orders",
             columns=orders_columns,
             description="Customer order transactions",
@@ -57,6 +59,8 @@ class SampleMetadataRegistry(MetadataRegistry):
             row_count=500000,
             storage_format="DELTA"
         )
+        self.tables["default.orders"] = orders_metadata
+        self.tables["orders"] = orders_metadata
         
         # Products table
         products_columns = [
@@ -66,7 +70,7 @@ class SampleMetadataRegistry(MetadataRegistry):
             ColumnMetadata("price", "DECIMAL(10,2)", False, description="Product price")
         ]
         
-        self.tables["default.products"] = TableMetadata(
+        products_metadata = TableMetadata(
             catalog=None, schema="default", table="products",
             columns=products_columns,
             description="Product catalog",
@@ -74,6 +78,8 @@ class SampleMetadataRegistry(MetadataRegistry):
             row_count=25000,
             storage_format="PARQUET"
         )
+        self.tables["default.products"] = products_metadata
+        self.tables["products"] = products_metadata
         
         # Categories table
         categories_columns = [
@@ -82,7 +88,7 @@ class SampleMetadataRegistry(MetadataRegistry):
             ColumnMetadata("description", "TEXT", True, description="Category description")
         ]
         
-        self.tables["default.categories"] = TableMetadata(
+        categories_metadata = TableMetadata(
             catalog=None, schema="default", table="categories",
             columns=categories_columns,
             description="Product categories",
@@ -90,6 +96,8 @@ class SampleMetadataRegistry(MetadataRegistry):
             row_count=100,
             storage_format="PARQUET"
         )
+        self.tables["default.categories"] = categories_metadata
+        self.tables["categories"] = categories_metadata
         
         # Events table
         events_columns = [

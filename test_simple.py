@@ -14,6 +14,23 @@ from analyzer.formatters import ConsoleFormatter, JSONFormatter
 from test_formatter import print_lineage_analysis, print_test_summary, print_section_header
 
 
+def save_json_outputs(json_outputs, test_name):
+    """Save JSON outputs to files."""
+    import os
+    output_dir = "output"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    for query_name, json_output in json_outputs:
+        filename = f"{output_dir}/{test_name}_{query_name}.json"
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(json_output)
+            print(f"📁 Saved JSON output to: {filename}")
+        except Exception as e:
+            print(f"❌ Failed to save {filename}: {e}")
+
+
 class SimpleTestRunner:
     """Simple test runner without external dependencies."""
     
@@ -89,8 +106,8 @@ def test_simple_select():
     result = analyzer.analyze(sql)
     
     runner.assert_true(not result.has_errors(), "Query should not have errors")
-    runner.assert_in("MAIN_QUERY", result.table_lineage.upstream, "Should have MAIN_QUERY in upstream")
-    runner.assert_in("default.users", result.table_lineage.upstream["MAIN_QUERY"], "Should depend on users table")
+    runner.assert_in("QUERY_RESULT", result.table_lineage.upstream, "Should have QUERY_RESULT in upstream")
+    runner.assert_in("users", result.table_lineage.upstream["QUERY_RESULT"], "Should depend on users table")
     
     print_lineage_analysis(result, sql, "Simple SELECT Query")
 
@@ -109,9 +126,9 @@ def test_simple_join():
     result = analyzer.analyze(sql)
     
     runner.assert_true(not result.has_errors(), "Query should not have errors")
-    upstream = result.table_lineage.upstream["MAIN_QUERY"]
-    runner.assert_in("default.users", upstream, "Should depend on users table")
-    runner.assert_in("default.orders", upstream, "Should depend on orders table")
+    upstream = result.table_lineage.upstream["QUERY_RESULT"]
+    runner.assert_in("users", upstream, "Should depend on users table")
+    runner.assert_in("orders", upstream, "Should depend on orders table")
     runner.assert_greater(len(result.column_lineage.upstream), 0, "Should have column lineage")
     
     print_lineage_analysis(result, sql, "Simple JOIN Query")
@@ -134,9 +151,9 @@ def test_simple_cte():
     
     runner.assert_true(not result.has_errors(), "Query should not have errors")
     runner.assert_in("active_users", result.table_lineage.upstream, "Should have CTE in upstream")
-    runner.assert_in("MAIN_QUERY", result.table_lineage.upstream, "Should have main query in upstream")
-    runner.assert_in("default.users", result.table_lineage.upstream["active_users"], "CTE should depend on users")
-    runner.assert_in("active_users", result.table_lineage.upstream["MAIN_QUERY"], "Main query should depend on CTE")
+    runner.assert_in("QUERY_RESULT", result.table_lineage.upstream, "Should have main query in upstream")
+    runner.assert_in("users", result.table_lineage.upstream["active_users"], "CTE should depend on users")
+    runner.assert_in("active_users", result.table_lineage.upstream["QUERY_RESULT"], "Main query should depend on CTE")
     
     print_lineage_analysis(result, sql, "Simple CTE Query")
 
@@ -157,15 +174,15 @@ def test_create_table_as_select():
     
     runner.assert_true(not result.has_errors(), "Query should not have errors")
     runner.assert_in("user_summary", result.table_lineage.upstream, "Should have target table in upstream")
-    runner.assert_in("default.users", result.table_lineage.upstream["user_summary"], "Target should depend on users")
+    runner.assert_in("users", result.table_lineage.upstream["user_summary"], "Target should depend on users")
     
     # Check downstream
-    runner.assert_in("default.users", result.table_lineage.downstream, "Users should have downstream")
-    runner.assert_in("user_summary", result.table_lineage.downstream["default.users"], "Users should flow to user_summary")
+    runner.assert_in("users", result.table_lineage.downstream, "Users should have downstream")
+    runner.assert_in("user_summary", result.table_lineage.downstream["users"], "Users should flow to user_summary")
     
     print(f"✓ SQL: {sql.strip()}")
     print(f"✓ Target table upstream: {result.table_lineage.upstream['user_summary']}")
-    print(f"✓ Source table downstream: {result.table_lineage.downstream['default.users']}")
+    print(f"✓ Source table downstream: {result.table_lineage.downstream['users']}")
 
 
 def test_complex_multi_cte():
@@ -218,11 +235,11 @@ def test_complex_multi_cte():
         runner.assert_in(cte, result.table_lineage.upstream, f"Should have {cte} CTE")
     
     # Check dependencies
-    runner.assert_in("default.orders", result.table_lineage.upstream["order_stats"], "order_stats should depend on orders")
-    runner.assert_in("default.users", result.table_lineage.upstream["customer_segments"], "customer_segments should depend on users")
+    runner.assert_in("orders", result.table_lineage.upstream["order_stats"], "order_stats should depend on orders")
+    runner.assert_in("users", result.table_lineage.upstream["customer_segments"], "customer_segments should depend on users")
     runner.assert_in("order_stats", result.table_lineage.upstream["customer_segments"], "customer_segments should depend on order_stats")
     runner.assert_in("customer_segments", result.table_lineage.upstream["segment_summary"], "segment_summary should depend on customer_segments")
-    runner.assert_in("segment_summary", result.table_lineage.upstream["MAIN_QUERY"], "main query should depend on segment_summary")
+    runner.assert_in("segment_summary", result.table_lineage.upstream["QUERY_RESULT"], "main query should depend on segment_summary")
     
     print(f"✓ SQL: Complex multi-CTE query")
     print(f"✓ Found CTEs: {[cte for cte in expected_ctes if cte in result.table_lineage.upstream]}")
@@ -259,8 +276,8 @@ def test_complex_joins_with_aggregation():
     
     runner.assert_true(not result.has_errors(), "Query should not have errors")
     
-    upstream = result.table_lineage.upstream["MAIN_QUERY"]
-    expected_tables = ["default.categories", "default.products", "default.orders", "default.users"]
+    upstream = result.table_lineage.upstream["QUERY_RESULT"]
+    expected_tables = ["categories", "products", "orders", "users"]
     
     for table in expected_tables:
         runner.assert_in(table, upstream, f"Should depend on {table}")
@@ -294,7 +311,7 @@ def test_window_functions():
     result = analyzer.analyze(sql)
     
     runner.assert_true(not result.has_errors(), "Query should not have errors")
-    runner.assert_in("default.orders", result.table_lineage.upstream["MAIN_QUERY"], "Should depend on orders table")
+    runner.assert_in("orders", result.table_lineage.upstream["QUERY_RESULT"], "Should depend on orders table")
     runner.assert_greater(len(result.column_lineage.upstream), 3, "Should have column lineage for window functions")
     
     print(f"✓ SQL: Window functions query")
@@ -324,9 +341,9 @@ def test_subquery():
     result = analyzer.analyze(sql)
     
     runner.assert_true(not result.has_errors(), "Query should not have errors")
-    upstream = result.table_lineage.upstream["MAIN_QUERY"]
-    runner.assert_in("default.users", upstream, "Should depend on users table")
-    runner.assert_in("default.orders", upstream, "Should depend on orders table")
+    upstream = result.table_lineage.upstream["QUERY_RESULT"]
+    runner.assert_in("users", upstream, "Should depend on users table")
+    runner.assert_in("orders", upstream, "Should depend on orders table")
     
     print(f"✓ SQL: Subquery test")
     print(f"✓ Upstream tables: {upstream}")
@@ -348,9 +365,9 @@ def test_union_query():
     result = analyzer.analyze(sql)
     
     runner.assert_true(not result.has_errors(), "Query should not have errors")
-    upstream = result.table_lineage.upstream["MAIN_QUERY"]
+    upstream = result.table_lineage.upstream["QUERY_RESULT"]
     
-    expected_tables = ["default.users", "default.products", "default.categories"]
+    expected_tables = ["users", "products", "categories"]
     for table in expected_tables:
         runner.assert_in(table, upstream, f"Should depend on {table}")
     
@@ -392,7 +409,7 @@ def test_different_dialects():
         
         runner.assert_true(not result.has_errors(), f"Query should work with {dialect} dialect")
         runner.assert_true(result.dialect == dialect, f"Result should have {dialect} dialect")
-        runner.assert_in("MAIN_QUERY", result.table_lineage.upstream, f"Should have upstream with {dialect}")
+        runner.assert_in("QUERY_RESULT", result.table_lineage.upstream, f"Should have upstream with {dialect}")
     
     print(f"✓ Tested dialects: {dialects}")
 
@@ -448,6 +465,73 @@ def main():
     
     print_section_header("SQL Lineage Analyzer - Simple Tests")
     
+    # Collect JSON outputs for key test queries
+    analyzer = SQLLineageAnalyzer(dialect="trino")
+    analyzer.set_metadata_registry(SampleMetadataRegistry())
+    
+    json_outputs = []
+    test_queries = [
+        ("simple_select", "SELECT id, name, email FROM users WHERE age > 25"),
+        ("simple_join", "SELECT u.name, o.total, o.order_date FROM users u JOIN orders o ON u.id = o.user_id WHERE u.age > 18"),
+        ("simple_cte", """
+        WITH active_users AS (
+            SELECT id, name, email
+            FROM users
+            WHERE created_at >= '2023-01-01'
+        )
+        SELECT * FROM active_users WHERE name LIKE 'A%'
+        """),
+        ("create_table_as_select", """
+        CREATE TABLE user_summary AS
+        SELECT id, name, age, COUNT(*) as login_count
+        FROM users
+        WHERE age >= 18
+        GROUP BY id, name, age
+        """),
+        ("complex_multi_cte", """
+        WITH order_stats AS (
+            SELECT 
+                customer_id,
+                COUNT(*) as order_count,
+                SUM(total) as total_spent
+            FROM orders
+            WHERE order_date >= '2023-01-01'
+            GROUP BY customer_id
+        ),
+        customer_segments AS (
+            SELECT 
+                u.id,
+                u.name,
+                u.email,
+                os.order_count,
+                os.total_spent,
+                CASE 
+                    WHEN os.total_spent > 1000 THEN 'Premium'
+                    WHEN os.total_spent > 500 THEN 'Standard'
+                    ELSE 'Basic'
+                END as segment
+            FROM users u
+            LEFT JOIN order_stats os ON u.id = os.customer_id
+        ),
+        segment_summary AS (
+            SELECT 
+                segment,
+                COUNT(*) as customer_count,
+                AVG(total_spent) as avg_spent
+            FROM customer_segments
+            GROUP BY segment
+        )
+        SELECT * FROM segment_summary ORDER BY avg_spent DESC
+        """)
+    ]
+    
+    for query_name, sql in test_queries:
+        try:
+            json_output = analyzer.get_lineage_json(sql)
+            json_outputs.append((query_name, json_output))
+        except Exception as e:
+            print(f"❌ Failed to generate JSON for {query_name}: {e}")
+    
     # Run all tests
     test_functions = [
         (test_simple_select, "Simple SELECT Query"),
@@ -467,6 +551,10 @@ def main():
     
     for test_func, test_name in test_functions:
         runner.run_test(test_func, test_name)
+    
+    # Save JSON outputs to files
+    if json_outputs:
+        save_json_outputs(json_outputs, "simple_test")
     
     # Print final summary
     runner.print_summary()

@@ -19,7 +19,7 @@ def print_subsection_header(title, width=60):
 def format_table_info(table_name, metadata=None):
     """Format table information with metadata if available."""
     # Handle special logical targets
-    if table_name == "MAIN_QUERY":
+    if table_name == "QUERY_RESULT":
         return "Query Result Set (Main Output)"
     elif table_name.endswith("_QUERY"):
         return f"Query Result Set ({table_name.replace('_QUERY', '')})"
@@ -182,10 +182,10 @@ def print_lineage_analysis(result, sql, test_name, show_column_lineage=True):
         
         for target_col, source_cols in result.column_lineage.upstream.items():
             # Clean up target column display
-            if target_col.startswith("MAIN_QUERY."):
-                target_display = target_col.replace("MAIN_QUERY.", "result.")
-            elif "MAIN_QUERY" in target_col:
-                target_display = target_col.replace("MAIN_QUERY", "result")
+            if target_col.startswith("QUERY_RESULT."):
+                target_display = target_col.replace("QUERY_RESULT.", "result.")
+            elif "QUERY_RESULT" in target_col:
+                target_display = target_col.replace("QUERY_RESULT", "result")
             else:
                 target_display = target_col
             
@@ -232,13 +232,13 @@ def print_quick_result(result, label, show_details=True, show_column_lineage=Tru
         print(f"❌ {label}: {result.errors[0]}")
         return False
     
-    upstream_count = len(result.table_lineage.upstream.get("MAIN_QUERY", []))
+    upstream_count = len(result.table_lineage.upstream.get("QUERY_RESULT", []))
     downstream_count = len(result.table_lineage.downstream)
     
     print(f"✅ {label}:")
     if show_details:
         if upstream_count > 0:
-            upstream_tables = list(result.table_lineage.upstream.get("MAIN_QUERY", []))
+            upstream_tables = list(result.table_lineage.upstream.get("QUERY_RESULT", []))
             print(f"    📊 Upstream: {', '.join(sorted(upstream_tables))}")
         
         if downstream_count > 0:

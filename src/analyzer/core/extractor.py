@@ -50,7 +50,7 @@ class LineageExtractor:
         
         # Process main query
         if isinstance(expression, exp.Select):
-            target_name = "MAIN_QUERY"
+            target_name = "QUERY_RESULT"
             source_tables = self._get_source_tables_from_node(expression, alias_mappings, cte_mapping)
             
             for source in source_tables:
@@ -58,7 +58,7 @@ class LineageExtractor:
         
         # Handle UNION queries
         elif isinstance(expression, exp.Union):
-            target_name = "MAIN_QUERY"
+            target_name = "QUERY_RESULT"
             source_tables = self._get_source_tables_from_node(expression, alias_mappings, cte_mapping)
             
             for source in source_tables:
@@ -96,7 +96,7 @@ class LineageExtractor:
         # Process main query
         if isinstance(expression, exp.Select):
             self._process_select_for_column_lineage(
-                expression, lineage, alias_mappings, target_prefix="MAIN_QUERY"
+                expression, lineage, alias_mappings, target_prefix="QUERY_RESULT"
             )
         elif isinstance(expression, exp.Create):
             # Handle CREATE TABLE AS SELECT
@@ -194,7 +194,7 @@ class LineageExtractor:
             
             # Clean the table name first (remove " AS alias" part)
             clean_table_name = self._clean_table_reference(table_name)
-            base_table_name = clean_table_name.replace("default.", "") if clean_table_name.startswith("default.") else clean_table_name
+            base_table_name = clean_table_name
             
             # If this is a CTE reference, add the CTE name directly
             if base_table_name in cte_mapping:
@@ -297,14 +297,11 @@ class LineageExtractor:
         return column_ref
     
     def _clean_table_reference(self, table_ref: str) -> str:
-        """Clean up table reference by removing aliases and adding default schema."""
+        """Clean up table reference by removing aliases."""
         if " AS " in table_ref:
             table_ref = table_ref.split(" AS ")[0].strip()
         
-        # Add default schema if no schema is specified
-        if "." not in table_ref and not table_ref.startswith('"'):
-            return f"default.{table_ref}"
-        
+        # Return the table reference as-is without adding default schema
         return table_ref
     
     def _clean_column_reference(self, column_ref: str) -> str:

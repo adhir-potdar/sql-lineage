@@ -26,9 +26,9 @@ class TestOriginalSampleFiles:
         result1 = analyzer.analyze(sql1)
         assert not result1.has_errors()
         
-        upstream = result1.table_lineage.upstream["MAIN_QUERY"]
-        assert "default.users" in upstream
-        assert "default.orders" in upstream
+        upstream = result1.table_lineage.upstream["QUERY_RESULT"]
+        assert "users" in upstream
+        assert "orders" in upstream
         
         # Example 2: Complex aggregation with multiple JOINs
         sql2 = """
@@ -50,10 +50,10 @@ class TestOriginalSampleFiles:
         result2 = analyzer.analyze(sql2)
         assert not result2.has_errors()
         
-        upstream2 = result2.table_lineage.upstream["MAIN_QUERY"]
-        assert "default.categories" in upstream2
-        assert "default.products" in upstream2
-        assert "default.orders" in upstream2
+        upstream2 = result2.table_lineage.upstream["QUERY_RESULT"]
+        assert "categories" in upstream2
+        assert "products" in upstream2
+        assert "orders" in upstream2
         
         # Example 3: CTE with window functions
         sql3 = """
@@ -88,13 +88,13 @@ class TestOriginalSampleFiles:
         # Should have CTEs
         assert "monthly_sales" in result3.table_lineage.upstream
         assert "sales_with_growth" in result3.table_lineage.upstream
-        assert "MAIN_QUERY" in result3.table_lineage.upstream
+        assert "QUERY_RESULT" in result3.table_lineage.upstream
         
         # CTE should depend on orders table
-        assert "default.orders" in result3.table_lineage.upstream["monthly_sales"]
+        assert "orders" in result3.table_lineage.upstream["monthly_sales"]
         
         # Main query should depend on final CTE
-        assert "sales_with_growth" in result3.table_lineage.upstream["MAIN_QUERY"]
+        assert "sales_with_growth" in result3.table_lineage.upstream["QUERY_RESULT"]
     
     def test_enhanced_lineage_analysis_queries(self, analyzer):
         """Test queries from enhanced_lineage_analysis.py patterns."""
@@ -108,7 +108,7 @@ class TestOriginalSampleFiles:
         for sql in basic_queries:
             result = analyzer.analyze(sql)
             assert not result.has_errors()
-            assert "MAIN_QUERY" in result.table_lineage.upstream
+            assert "QUERY_RESULT" in result.table_lineage.upstream
         
         # Complex JOIN query similar to enhanced_lineage_analysis.py
         complex_query = """
@@ -129,9 +129,9 @@ class TestOriginalSampleFiles:
         result = analyzer.analyze(complex_query)
         assert not result.has_errors()
         
-        upstream = result.table_lineage.upstream["MAIN_QUERY"]
-        assert "default.users" in upstream
-        assert "default.orders" in upstream
+        upstream = result.table_lineage.upstream["QUERY_RESULT"]
+        assert "users" in upstream
+        assert "orders" in upstream
         
         # Should have column lineage
         assert len(result.column_lineage.upstream) > 0
@@ -154,7 +154,7 @@ class TestOriginalSampleFiles:
             assert not result.has_errors()
             
             # Should identify target table
-            target_tables = [k for k in result.table_lineage.upstream.keys() if k != "MAIN_QUERY"]
+            target_tables = [k for k in result.table_lineage.upstream.keys() if k != "QUERY_RESULT"]
             assert len(target_tables) > 0
     
     def test_trino_dialect_patterns(self, analyzer):
@@ -164,8 +164,8 @@ class TestOriginalSampleFiles:
         analyzer.set_dialect("trino")
         
         trino_queries = [
-            "SELECT * FROM hive.default.users",
-            "CREATE TABLE hive.analytics.user_summary AS SELECT user_id, name, age FROM hive.default.users WHERE age >= 18",
+            "SELECT * FROM hive.users",
+            "CREATE TABLE hive.analytics.user_summary AS SELECT user_id, name, age FROM hive.users WHERE age >= 18",
             """CREATE TABLE postgresql.warehouse.customer_summary AS 
                SELECT c.customer_id, c.customer_name, COUNT(o.order_id) as total_orders 
                FROM mysql.sales_db.customers c 
@@ -214,7 +214,7 @@ class TestOriginalSampleFiles:
         assert not result.has_errors()
         
         # Should identify all the complex table references
-        upstream = result.table_lineage.upstream["MAIN_QUERY"]
+        upstream = result.table_lineage.upstream["QUERY_RESULT"]
         assert len(upstream) >= 4  # Should have multiple tables from the complex JOIN
         
         # Should handle the schema-qualified names
