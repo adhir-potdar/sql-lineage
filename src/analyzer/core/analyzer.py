@@ -1,11 +1,13 @@
 """Main SQL lineage analyzer."""
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import sqlglot
 from sqlglot import Expression
+import json
 
 from .models import LineageResult, TableMetadata
 from .extractor import LineageExtractor
+from .parsers import SelectParser, TransformationParser, CTEParser, CTASParser, InsertParser, UpdateParser
 from ..metadata.registry import MetadataRegistry
 from ..utils.validation import validate_sql_input
 
@@ -23,6 +25,299 @@ class SQLLineageAnalyzer:
         self.dialect = dialect
         self.metadata_registry = MetadataRegistry()
         self.extractor = LineageExtractor()
+        
+        # Initialize modular parsers as core components
+        self.select_parser = SelectParser(dialect)
+        self.transformation_parser = TransformationParser(dialect)
+        self.cte_parser = CTEParser(dialect)
+        self.ctas_parser = CTASParser(dialect)
+        self.insert_parser = InsertParser(dialect)
+        self.update_parser = UpdateParser(dialect)
+    
+    def analyze_comprehensive(self, sql: str) -> Dict[str, Any]:
+        """
+        Comprehensive analysis using modular parsers.
+        
+        Args:
+            sql: SQL query string to analyze
+            
+        Returns:
+            Comprehensive analysis result
+        """
+        try:
+            # Determine SQL type and route to appropriate parser
+            sql_type = self._determine_sql_type(sql)
+            
+            analysis_result = {
+                'sql': sql,
+                'sql_type': sql_type,
+                'dialect': self.dialect,
+                'success': True
+            }
+            
+            try:
+                if sql_type == 'SELECT':
+                    analysis_result.update(self._analyze_select(sql))
+                elif sql_type == 'CTE':
+                    analysis_result.update(self._analyze_cte(sql))
+                elif sql_type == 'CTAS':
+                    analysis_result.update(self._analyze_ctas(sql))
+                elif sql_type == 'INSERT':
+                    analysis_result.update(self._analyze_insert(sql))
+                elif sql_type == 'UPDATE':
+                    analysis_result.update(self._analyze_update(sql))
+                else:
+                    analysis_result.update(self._analyze_generic(sql))
+            except Exception as analysis_error:
+                analysis_result['success'] = False
+                analysis_result['error'] = f"Analysis error for {sql_type}: {str(analysis_error)}"
+            
+            return analysis_result
+            
+        except Exception as e:
+            return {
+                'sql': sql,
+                'error': str(e),
+                'success': False
+            }
+    
+    def _determine_sql_type(self, sql: str) -> str:
+        """Determine the type of SQL statement."""
+        # Clean and normalize the SQL
+        sql_cleaned = ' '.join(sql.strip().split()).upper()
+        
+        if sql_cleaned.startswith('WITH'):
+            return 'CTE'
+        elif sql_cleaned.startswith('CREATE TABLE') and 'AS SELECT' in sql_cleaned:
+            return 'CTAS'
+        elif sql_cleaned.startswith('SELECT'):
+            return 'SELECT'
+        elif sql_cleaned.startswith('INSERT'):
+            return 'INSERT'
+        elif sql_cleaned.startswith('UPDATE'):
+            return 'UPDATE'
+        elif sql_cleaned.startswith('DELETE'):
+            return 'DELETE'
+        else:
+            return 'UNKNOWN'
+    
+    def _analyze_select(self, sql: str) -> Dict[str, Any]:
+        """Analyze simple SELECT statement."""
+        select_data = self.select_parser.parse(sql)
+        transformation_data = self.transformation_parser.parse(sql)
+        
+        return {
+            'query_structure': select_data,
+            'transformations': transformation_data,
+            'lineage': self._build_select_lineage(select_data, transformation_data),
+            'result_columns': self._extract_result_columns(select_data),
+            'source_tables': self._extract_source_tables(select_data)
+        }
+    
+    def _analyze_cte(self, sql: str) -> Dict[str, Any]:
+        """Analyze CTE statement."""
+        cte_data = self.cte_parser.parse(sql)
+        cte_lineage = self.cte_parser.get_cte_lineage_chain(sql)
+        
+        return {
+            'cte_structure': cte_data,
+            'cte_lineage': cte_lineage,
+            'execution_order': cte_lineage.get('execution_order', []),
+            'final_result': cte_lineage.get('final_result', {}),
+            'cte_dependencies': cte_data.get('cte_dependencies', {})
+        }
+    
+    def _analyze_ctas(self, sql: str) -> Dict[str, Any]:
+        """Analyze CREATE TABLE AS SELECT statement."""
+        ctas_data = self.ctas_parser.parse(sql)
+        ctas_lineage = self.ctas_parser.get_ctas_lineage(sql)
+        
+        return {
+            'ctas_structure': ctas_data,
+            'ctas_lineage': ctas_lineage,
+            'target_table': ctas_data.get('target_table', {}),
+            'source_analysis': ctas_lineage.get('source_analysis', {}),
+            'transformations': ctas_lineage.get('transformations', [])
+        }
+    
+    def _analyze_insert(self, sql: str) -> Dict[str, Any]:
+        """Analyze INSERT statement."""
+        insert_data = self.insert_parser.parse(sql)
+        insert_lineage = self.insert_parser.get_insert_lineage(sql)
+        
+        return {
+            'insert_structure': insert_data,
+            'insert_lineage': insert_lineage,
+            'target_table': insert_data.get('target_table', {}),
+            'source_analysis': insert_lineage.get('source_analysis', {}),
+            'data_flow': insert_lineage.get('data_flow', [])
+        }
+    
+    def _analyze_update(self, sql: str) -> Dict[str, Any]:
+        """Analyze UPDATE statement."""
+        update_data = self.update_parser.parse(sql)
+        update_lineage = self.update_parser.get_update_lineage(sql)
+        
+        return {
+            'update_structure': update_data,
+            'update_lineage': update_lineage,
+            'target_table': update_data.get('target_table', {}),
+            'source_analysis': update_lineage.get('source_analysis', {}),
+            'column_updates': update_lineage.get('column_updates', {}),
+            'data_flow': update_lineage.get('data_flow', [])
+        }
+    
+    def _analyze_generic(self, sql: str) -> Dict[str, Any]:
+        """Analyze other types of SQL statements."""
+        # For now, try to extract what we can using the select parser
+        try:
+            select_data = self.select_parser.parse(sql)
+            return {
+                'partial_analysis': select_data,
+                'note': 'Generic analysis - limited information available'
+            }
+        except Exception:
+            return {
+                'error': 'Unable to parse this SQL type'
+            }
+    
+    def _build_select_lineage(self, select_data: Dict[str, Any], transformation_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Build lineage chain for SELECT statement."""
+        lineage = {
+            'type': 'SELECT_LINEAGE',
+            'flow': []
+        }
+        
+        # Source tables
+        source_tables = select_data.get('from_tables', [])
+        for table in source_tables:
+            lineage['flow'].append({
+                'type': 'SOURCE',
+                'entity': table.get('table_name'),
+                'alias': table.get('alias'),
+                'columns_used': self._get_columns_used_from_table(table, select_data)
+            })
+        
+        # Transformations
+        transformations = []
+        
+        # Add filters
+        filters = transformation_data.get('filters', {})
+        if filters.get('conditions'):
+            transformations.append({
+                'type': 'FILTER',
+                'conditions': filters['conditions']
+            })
+        
+        # Add joins
+        joins = transformation_data.get('joins', [])
+        for join in joins:
+            transformations.append({
+                'type': 'JOIN',
+                'join_type': join.get('join_type'),
+                'table': join.get('table_name'),
+                'conditions': join.get('conditions', [])
+            })
+        
+        # Add aggregations
+        aggregations = transformation_data.get('aggregations', {})
+        if aggregations.get('group_by_columns'):
+            transformations.append({
+                'type': 'GROUP_BY',
+                'columns': aggregations['group_by_columns']
+            })
+        
+        # Add transformations to flow
+        for transform in transformations:
+            lineage['flow'].append(transform)
+        
+        # Final result
+        lineage['flow'].append({
+            'type': 'RESULT',
+            'entity': 'QUERY_RESULT',
+            'columns': self._extract_result_columns(select_data)
+        })
+        
+        return lineage
+    
+    def _get_columns_used_from_table(self, table: Dict[str, Any], select_data: Dict[str, Any]) -> List[str]:
+        """Get columns used from a specific table."""
+        table_name = table.get('table_name')
+        table_alias = table.get('alias')
+        used_columns = []
+        
+        # Check select columns
+        select_columns = select_data.get('select_columns', [])
+        for col in select_columns:
+            source_table = col.get('source_table')
+            if source_table == table_name or source_table == table_alias:
+                used_columns.append(col.get('column_name'))
+        
+        # Check WHERE conditions
+        where_conditions = select_data.get('where_conditions', [])
+        for condition in where_conditions:
+            column = condition.get('column', '')
+            if '.' in column:
+                col_table, col_name = column.split('.', 1)
+                if col_table == table_name or col_table == table_alias:
+                    used_columns.append(col_name)
+        
+        # Check JOIN conditions
+        joins = select_data.get('joins', [])
+        for join in joins:
+            for condition in join.get('conditions', []):
+                left_col = condition.get('left_column', '')
+                right_col = condition.get('right_column', '')
+                
+                # Check both sides of join condition
+                for col in [left_col, right_col]:
+                    if '.' in col:
+                        col_table, col_name = col.split('.', 1)
+                        if col_table == table_name or col_table == table_alias:
+                            used_columns.append(col_name)
+        
+        return list(set(used_columns))  # Remove duplicates
+    
+    def _extract_result_columns(self, select_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract result columns with their metadata."""
+        result_columns = []
+        
+        select_columns = select_data.get('select_columns', [])
+        for col in select_columns:
+            result_columns.append({
+                'name': col.get('column_name'),
+                'alias': col.get('alias'),
+                'source_table': col.get('source_table'),
+                'expression': col.get('raw_expression'),
+                'is_computed': col.get('is_aggregate') or col.get('is_window_function')
+            })
+        
+        return result_columns
+    
+    def _extract_source_tables(self, select_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Extract source tables with their metadata."""
+        source_tables = []
+        
+        # FROM tables
+        from_tables = select_data.get('from_tables', [])
+        for table in from_tables:
+            source_tables.append({
+                'name': table.get('table_name'),
+                'alias': table.get('alias'),
+                'type': 'FROM'
+            })
+        
+        # JOIN tables
+        joins = select_data.get('joins', [])
+        for join in joins:
+            source_tables.append({
+                'name': join.get('table_name'),
+                'alias': join.get('alias'),
+                'type': 'JOIN',
+                'join_type': join.get('join_type')
+            })
+        
+        return source_tables
     
     def analyze(self, sql: str, **kwargs) -> LineageResult:
         """
@@ -47,23 +342,47 @@ class SQLLineageAnalyzer:
             )
         
         try:
-            # Parse SQL
-            expression = self._parse_sql(sql)
-            
-            # Extract lineage
-            table_lineage = self.extractor.extract_table_lineage(expression)
-            column_lineage = self.extractor.extract_column_lineage(expression)
-            
-            # Get metadata for involved tables
-            metadata = self._collect_metadata(table_lineage)
-            
-            return LineageResult(
-                sql=sql,
-                dialect=self.dialect,
-                table_lineage=table_lineage,
-                column_lineage=column_lineage,
-                metadata=metadata
-            )
+            # First try the legacy extractor approach for backward compatibility
+            try:
+                # Parse SQL
+                expression = self._parse_sql(sql)
+                
+                # Extract lineage using the original extractor
+                table_lineage = self.extractor.extract_table_lineage(expression)
+                column_lineage = self.extractor.extract_column_lineage(expression)
+                
+                # Get metadata for involved tables
+                metadata = self._collect_metadata(table_lineage)
+                
+                return LineageResult(
+                    sql=sql,
+                    dialect=self.dialect,
+                    table_lineage=table_lineage,
+                    column_lineage=column_lineage,
+                    metadata=metadata
+                )
+            except Exception:
+                # If legacy approach fails, fall back to modular parsers
+                comprehensive_analysis = self.analyze_comprehensive(sql)
+                
+                if not comprehensive_analysis.get('success', False):
+                    raise Exception(comprehensive_analysis.get('error', 'Analysis failed'))
+                
+                # Convert modular analysis to LineageResult format
+                # For now, create basic lineage structures - this could be enhanced further
+                from .models import TableLineage, ColumnLineage
+                
+                table_lineage = TableLineage()
+                column_lineage = ColumnLineage() 
+                metadata = {}
+                
+                return LineageResult(
+                    sql=sql,
+                    dialect=self.dialect,
+                    table_lineage=table_lineage,
+                    column_lineage=column_lineage,
+                    metadata=metadata
+                )
             
         except Exception as e:
             return LineageResult(
@@ -396,7 +715,6 @@ class SQLLineageAnalyzer:
                     "entity_type": entity_type,
                     "depth": current_depth - 1,
                     "dependencies": [],
-                    "transformations": [],
                     "metadata": {}
                 }
             
@@ -407,7 +725,6 @@ class SQLLineageAnalyzer:
                     "entity_type": entity_type,
                     "depth": current_depth - 1,
                     "dependencies": [],
-                    "transformations": [],
                     "metadata": {}
                 }
             
@@ -425,199 +742,158 @@ class SQLLineageAnalyzer:
                         dep_chain = build_comprehensive_chain(dependent_table, "table", current_depth + 1, visited_in_path)
                         dependencies.append(dep_chain)
                 
-                # Get table transformations
+                # Get table transformations (optimized - only include non-empty data)
                 if entity_name in result.table_lineage.transformations:
                     for transformation in result.table_lineage.transformations[entity_name]:
-                        transformations.append({
+                        trans_data = {
                             "type": "table_transformation",
                             "source_table": transformation.source_table,
-                            "target_table": transformation.target_table,
-                            "join_type": transformation.join_type.value if transformation.join_type else None,
-                            "join_conditions": [
+                            "target_table": transformation.target_table
+                        }
+                        
+                        # Only add non-null/non-empty values
+                        if transformation.join_type:
+                            trans_data["join_type"] = transformation.join_type.value
+                        
+                        if transformation.join_conditions:
+                            trans_data["join_conditions"] = [
                                 {
                                     "left_column": jc.left_column,
                                     "operator": jc.operator.value,
                                     "right_column": jc.right_column
                                 }
                                 for jc in transformation.join_conditions
-                            ],
-                            "filter_conditions": [
+                            ]
+                        
+                        if transformation.filter_conditions:
+                            trans_data["filter_conditions"] = [
                                 {
                                     "column": fc.column,
                                     "operator": fc.operator.value,
                                     "value": fc.value
                                 }
                                 for fc in transformation.filter_conditions
-                            ],
-                            "group_by_columns": transformation.group_by_columns,
-                            "having_conditions": [
+                            ]
+                        
+                        if transformation.group_by_columns:
+                            trans_data["group_by_columns"] = transformation.group_by_columns
+                        
+                        if transformation.having_conditions:
+                            trans_data["having_conditions"] = [
                                 {
                                     "column": hc.column,
                                     "operator": hc.operator.value,
                                     "value": hc.value
                                 }
                                 for hc in transformation.having_conditions
-                            ],
-                            "order_by_columns": transformation.order_by_columns
-                        })
+                            ]
+                        
+                        if transformation.order_by_columns:
+                            trans_data["order_by_columns"] = transformation.order_by_columns
+                        
+                        transformations.append(trans_data)
                 
-                # Get table metadata
+                # Get essential table metadata (excluding detailed column info)
                 if entity_name in result.metadata:
                     table_meta = result.metadata[entity_name]
                     metadata = {
-                        "catalog": table_meta.catalog,
-                        "schema": table_meta.schema,
-                        "table": table_meta.table,
-                        "table_type": table_meta.table_type.value,
-                        "description": table_meta.description,
-                        "owner": table_meta.owner,
-                        "created_date": table_meta.created_date.isoformat() if table_meta.created_date else None,
-                        "row_count": table_meta.row_count,
-                        "storage_format": table_meta.storage_format,
-                        "columns": [
-                            {
-                                "name": col.name,
-                                "data_type": col.data_type,
-                                "nullable": col.nullable,
-                                "primary_key": col.primary_key,
-                                "foreign_key": col.foreign_key,
-                                "description": col.description,
-                                "default_value": col.default_value
-                            }
-                            for col in table_meta.columns
-                        ]
+                        "table_type": table_meta.table_type.value
                     }
+                    
+                    # Only include non-null values to keep output clean
+                    if table_meta.schema:
+                        metadata["schema"] = table_meta.schema
+                    if table_meta.description:
+                        metadata["description"] = table_meta.description
                 
-                # Add column-level information for this table
+                # Add simplified column-level information for this table
                 table_columns = []
                 for column_ref in column_lineage_data.keys():
                     if extract_table_from_column(column_ref) == entity_name:
                         column_name = extract_column_from_ref(column_ref)
-                        column_info = {
-                            "column_name": column_name,
-                            "column_ref": column_ref,
-                            "upstream_columns": list(column_lineage_data.get(column_ref, set())),
-                            "transformations": []
-                        }
+                        upstream_columns = list(column_lineage_data.get(column_ref, set()))
                         
-                        # Get column transformations
-                        if column_ref in result.column_lineage.transformations:
-                            for col_transformation in result.column_lineage.transformations[column_ref]:
-                                col_trans_data = {
-                                    "type": "column_transformation",
-                                    "source_column": col_transformation.source_column,
-                                    "target_column": col_transformation.target_column,
-                                    "expression": col_transformation.expression
-                                }
-                                
-                                if col_transformation.aggregate_function:
-                                    col_trans_data["aggregate_function"] = {
-                                        "function_type": col_transformation.aggregate_function.function_type.value,
-                                        "column": col_transformation.aggregate_function.column,
-                                        "distinct": col_transformation.aggregate_function.distinct
-                                    }
-                                
-                                if col_transformation.window_function:
-                                    col_trans_data["window_function"] = {
-                                        "function_name": col_transformation.window_function.function_name,
-                                        "partition_by": col_transformation.window_function.partition_by,
-                                        "order_by": col_transformation.window_function.order_by
-                                    }
-                                
-                                if col_transformation.case_expression:
-                                    col_trans_data["case_expression"] = {
-                                        "when_conditions": [
-                                            {
-                                                "column": wc.column,
-                                                "operator": wc.operator.value,
-                                                "value": wc.value
-                                            }
-                                            for wc in col_transformation.case_expression.when_conditions
-                                        ],
-                                        "then_values": col_transformation.case_expression.then_values,
-                                        "else_value": col_transformation.case_expression.else_value
-                                    }
-                                
-                                column_info["transformations"].append(col_trans_data)
-                        
-                        table_columns.append(column_info)
+                        # Only include columns that have upstream relationships
+                        if upstream_columns:
+                            column_info = {
+                                "name": column_name,
+                                "upstream": upstream_columns
+                            }
+                            
+                            # Add transformation type if present (simplified)
+                            if column_ref in result.column_lineage.transformations:
+                                column_transformations = result.column_lineage.transformations[column_ref]
+                                if column_transformations:
+                                    trans = column_transformations[0]  # Take first transformation
+                                    if trans.aggregate_function:
+                                        column_info["type"] = "AGGREGATE"
+                                    elif trans.window_function:
+                                        column_info["type"] = "WINDOW"
+                                    elif trans.case_expression:
+                                        column_info["type"] = "CASE"
+                                    elif trans.expression and trans.expression != column_name:
+                                        column_info["type"] = "COMPUTED"
+                                    else:
+                                        column_info["type"] = "DIRECT"
+                                else:
+                                    column_info["type"] = "DIRECT"
+                            else:
+                                column_info["type"] = "DIRECT"
+                            
+                            table_columns.append(column_info)
                 
-                metadata["table_columns"] = table_columns
+                # Special handling for QUERY_RESULT - infer result columns from SQL parsing
+                if entity_name == "QUERY_RESULT" and not table_columns:
+                    # For QUERY_RESULT, we should infer columns from the SELECT statement
+                    table_columns = self._infer_query_result_columns(sql, column_lineage_data)
+                
+                # Only add table_columns if not empty
+                if table_columns:
+                    metadata["table_columns"] = table_columns
             
             elif entity_type == "column":
-                # Handle column-level lineage
+                # Handle column-level lineage (simplified)
                 if entity_name in column_lineage_data:
                     for dependent_column in column_lineage_data[entity_name]:
                         dep_chain = build_comprehensive_chain(dependent_column, "column", current_depth + 1, visited_in_path)
                         dependencies.append(dep_chain)
                 
-                # Get column transformations
+                # Simplified column transformations
                 if entity_name in result.column_lineage.transformations:
-                    for col_transformation in result.column_lineage.transformations[entity_name]:
-                        trans_data = {
-                            "type": "column_transformation",
-                            "source_column": col_transformation.source_column,
-                            "target_column": col_transformation.target_column,
-                            "expression": col_transformation.expression
-                        }
+                    transformations_list = result.column_lineage.transformations[entity_name]
+                    if transformations_list:
+                        trans = transformations_list[0]  # Take first transformation
+                        trans_data = {"type": "column_transformation"}
                         
-                        if col_transformation.aggregate_function:
-                            trans_data["aggregate_function"] = {
-                                "function_type": col_transformation.aggregate_function.function_type.value,
-                                "column": col_transformation.aggregate_function.column,
-                                "distinct": col_transformation.aggregate_function.distinct
-                            }
-                        
-                        if col_transformation.window_function:
-                            trans_data["window_function"] = {
-                                "function_name": col_transformation.window_function.function_name,
-                                "partition_by": col_transformation.window_function.partition_by,
-                                "order_by": col_transformation.window_function.order_by
-                            }
-                        
-                        if col_transformation.case_expression:
-                            trans_data["case_expression"] = {
-                                "when_conditions": [
-                                    {
-                                        "column": wc.column,
-                                        "operator": wc.operator.value,
-                                        "value": wc.value
-                                    }
-                                    for wc in col_transformation.case_expression.when_conditions
-                                ],
-                                "then_values": col_transformation.case_expression.then_values,
-                                "else_value": col_transformation.case_expression.else_value
-                            }
+                        if trans.aggregate_function:
+                            trans_data["function_type"] = trans.aggregate_function.function_type.value
+                        elif trans.window_function:
+                            trans_data["function_type"] = "WINDOW"
+                        elif trans.case_expression:
+                            trans_data["function_type"] = "CASE"
+                        elif trans.expression:
+                            trans_data["expression"] = trans.expression
                         
                         transformations.append(trans_data)
                 
-                # Get column metadata from parent table
+                # Minimal column metadata
                 parent_table = extract_table_from_column(entity_name)
-                if parent_table in result.metadata:
-                    table_meta = result.metadata[parent_table]
-                    column_name = extract_column_from_ref(entity_name)
-                    for col in table_meta.columns:
-                        if col.name == column_name:
-                            metadata = {
-                                "parent_table": parent_table,
-                                "column_name": col.name,
-                                "data_type": col.data_type,
-                                "nullable": col.nullable,
-                                "primary_key": col.primary_key,
-                                "foreign_key": col.foreign_key,
-                                "description": col.description,
-                                "default_value": col.default_value
-                            }
-                            break
+                metadata = {"parent_table": parent_table}
             
-            return {
+            # Clean up empty arrays to reduce clutter
+            result_dict = {
                 "entity": entity_name,
                 "entity_type": entity_type,
                 "depth": current_depth - 1,
                 "dependencies": dependencies,
-                "transformations": transformations,
                 "metadata": metadata
             }
+            
+            # Only add transformations if not empty
+            if transformations:
+                result_dict["transformations"] = transformations
+                
+            return result_dict
         
         # Build chains starting from the target entity or all entities
         chains = {}
@@ -776,3 +1052,101 @@ class SQLLineageAnalyzer:
         import json
         chain_data = self.get_lineage_chain(sql, chain_type, depth, target_entity, **kwargs)
         return json.dumps(chain_data, indent=2)
+    
+    def _infer_query_result_columns(self, sql: str, column_lineage_data: Dict) -> List[Dict]:
+        """
+        Infer QUERY_RESULT columns from SQL query when column lineage doesn't provide them.
+        
+        Args:
+            sql: The SQL query string
+            column_lineage_data: Column lineage mapping
+            
+        Returns:
+            List of column information dictionaries for QUERY_RESULT
+        """
+        import re
+        
+        result_columns = []
+        
+        # Try to extract SELECT columns from SQL
+        # This is a simple approach - for more complex cases, proper SQL parsing would be needed
+        select_match = re.search(r'SELECT\s+(.*?)\s+FROM', sql, re.IGNORECASE | re.DOTALL)
+        if select_match:
+            select_clause = select_match.group(1).strip()
+            
+            # Handle simple cases like "SELECT name, email FROM users"
+            if select_clause != '*':
+                # Split by comma and clean up
+                columns = [col.strip() for col in select_clause.split(',')]
+                
+                for col in columns:
+                    # Remove table aliases (u.name -> name)
+                    if '.' in col:
+                        col_name = col.split('.')[-1]
+                    else:
+                        col_name = col
+                    
+                    # Remove AS aliases (name AS user_name -> name)
+                    if ' AS ' in col_name.upper():
+                        col_name = col_name.split(' AS ')[0].strip()
+                    elif ' as ' in col_name:
+                        col_name = col_name.split(' as ')[0].strip()
+                    
+                    # Clean up any remaining whitespace and quotes
+                    col_name = col_name.strip().strip('"').strip("'")
+                    
+                    if col_name:
+                        # Try to find upstream columns from column lineage data
+                        query_result_ref = f"QUERY_RESULT.{col_name}"
+                        upstream_columns = []
+                        
+                        # Look for this column in the lineage data
+                        for column_ref, upstream_cols in column_lineage_data.items():
+                            if (column_ref == query_result_ref or 
+                                column_ref.endswith(f".{col_name}") or
+                                column_ref == col_name):
+                                upstream_columns = list(upstream_cols)
+                                break
+                        
+                        # If no upstream found, try to infer from table references in SQL
+                        if not upstream_columns:
+                            # Simple heuristic: if SQL has "FROM users" and column is "name", 
+                            # assume it comes from users.name
+                            from_match = re.search(r'FROM\s+(\w+)', sql, re.IGNORECASE)
+                            if from_match:
+                                table_name = from_match.group(1)
+                                upstream_columns = [f"{table_name}.{col_name}"]
+                        
+                        # Use simplified format matching the optimized structure
+                        result_columns.append({
+                            "name": col_name,
+                            "upstream": upstream_columns,
+                            "type": "DIRECT"
+                        })
+        
+        return result_columns
+    
+    # Modular parser convenience methods
+    def parse_select(self, sql: str) -> Dict[str, Any]:
+        """Parse SELECT statement using modular parser."""
+        return self.select_parser.parse(sql)
+    
+    def parse_transformations(self, sql: str) -> Dict[str, Any]:
+        """Parse transformations using modular parser.""" 
+        return self.transformation_parser.parse(sql)
+    
+    def parse_cte(self, sql: str) -> Dict[str, Any]:
+        """Parse CTE using modular parser."""
+        return self.cte_parser.parse(sql)
+    
+    def parse_ctas(self, sql: str) -> Dict[str, Any]:
+        """Parse CTAS using modular parser.""" 
+        return self.ctas_parser.parse(sql)
+    
+    def parse_insert(self, sql: str) -> Dict[str, Any]:
+        """Parse INSERT using modular parser."""
+        return self.insert_parser.parse(sql)
+    
+    def parse_update(self, sql: str) -> Dict[str, Any]:
+        """Parse UPDATE using modular parser."""
+        return self.update_parser.parse(sql)

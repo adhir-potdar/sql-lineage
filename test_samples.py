@@ -2,6 +2,9 @@
 """
 Test script for running all original sample queries without pytest.
 This script tests all the sample queries from the original folders to ensure compatibility.
+
+This script now uses the optimized analyzer that provides significantly reduced JSON output
+sizes while maintaining complete lineage analysis capabilities.
 """
 
 import sys

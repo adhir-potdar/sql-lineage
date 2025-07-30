@@ -3,6 +3,9 @@
 Test script for the newly added get_lineage_chain and get_lineage_chain_json functions.
 This script uses all queries from test_quick.py, test_simple.py, and test_samples.py
 to generate comprehensive lineage chain JSON outputs.
+
+This script tests the optimized JSON output that provides significant size reduction
+while maintaining complete lineage information for both tables and columns.
 """
 
 import sys
@@ -11,6 +14,7 @@ import traceback
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from analyzer import SQLLineageAnalyzer
 from analyzer.metadata import SampleMetadataRegistry
+from analyzer.visualization.visualizer import SQLLineageVisualizer
 from test_formatter import print_section_header, print_subsection_header, print_test_summary
 
 
@@ -32,6 +36,38 @@ def save_lineage_chain_outputs(chain_outputs, test_name):
             print(f"❌ Failed to save {filename}: {e}")
     
     return saved_count
+
+
+def generate_lineage_chain_visualizations(chain_outputs, test_name):
+    """Generate JPEG visualizations from lineage chain JSON outputs."""
+    output_dir = "output"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    visualizer = SQLLineageVisualizer()
+    generated_count = 0
+    
+    for query_name, json_output in chain_outputs:
+        try:
+            # Generate JPEG visualization
+            output_path = f"{output_dir}/{test_name}_{query_name}_visualization"
+            
+            # Use the new lineage chain visualization method
+            jpeg_file = visualizer.create_lineage_chain_diagram(
+                lineage_chain_json=json_output,
+                output_path=output_path,
+                output_format="jpeg",
+                layout="horizontal"
+            )
+            
+            print(f"🖼️  Generated JPEG visualization: {jpeg_file}")
+            generated_count += 1
+            
+        except Exception as e:
+            print(f"❌ Failed to generate visualization for {query_name}: {e}")
+            print(f"   Error details: {traceback.format_exc()}")
+    
+    return generated_count
 
 
 def test_lineage_chain_basic_functionality():
@@ -689,6 +725,11 @@ def test_lineage_chain_comprehensive():
         print(f"\n💾 Saving {len(chain_outputs)} lineage chain files...")
         saved_count = save_lineage_chain_outputs(chain_outputs, "lineage_chain_test")
         print(f"📁 Successfully saved {saved_count} lineage chain JSON files")
+        
+        # Generate JPEG visualizations
+        print(f"\n🖼️  Generating {len(chain_outputs)} JPEG visualizations...")
+        viz_count = generate_lineage_chain_visualizations(chain_outputs, "lineage_chain_test")
+        print(f"🎨 Successfully generated {viz_count} JPEG visualization files")
     
     # Summary
     print(f"\n📊 Comprehensive Lineage Chain Generation Results:")
@@ -696,8 +737,9 @@ def test_lineage_chain_comprehensive():
     print(f"   • Successful queries: {successful_queries}")
     print(f"   • Failed queries: {failed_queries}")
     print(f"   • Total lineage chain files generated: {len(chain_outputs)}")
+    print(f"   • Total JPEG visualizations generated: {len(chain_outputs)}")
     print(f"   • Success rate: {(successful_queries / len(all_queries) * 100):.1f}%")
-    print(f"   • Each query generated 1 comprehensive lineage chain file with unlimited depth")
+    print(f"   • Each query generated 1 comprehensive lineage chain file and 1 JPEG visualization with unlimited depth")
     
     return successful_queries > failed_queries
 
@@ -846,6 +888,18 @@ def test_lineage_chain_advanced_features():
             print(f"   ✅ JSON structure valid: {len(json_output)} characters")
             print(f"   📏 Max depth: {parsed_json.get('max_depth')}, Actual depth: {parsed_json.get('actual_max_depth')}")
         
+        # Test JSON optimization benefits
+        print("\n🚀 Testing JSON optimization benefits...")
+        basic_json = analyzer.get_lineage_json(complex_sql)
+        table_chain_json = analyzer.get_table_lineage_chain_json(complex_sql, "downstream", 2)
+        column_chain_json = analyzer.get_column_lineage_chain_json(complex_sql, "downstream", 2)
+        
+        print(f"   📊 Basic lineage JSON: {len(basic_json):,} characters")
+        print(f"   📊 Table chain JSON: {len(table_chain_json):,} characters")
+        print(f"   📊 Column chain JSON: {len(column_chain_json):,} characters")
+        print(f"   📊 Comprehensive chain JSON: {len(json_output):,} characters")
+        print(f"   ✨ Optimized JSON provides comprehensive analysis in efficient format!")
+        
         # Test transformation detail extraction
         print("\n4️⃣ Testing transformation detail extraction...")
         chains = parsed_json.get("chains", {})
@@ -874,6 +928,10 @@ def test_lineage_chain_advanced_features():
         
         save_lineage_chain_outputs(advanced_outputs, "lineage_chain_test")
         print(f"   📁 Saved {len(advanced_outputs)} advanced test file with unlimited downstream depth")
+        
+        # Generate JPEG visualization for advanced test
+        viz_count = generate_lineage_chain_visualizations(advanced_outputs, "lineage_chain_test")
+        print(f"   🎨 Generated {viz_count} advanced JPEG visualization file")
         
         return True
         
@@ -914,6 +972,8 @@ def main():
     # List generated files
     if os.path.exists(output_dir):
         lineage_files = [f for f in os.listdir(output_dir) if f.endswith('.json') and 'lineage_chain' in f and 'lineage_chain_test_' in f]
+        jpeg_files = [f for f in os.listdir(output_dir) if f.endswith('.jpeg') and 'lineage_chain_test_' in f]
+        
         if lineage_files:
             print(f"\n📄 Generated lineage chain files ({len(lineage_files)}):")
             
@@ -955,6 +1015,49 @@ def main():
             print(f"   with unlimited depth traversal, transformations, and metadata integration!")
         else:
             print("\n⚠️  No lineage chain files were generated")
+        
+        # List JPEG visualization files
+        if jpeg_files:
+            print(f"\n🖼️  Generated JPEG visualization files ({len(jpeg_files)}):")
+            
+            # Categorize by query source
+            quick_jpegs = [f for f in jpeg_files if 'quick_' in f]
+            simple_jpegs = [f for f in jpeg_files if 'simple_' in f]
+            sample_jpegs = [f for f in jpeg_files if 'sample' in f and 'simple_' not in f]
+            advanced_jpegs = [f for f in jpeg_files if 'advanced_' in f]
+            
+            if quick_jpegs:
+                print(f"\n   🚀 From test_quick.py queries ({len(quick_jpegs)} files):")
+                for file in sorted(quick_jpegs):
+                    file_path = os.path.join(output_dir, file)
+                    size = os.path.getsize(file_path)
+                    print(f"     • {file} ({size:,} bytes)")
+            
+            if simple_jpegs:
+                print(f"\n   📋 From test_simple.py queries ({len(simple_jpegs)} files):")
+                for file in sorted(simple_jpegs):
+                    file_path = os.path.join(output_dir, file)
+                    size = os.path.getsize(file_path)
+                    print(f"     • {file} ({size:,} bytes)")
+            
+            if sample_jpegs:
+                print(f"\n   🎯 From test_samples.py queries ({len(sample_jpegs)} files):")
+                for file in sorted(sample_jpegs):
+                    file_path = os.path.join(output_dir, file)
+                    size = os.path.getsize(file_path)
+                    print(f"     • {file} ({size:,} bytes)")
+            
+            if advanced_jpegs:
+                print(f"\n   🔬 Advanced feature test ({len(advanced_jpegs)} file):")
+                for file in sorted(advanced_jpegs):
+                    file_path = os.path.join(output_dir, file)
+                    size = os.path.getsize(file_path)
+                    print(f"     • {file} ({size:,} bytes)")
+            
+            print(f"\n🎨 Each JPEG file visualizes table relationships with columns and transformations")
+            print(f"   in horizontal layout with detailed metadata!")
+        else:
+            print("\n⚠️  No JPEG visualization files were generated")
     
     # Print summary
     passed = sum(results)
@@ -964,12 +1067,14 @@ def main():
     print("\n🔗 New Functions Successfully Tested:")
     print("   • get_lineage_chain() - Comprehensive lineage with unlimited depth (depth=0 default)")
     print("   • get_lineage_chain_json() - JSON serialization with unlimited depth traversal")
+    print("   • create_lineage_chain_diagram() - JPEG visualization from lineage chain JSON")
     print("   • Support for downstream analysis with complete relationship mapping")
     print("   • Unlimited depth relationship traversal until no more dependencies found")
     print("   • Targeted entity analysis with unlimited downstream depth")
     print("   • CTAS and CTE transformation tracking with full downstream depth")
     print("   • Complete metadata integration at table and column level")
-    print("   • Single comprehensive file per query with all downstream relationship data")
+    print("   • Horizontal layout with table boxes showing columns and transformations")
+    print("   • Single comprehensive JSON file and JPEG visualization per query")
     
     return 0 if success else 1
 

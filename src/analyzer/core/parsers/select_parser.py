@@ -1,0 +1,311 @@
+"""Parser for SELECT statements."""
+
+from typing import Dict, List, Any, Optional
+import sqlglot
+from sqlglot import exp
+from .base_parser import BaseParser
+
+
+class SelectParser(BaseParser):
+    """Parser for SELECT statement components."""
+    
+    def parse(self, sql: str) -> Dict[str, Any]:
+        """Parse SELECT statement and extract all components."""
+        ast = self.parse_sql(sql)
+        
+        # Find the main SELECT statement
+        select_stmt = self._find_main_select(ast)
+        if not select_stmt:
+            return {}
+        
+        return {
+            'select_columns': self.parse_select_columns(select_stmt),
+            'from_tables': self.parse_from_clause(select_stmt),
+            'joins': self.parse_joins(select_stmt),
+            'where_conditions': self.parse_where_clause(select_stmt),
+            'group_by': self.parse_group_by(select_stmt),
+            'having_conditions': self.parse_having_clause(select_stmt),
+            'order_by': self.parse_order_by(select_stmt),
+            'limit_clause': self.parse_limit_clause(select_stmt),
+            'ctes': self.parse_ctes(ast)
+        }
+    
+    def _find_main_select(self, ast) -> Optional[exp.Select]:
+        """Find the main SELECT statement in the AST."""
+        if isinstance(ast, exp.Select):
+            return ast
+        
+        # Look for SELECT in WITH statements
+        if isinstance(ast, exp.With):
+            return self._find_main_select(ast.this)
+        
+        # Look for SELECT in subqueries
+        for node in ast.find_all(exp.Select):
+            return node
+        
+        return None
+    
+    def parse_select_columns(self, select_stmt: exp.Select) -> List[Dict[str, Any]]:
+        """Parse SELECT column list."""
+        columns = []
+        
+        for expression in select_stmt.expressions:
+            column_info = {
+                'raw_expression': str(expression),
+                'column_name': None,
+                'alias': None,
+                'source_table': None,
+                'is_aggregate': False,
+                'is_window_function': False
+            }
+            
+            # Handle different expression types
+            if isinstance(expression, exp.Alias):
+                column_info['alias'] = expression.alias
+                column_info['column_name'] = expression.alias
+                actual_expr = expression.this
+            else:
+                actual_expr = expression
+                column_info['column_name'] = self.extract_column_name(actual_expr)
+            
+            # Check if it's a column reference
+            if isinstance(actual_expr, exp.Column):
+                column_info['source_table'] = actual_expr.table if actual_expr.table else None
+                if not column_info['column_name']:
+                    column_info['column_name'] = actual_expr.name
+            
+            # Check for aggregate functions
+            if any(isinstance(node, exp.AggFunc) for node in actual_expr.find_all(exp.AggFunc)):
+                column_info['is_aggregate'] = True
+            
+            # Check for window functions
+            if any(isinstance(node, exp.Window) for node in actual_expr.find_all(exp.Window)):
+                column_info['is_window_function'] = True
+            
+            columns.append(column_info)
+        
+        return columns
+    
+    def parse_from_clause(self, select_stmt: exp.Select) -> List[Dict[str, Any]]:
+        """Parse FROM clause tables."""
+        tables = []
+        
+        # Access FROM clause through args
+        from_clause = select_stmt.args.get('from')
+        if from_clause:
+            # Handle simple case where FROM has a single table in 'this'
+            if hasattr(from_clause, 'this') and from_clause.this:
+                table_info = {
+                    'table_name': None,
+                    'alias': None,
+                    'is_subquery': False
+                }
+                
+                table_expr = from_clause.this
+                if isinstance(table_expr, exp.Alias):
+                    table_info['alias'] = table_expr.alias
+                    actual_table = table_expr.this
+                else:
+                    actual_table = table_expr
+                
+                if isinstance(actual_table, exp.Table):
+                    table_info['table_name'] = self.extract_table_name(actual_table)
+                elif isinstance(actual_table, exp.Subquery):
+                    table_info['is_subquery'] = True
+                    table_info['table_name'] = table_info['alias'] or 'subquery'
+                
+                tables.append(table_info)
+            
+            # Handle multiple tables in expressions (though this might be rare in FROM)
+            if hasattr(from_clause, 'expressions') and from_clause.expressions:
+                for table_expr in from_clause.expressions:
+                    table_info = {
+                        'table_name': None,
+                        'alias': None,
+                        'is_subquery': False
+                    }
+                    
+                    if isinstance(table_expr, exp.Alias):
+                        table_info['alias'] = table_expr.alias
+                        actual_table = table_expr.this
+                    else:
+                        actual_table = table_expr
+                    
+                    if isinstance(actual_table, exp.Table):
+                        table_info['table_name'] = self.extract_table_name(actual_table)
+                    elif isinstance(actual_table, exp.Subquery):
+                        table_info['is_subquery'] = True
+                        table_info['table_name'] = table_info['alias'] or 'subquery'
+                    
+                    tables.append(table_info)
+        
+        return tables
+    
+    def parse_joins(self, select_stmt: exp.Select) -> List[Dict[str, Any]]:
+        """Parse JOIN clauses."""
+        joins = []
+        
+        for join in select_stmt.find_all(exp.Join):
+            join_info = {
+                'join_type': self._get_join_type(join),
+                'table_name': None,
+                'alias': None,
+                'conditions': []
+            }
+            
+            # Get joined table
+            if isinstance(join.this, exp.Alias):
+                join_info['alias'] = join.this.alias
+                join_info['table_name'] = self.extract_table_name(join.this.this)
+            else:
+                join_info['table_name'] = self.extract_table_name(join.this)
+            
+            # Get join conditions
+            if join.on:
+                join_info['conditions'] = self._parse_join_conditions(join.on)
+            
+            joins.append(join_info)
+        
+        return joins
+    
+    def _get_join_type(self, join: exp.Join) -> str:
+        """Determine JOIN type."""
+        if join.side:
+            return f"{join.side.upper()} JOIN"
+        elif join.kind:
+            return f"{join.kind.upper()} JOIN"
+        else:
+            return "INNER JOIN"
+    
+    def _parse_join_conditions(self, condition_expr) -> List[Dict[str, Any]]:
+        """Parse JOIN ON conditions."""
+        conditions = []
+        
+        # Handle equality conditions (most common)
+        for eq in condition_expr.find_all(exp.EQ):
+            left = str(eq.left).strip()
+            right = str(eq.right).strip()
+            
+            conditions.append({
+                'left_column': left,
+                'operator': '=',
+                'right_column': right
+            })
+        
+        return conditions
+    
+    def parse_where_clause(self, select_stmt: exp.Select) -> List[Dict[str, Any]]:
+        """Parse WHERE clause conditions."""
+        where_clause = select_stmt.args.get('where')
+        if not where_clause:
+            return []
+        
+        return self._parse_conditions(where_clause.this)
+    
+    def parse_having_clause(self, select_stmt: exp.Select) -> List[Dict[str, Any]]:
+        """Parse HAVING clause conditions."""
+        having_clause = select_stmt.args.get('having')
+        if not having_clause:
+            return []
+        
+        return self._parse_conditions(having_clause.this)
+    
+    def _parse_conditions(self, condition_expr) -> List[Dict[str, Any]]:
+        """Parse filter conditions from WHERE/HAVING clauses."""
+        conditions = []
+        
+        # Handle different condition types
+        for node in condition_expr.find_all((exp.EQ, exp.GT, exp.LT, exp.GTE, exp.LTE, exp.NEQ, exp.Like)):
+            condition = {
+                'column': str(node.left).strip(),
+                'operator': self._get_operator_symbol(node),
+                'value': str(node.right).strip()
+            }
+            conditions.append(condition)
+        
+        return conditions
+    
+    def _get_operator_symbol(self, node) -> str:
+        """Get operator symbol from expression node."""
+        if isinstance(node, exp.EQ):
+            return '='
+        elif isinstance(node, exp.GT):
+            return '>'
+        elif isinstance(node, exp.LT):
+            return '<'
+        elif isinstance(node, exp.GTE):
+            return '>='
+        elif isinstance(node, exp.LTE):
+            return '<='
+        elif isinstance(node, exp.NEQ):
+            return '!='
+        elif isinstance(node, exp.Like):
+            return 'LIKE'
+        else:
+            return '='
+    
+    def parse_group_by(self, select_stmt: exp.Select) -> List[str]:
+        """Parse GROUP BY clause."""
+        group_clause = select_stmt.args.get('group')
+        if not group_clause:
+            return []
+        
+        columns = []
+        for expr in group_clause.expressions:
+            columns.append(str(expr).strip())
+        
+        return columns
+    
+    def parse_order_by(self, select_stmt: exp.Select) -> List[Dict[str, Any]]:
+        """Parse ORDER BY clause."""
+        order_clause = select_stmt.args.get('order')
+        if not order_clause:
+            return []
+        
+        order_columns = []
+        for expr in order_clause.expressions:
+            order_info = {
+                'column': str(expr.this).strip(),
+                'direction': 'ASC'
+            }
+            
+            if hasattr(expr, 'desc') and expr.desc:
+                order_info['direction'] = 'DESC'
+            
+            order_columns.append(order_info)
+        
+        return order_columns
+    
+    def parse_limit_clause(self, select_stmt: exp.Select) -> Optional[Dict[str, Any]]:
+        """Parse LIMIT clause."""
+        limit_clause = select_stmt.args.get('limit')
+        if not limit_clause:
+            return None
+        
+        return {
+            'limit': int(str(limit_clause.expression)) if limit_clause.expression else None,
+            'offset': int(str(limit_clause.offset)) if limit_clause.offset else None
+        }
+    
+    def parse_ctes(self, ast) -> List[Dict[str, Any]]:
+        """Parse Common Table Expressions (CTEs)."""
+        ctes = []
+        
+        if isinstance(ast, exp.With):
+            for cte in ast.expressions:
+                if isinstance(cte, exp.CTE):
+                    cte_info = {
+                        'name': cte.alias,
+                        'columns': [],
+                        'sql': str(cte.this)
+                    }
+                    
+                    # Parse the CTE's SELECT statement
+                    if isinstance(cte.this, exp.Select):
+                        cte_select_data = self.parse(str(cte.this))
+                        cte_info['select_data'] = cte_select_data
+                        cte_info['columns'] = [col['column_name'] for col in cte_select_data.get('select_columns', [])]
+                    
+                    ctes.append(cte_info)
+        
+        return ctes
