@@ -459,6 +459,9 @@ class LineageExtractor:
         """
         Identify CTEs that are simple pass-throughs to the main query and should be skipped.
         
+        For nested CTE visualization, we want to show all CTEs in the chain, so we're more
+        conservative about skipping CTEs.
+        
         Args:
             expression: The main SQL expression
             cte_mapping: Dictionary mapping CTE names to their expressions
@@ -472,38 +475,58 @@ class LineageExtractor:
             if not isinstance(expression, exp.Select):
                 return ctes_to_skip
             
-            # Convert to string and analyze the pattern
-            sql_str = str(expression).strip()
+            # For nested CTE visualization, we want to be much more conservative
+            # Only skip CTEs in very specific cases where there's only ONE CTE
+            # and it's a true passthrough with no transformations
             
-            # Look for the pattern: WITH ... ) SELECT ... FROM cte_name
-            # We want to identify when the main SELECT is just "SELECT * FROM cte_name" (possibly with ORDER BY)
+            if len(cte_mapping) > 1:
+                # If there are multiple CTEs, don't skip any - we want to show the full chain
+                return ctes_to_skip
             
-            # Find the last ) before SELECT to identify where CTEs end and main query begins
-            import re
-            
-            # Pattern to match: WITH ... ) SELECT ... FROM table_name
-            # We're looking for the main SELECT after all CTEs
-            cte_pattern = r'WITH\s+.*?\)\s*(SELECT\s+.*)'
-            match = re.search(cte_pattern, sql_str, re.IGNORECASE | re.DOTALL)
-            
-            if match:
-                main_query_part = match.group(1).strip()
+            # Only consider skipping if there's exactly one CTE
+            if len(cte_mapping) == 1:
+                cte_name = list(cte_mapping.keys())[0]
+                cte_node = cte_mapping[cte_name]
                 
-                # Check if this is a simple "SELECT * FROM cte_name" possibly with ORDER BY
-                simple_pattern = r'SELECT\s+\*\s+FROM\s+(\w+)(?:\s+ORDER\s+BY\s+.*)?$'
-                simple_match = re.match(simple_pattern, main_query_part, re.IGNORECASE | re.DOTALL)
-                
-                if simple_match:
-                    cte_name = simple_match.group(1)
-                    
-                    if cte_name in cte_mapping:
-                        ctes_to_skip.add(cte_name)
+                # Check if the CTE is a simple passthrough (like SELECT * FROM table)
+                # and the main query is also simple (SELECT * FROM cte)
+                if self._is_simple_passthrough_cte(cte_node, expression, cte_name):
+                    ctes_to_skip.add(cte_name)
                 
         except Exception:
             # If we can't determine, err on the side of caution and don't skip
             pass
             
         return ctes_to_skip
+    
+    def _is_simple_passthrough_cte(self, cte_node: Expression, main_expression: Expression, cte_name: str) -> bool:
+        """Check if a CTE and main query form a simple passthrough pattern."""
+        try:
+            # Check if CTE is simple (SELECT * FROM single_table with no transformations)
+            cte_select = cte_node.this
+            if not isinstance(cte_select, exp.Select):
+                return False
+            
+            # CTE should have no JOINs, GROUP BY, complex WHERE, etc.
+            if (cte_select.find(exp.Join) or 
+                cte_select.find(exp.Group) or 
+                cte_select.find(exp.Having) or
+                cte_select.find(exp.Window)):
+                return False
+            
+            # Check if main query is simple SELECT * FROM cte_name
+            main_sql = str(main_expression).strip()
+            import re
+            
+            # Very restrictive pattern for main query
+            simple_main_pattern = fr'SELECT\s+\*\s+FROM\s+{re.escape(cte_name)}\s*$'
+            if not re.search(simple_main_pattern, main_sql, re.IGNORECASE):
+                return False
+            
+            return True
+            
+        except Exception:
+            return False
     
     def _extract_table_transformation(
         self, 

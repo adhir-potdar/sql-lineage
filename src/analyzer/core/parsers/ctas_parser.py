@@ -342,6 +342,21 @@ class CTASParser(BaseParser):
             
             column_lineage['output_columns'].append(output_col)
             
+            # Create column transformation for computed columns (aggregates, etc.)
+            if output_col['is_computed']:
+                # Use alias as the column name, and show transformation as source expression
+                target_column_name = col.get('alias') or col.get('column_name')
+                source_expression = self._extract_source_from_expression(col.get('raw_expression', ''), target_column_name)
+                
+                col_transformation = {
+                    'column_name': target_column_name,  # This will be the column name in the table
+                    'source_expression': source_expression,  # e.g., "SUM(amount)", "UPPER(email)"
+                    'transformation_type': 'AGGREGATE' if col.get('is_aggregate') else 'FUNCTION',
+                    'function_type': self._extract_function_type(col.get('raw_expression', '')),
+                    'full_expression': col.get('raw_expression', '')  # Keep full expression for reference
+                }
+                column_lineage['column_transformations'].append(col_transformation)
+            
             # Track source columns
             if col.get('source_table') and col.get('column_name'):
                 column_lineage['source_columns'].add(
@@ -351,3 +366,37 @@ class CTASParser(BaseParser):
         column_lineage['source_columns'] = list(column_lineage['source_columns'])
         
         return column_lineage
+    
+    def _extract_function_type(self, expression: str) -> str:
+        """Extract function type from expression generically."""
+        if not expression:
+            return 'UNKNOWN'
+        
+        # Convert to uppercase for matching
+        expr_upper = expression.upper().strip()
+        
+        # Extract function name from expressions like "COUNT(*)", "SUM(amount)", etc.
+        # Match pattern: FUNCTION_NAME(...)
+        import re
+        function_match = re.match(r'^([A-Z_]+)\s*\(', expr_upper)
+        if function_match:
+            return function_match.group(1)
+        
+        return 'UNKNOWN'
+    
+    def _extract_source_from_expression(self, expression: str, target_name: str) -> str:
+        """Extract the source part from transformation expression."""
+        if not expression:
+            return 'UNKNOWN'
+        
+        # Remove the alias part if present (e.g., "SUM(amount) AS total" -> "SUM(amount)")
+        expr = expression.strip()
+        
+        # Split by " AS " (case insensitive) and take the first part
+        import re
+        as_split = re.split(r'\s+AS\s+', expr, flags=re.IGNORECASE)
+        if len(as_split) > 1:
+            return as_split[0].strip()
+        
+        # If no AS clause, return the expression as is
+        return expr

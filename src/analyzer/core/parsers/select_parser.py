@@ -50,13 +50,21 @@ class SelectParser(BaseParser):
         columns = []
         
         for expression in select_stmt.expressions:
+            # Handle Star (*) expressions by expanding them
+            if isinstance(expression, exp.Star):
+                # Expand * to actual columns from the source
+                expanded_columns = self._expand_star_expression(expression, select_stmt)
+                columns.extend(expanded_columns)
+                continue
+            
             column_info = {
                 'raw_expression': str(expression),
                 'column_name': None,
                 'alias': None,
                 'source_table': None,
                 'is_aggregate': False,
-                'is_window_function': False
+                'is_window_function': False,
+                'is_computed': False
             }
             
             # Handle different expression types
@@ -81,6 +89,21 @@ class SelectParser(BaseParser):
             # Check for window functions
             if any(isinstance(node, exp.Window) for node in actual_expr.find_all(exp.Window)):
                 column_info['is_window_function'] = True
+            
+            # Check for computed expressions (CASE, functions, etc.)
+            # A column is computed if it's not a simple column reference
+            if not isinstance(actual_expr, exp.Column):
+                # Check for CASE expressions
+                if any(isinstance(node, exp.Case) for node in actual_expr.find_all(exp.Case)):
+                    column_info['is_computed'] = True
+                # Check for function calls (excluding aggregates which are handled above)
+                elif any(isinstance(node, exp.Func) for node in actual_expr.find_all(exp.Func)):
+                    # Only mark as computed if it's not already marked as aggregate
+                    if not column_info['is_aggregate']:
+                        column_info['is_computed'] = True
+                # Any other non-column expression is computed
+                elif not column_info['is_aggregate'] and not column_info['is_window_function']:
+                    column_info['is_computed'] = True
             
             columns.append(column_info)
         
@@ -180,6 +203,10 @@ class SelectParser(BaseParser):
     def _parse_join_conditions(self, condition_expr) -> List[Dict[str, Any]]:
         """Parse JOIN ON conditions."""
         conditions = []
+        
+        # Handle case where condition_expr might be a function or None
+        if not condition_expr or callable(condition_expr):
+            return conditions
         
         # Handle equality conditions (most common)
         for eq in condition_expr.find_all(exp.EQ):
@@ -284,7 +311,7 @@ class SelectParser(BaseParser):
         
         return {
             'limit': int(str(limit_clause.expression)) if limit_clause.expression else None,
-            'offset': int(str(limit_clause.offset)) if limit_clause.offset else None
+            'offset': int(str(limit_clause.offset)) if hasattr(limit_clause, 'offset') and limit_clause.offset else None
         }
     
     def parse_ctes(self, ast) -> List[Dict[str, Any]]:
@@ -309,3 +336,47 @@ class SelectParser(BaseParser):
                     ctes.append(cte_info)
         
         return ctes
+    
+    def _expand_star_expression(self, star_expr: exp.Star, select_stmt: exp.Select) -> List[Dict[str, Any]]:
+        """Expand * expression to actual columns from source tables/CTEs."""
+        expanded_columns = []
+        
+        # Get FROM clause to identify source tables/CTEs
+        from_clause = select_stmt.args.get('from')
+        if not from_clause:
+            return expanded_columns
+            
+        # Handle FROM table or CTE
+        if hasattr(from_clause, 'this') and from_clause.this:
+            source_table = from_clause.this
+            
+            # If it's a table reference, we need to get columns from metadata or CTE
+            if isinstance(source_table, exp.Table):
+                table_name = str(source_table)
+                
+                # Check if this is a CTE by looking at available CTEs in the context
+                cte_columns = self._get_cte_columns_from_context(table_name)
+                if cte_columns:
+                    # Expand to CTE columns
+                    for col_name in cte_columns:
+                        expanded_columns.append({
+                            'raw_expression': col_name,
+                            'column_name': col_name,
+                            'alias': None,
+                            'source_table': table_name,
+                            'is_aggregate': False,
+                            'is_window_function': False
+                        })
+                else:
+                    # For regular tables, try to get columns from metadata registry
+                    # This is a fallback - in real scenarios we'd need the metadata
+                    # For now, return empty list to avoid showing * as column
+                    pass
+        
+        return expanded_columns
+    
+    def _get_cte_columns_from_context(self, table_name: str) -> List[str]:
+        """Get column names from a CTE definition using the current parsing context."""
+        # This method will be enhanced to work with the analyzer's CTE context
+        # For now, return empty list - the analyzer will handle this at a higher level
+        return []

@@ -253,12 +253,15 @@ class LineageResult:
         return {
             "source_table": transformation.source_table,
             "target_table": transformation.target_table,
-            "join_type": transformation.join_type.value if transformation.join_type else None,
-            "join_conditions": [{
-                "left_column": jc.left_column,
-                "operator": jc.operator.value,
-                "right_column": jc.right_column
-            } for jc in transformation.join_conditions],
+            "joins": [{
+                "join_type": transformation.join_type.value if transformation.join_type else "INNER JOIN",
+                "right_table": jc.right_column.split('.')[0] if jc.right_column and '.' in jc.right_column else None,
+                "conditions": [{
+                    "left_column": jc.left_column,
+                    "operator": jc.operator.value,
+                    "right_column": jc.right_column
+                }]
+            } for jc in transformation.join_conditions] if transformation.join_conditions else [],
             "filter_conditions": [{
                 "column": fc.column,
                 "operator": fc.operator.value,

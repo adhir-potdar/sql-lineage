@@ -23,7 +23,8 @@ class TransformationParser(BaseParser):
             'aggregations': self.parse_transformation_aggregations(select_stmt),
             'window_functions': self.parse_transformation_window_functions(select_stmt),
             'sorting': self.parse_transformation_sorting(select_stmt),
-            'limiting': self.parse_transformation_limiting(select_stmt)
+            'limiting': self.parse_transformation_limiting(select_stmt),
+            'case_statements': self.parse_transformation_case_statements(select_stmt)
         }
     
     def _find_select(self, ast) -> Optional[exp.Select]:
@@ -179,6 +180,17 @@ class TransformationParser(BaseParser):
         """Parse JOIN conditions."""
         conditions = []
         
+        # Handle case where condition_expr might be a function
+        if callable(condition_expr):
+            try:
+                condition_expr = condition_expr()
+            except:
+                return conditions
+        
+        # Skip if condition_expr is None or not an expression
+        if not condition_expr or not hasattr(condition_expr, 'find_all'):
+            return conditions
+        
         for eq in condition_expr.find_all(exp.EQ):
             conditions.append({
                 'left_column': str(eq.left).strip(),
@@ -200,8 +212,9 @@ class TransformationParser(BaseParser):
         }
         
         # Parse GROUP BY
-        if select_stmt.group:
-            for expr in select_stmt.group.expressions:
+        group_by_clause = select_stmt.args.get('group')
+        if group_by_clause:
+            for expr in group_by_clause.expressions:
                 column = str(expr).strip()
                 transformation['group_by_columns'].append(column)
                 transformation['affected_columns'].add(self.clean_column_reference(column))
@@ -212,8 +225,9 @@ class TransformationParser(BaseParser):
             transformation['aggregate_functions'].extend(agg_funcs)
         
         # Parse HAVING conditions
-        if select_stmt.having:
-            having_conditions = self._extract_filter_conditions(select_stmt.having.this)
+        having_clause = select_stmt.args.get('having')
+        if having_clause:
+            having_conditions = self._extract_filter_conditions(having_clause.this)
             transformation['having_conditions'] = having_conditions
         
         # Convert sets to lists
@@ -252,15 +266,17 @@ class TransformationParser(BaseParser):
                 }
                 
                 # Parse PARTITION BY
-                if window.partition_by:
-                    for part_expr in window.partition_by:
+                partition_by = window.args.get('partition_by', [])
+                if partition_by:
+                    for part_expr in partition_by:
                         column = str(part_expr).strip()
                         transformation['partition_by'].append(column)
                         transformation['affected_columns'].append(self.clean_column_reference(column))
                 
                 # Parse ORDER BY
-                if window.order:
-                    for order_expr in window.order.expressions:
+                order_clause = window.args.get('order')
+                if order_clause and hasattr(order_clause, 'expressions'):
+                    for order_expr in order_clause.expressions:
                         column = str(order_expr.this).strip()
                         direction = 'DESC' if getattr(order_expr, 'desc', False) else 'ASC'
                         transformation['order_by'].append(f"{column} {direction}")
@@ -278,10 +294,11 @@ class TransformationParser(BaseParser):
             'affected_columns': []
         }
         
-        if not select_stmt.order:
+        order_clause = select_stmt.args.get('order')
+        if not order_clause:
             return transformation
         
-        for expr in select_stmt.order.expressions:
+        for expr in order_clause.expressions:
             column = str(expr.this).strip()
             direction = 'DESC' if getattr(expr, 'desc', False) else 'ASC'
             
@@ -301,10 +318,93 @@ class TransformationParser(BaseParser):
             'offset': None
         }
         
-        if select_stmt.limit:
-            if select_stmt.limit.expression:
-                transformation['limit'] = int(str(select_stmt.limit.expression))
-            if select_stmt.limit.offset:
-                transformation['offset'] = int(str(select_stmt.limit.offset))
+        # Parse LIMIT clause
+        limit_clause = select_stmt.args.get('limit')
+        if limit_clause and limit_clause.expression:
+            transformation['limit'] = int(str(limit_clause.expression))
+        
+        # Parse OFFSET clause (separate from LIMIT in SQLGlot)
+        offset_clause = select_stmt.args.get('offset')  
+        if offset_clause and offset_clause.expression:
+            transformation['offset'] = int(str(offset_clause.expression))
         
         return transformation
+    
+    def parse_transformation_case_statements(self, select_stmt: exp.Select) -> List[Dict[str, Any]]:
+        """Parse CASE statement transformations."""
+        transformations = []
+        
+        # Look for CASE statements in SELECT expressions
+        for expr in select_stmt.expressions:
+            for case_node in expr.find_all(exp.Case):
+                transformation = {
+                    'type': 'CASE_STATEMENT',
+                    'conditions': [],
+                    'else_value': None,
+                    'affected_columns': [],
+                    'expression': str(case_node)
+                }
+                
+                # Parse WHEN conditions
+                ifs = case_node.args.get('ifs', [])
+                if ifs:
+                    for when_clause in ifs:
+                        condition = {
+                            'when_condition': str(when_clause.this) if when_clause.this else None,
+                            'then_value': str(when_clause.args.get('true')) if when_clause.args.get('true') else None
+                        }
+                        transformation['conditions'].append(condition)
+                        
+                        # Extract affected columns from WHEN condition
+                        if when_clause.this:
+                            for col in when_clause.this.find_all(exp.Column):
+                                col_name = self.clean_column_reference(str(col))
+                                if col_name not in transformation['affected_columns']:
+                                    transformation['affected_columns'].append(col_name)
+                
+                # Parse ELSE clause
+                default_value = case_node.args.get('default')
+                if default_value:
+                    transformation['else_value'] = str(default_value)
+                
+                transformations.append(transformation)
+        
+        # Also look for CASE statements in WHERE, HAVING, and other clauses
+        for clause_name in ['where', 'having']:
+            clause = select_stmt.args.get(clause_name)
+            if clause and clause.this:
+                for case_node in clause.this.find_all(exp.Case):
+                    transformation = {
+                        'type': 'CASE_STATEMENT',
+                        'conditions': [],
+                        'else_value': None,
+                        'affected_columns': [],
+                        'expression': str(case_node),
+                        'context': clause_name.upper()
+                    }
+                    
+                    # Parse WHEN conditions
+                    ifs = case_node.args.get('ifs', [])
+                    if ifs:
+                        for when_clause in ifs:
+                            condition = {
+                                'when_condition': str(when_clause.this) if when_clause.this else None,
+                                'then_value': str(when_clause.args.get('true')) if when_clause.args.get('true') else None
+                            }
+                            transformation['conditions'].append(condition)
+                            
+                            # Extract affected columns from WHEN condition
+                            if when_clause.this:
+                                for col in when_clause.this.find_all(exp.Column):
+                                    col_name = self.clean_column_reference(str(col))
+                                    if col_name not in transformation['affected_columns']:
+                                        transformation['affected_columns'].append(col_name)
+                    
+                    # Parse ELSE clause
+                    default_value = case_node.args.get('default')
+                    if default_value:
+                        transformation['else_value'] = str(default_value)
+                    
+                    transformations.append(transformation)
+        
+        return transformations

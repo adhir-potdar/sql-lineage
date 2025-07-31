@@ -174,6 +174,23 @@ def collect_queries_from_test_quick():
          FROM tier_summary ts
          JOIN customer_tiers ct ON ts.tier = ct.tier
          JOIN users u ON ct.customer_id = u.id
+         """),
+        
+        ("quick_aggregation_with_groupby_orderby", """
+         SELECT 
+             u.department, 
+             u.status,
+             COUNT(*) as employee_count,
+             AVG(u.salary) as avg_salary,
+             SUM(u.salary) as total_salary,
+             MAX(u.hire_date) as latest_hire_date
+         FROM users u 
+         LEFT JOIN orders o ON u.id = o.user_id
+         WHERE u.active = true AND u.salary > 30000
+         GROUP BY u.department, u.status
+         HAVING COUNT(*) > 5 AND AVG(u.salary) > 50000
+         ORDER BY u.department ASC, avg_salary DESC, employee_count DESC
+         LIMIT 100
          """)
     ]
 

@@ -18,13 +18,28 @@ class CTEParser(BaseParser):
         """Parse CTE structure and dependencies."""
         ast = self.parse_sql(sql)
         
-        if not isinstance(ast, exp.With):
+        # Look for WITH statement - it might be at root level or nested
+        with_stmt = None
+        main_query = None
+        
+        if isinstance(ast, exp.With):
+            with_stmt = ast
+            main_query = ast.this
+        else:
+            # Look for WITH statements in the AST
+            with_nodes = list(ast.find_all(exp.With))
+            if with_nodes:
+                with_stmt = with_nodes[0]  # Use the first WITH statement found
+                # For nested WITH, the main query is the parent of the WITH
+                main_query = ast
+        
+        if not with_stmt:
             return {}
         
         return {
-            'ctes': self.parse_cte_definitions(ast),
-            'main_query': self.parse_main_query(ast),
-            'cte_dependencies': self.analyze_cte_dependencies(ast)
+            'ctes': self.parse_cte_definitions(with_stmt),
+            'main_query': self.parse_main_query(main_query),
+            'cte_dependencies': self.analyze_cte_dependencies(with_stmt, main_query)
         }
     
     def parse_cte_definitions(self, with_stmt: exp.With) -> List[Dict[str, Any]]:
@@ -76,7 +91,7 @@ class CTEParser(BaseParser):
                 'source_column': None,
                 'source_table': col.get('source_table'),
                 'expression': col.get('raw_expression'),
-                'is_computed': col.get('is_aggregate') or col.get('is_window_function')
+                'is_computed': col.get('is_computed') or col.get('is_aggregate') or col.get('is_window_function')
             }
             
             # Determine source column
@@ -169,12 +184,14 @@ class CTEParser(BaseParser):
         
         return transformations
     
-    def parse_main_query(self, with_stmt: exp.With) -> Dict[str, Any]:
+    def parse_main_query(self, main_query) -> Dict[str, Any]:
         """Parse the main query that uses CTEs."""
-        main_query_sql = str(with_stmt.this)
+        if main_query is None:
+            return {}
+        main_query_sql = str(main_query)
         return self.select_parser.parse(main_query_sql)
     
-    def analyze_cte_dependencies(self, with_stmt: exp.With) -> Dict[str, List[str]]:
+    def analyze_cte_dependencies(self, with_stmt: exp.With, main_query=None) -> Dict[str, List[str]]:
         """Analyze dependencies between CTEs and main query."""
         dependencies = {}
         cte_names = set()
@@ -191,8 +208,11 @@ class CTEParser(BaseParser):
                 dependencies[cte.alias] = deps
         
         # Analyze main query dependencies
-        main_deps = self._find_cte_dependencies(with_stmt.this, cte_names)
-        dependencies['main_query'] = main_deps
+        if main_query is not None:
+            main_deps = self._find_cte_dependencies(main_query, cte_names)
+            dependencies['main_query'] = main_deps
+        else:
+            dependencies['main_query'] = []
         
         return dependencies
     

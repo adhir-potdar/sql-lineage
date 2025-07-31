@@ -5,6 +5,68 @@ from typing import Dict, Any, Optional, List, Tuple
 from graphviz import Digraph
 import os
 
+# Constants for entity names
+QUERY_RESULT_ENTITY = 'QUERY_RESULT'
+FINAL_RESULT_ENTITY = 'FINAL_RESULT'
+
+# Constants for join types
+DEFAULT_JOIN_TYPE = 'INNER JOIN'
+JOIN_TYPES = {
+    'INNER': 'INNER JOIN',
+    'LEFT': 'LEFT JOIN', 
+    'RIGHT': 'RIGHT JOIN',
+    'FULL': 'FULL JOIN',
+    'CROSS': 'CROSS JOIN'
+}
+
+# Constants for SQL functions
+SQL_FUNCTIONS = {
+    'STRING_FUNCTIONS': ['UPPER', 'LOWER', 'CONCAT'],
+    'AGGREGATE_FUNCTIONS': ['SUM', 'COUNT', 'AVG', 'MAX', 'MIN'],
+    'CASE_FUNCTION': 'CASE',
+    'MATH_OPERATORS': ['*', '+', '-', '/'],
+    'CONCAT_OPERATORS': ['||']
+}
+
+# Constants for data types and column types
+DEFAULT_DATA_TYPE = 'VARCHAR'
+COLUMN_TYPES = {
+    'DIRECT': 'DIRECT',
+    'COMPUTED': 'COMPUTED',
+    'SELECT': 'SELECT'
+}
+
+# Constants for operators
+SQL_OPERATORS = {
+    'IN': 'IN',
+    'EXISTS': 'EXISTS', 
+    'NOT_EXISTS': 'NOT EXISTS'
+}
+
+# Constants for transformation types
+TRANSFORMATION_TYPES = {
+    'TABLE_TRANSFORMATION': 'TABLE_TRANSFORMATION',
+    'TRANSFORM': 'TRANSFORM',
+    'FILTER': 'FILTER',
+    'GROUP_BY': 'GROUP_BY',
+    'CASE': 'CASE',
+    'COMPUTED': 'COMPUTED',
+    'AGGREGATE': 'AGGREGATE'
+}
+
+
+# Constants for unknown/default values
+UNKNOWN_VALUE = 'unknown'
+UNKNOWN_FUNCTION = 'UNKNOWN'
+
+# Constants for layout directions
+LAYOUT_DIRECTIONS = {
+    'HORIZONTAL_UPSTREAM': 'RL',
+    'HORIZONTAL_DOWNSTREAM': 'LR', 
+    'VERTICAL_UPSTREAM': 'BT',
+    'VERTICAL_DOWNSTREAM': 'TB'
+}
+
 
 class SQLLineageVisualizer:
     """
@@ -145,10 +207,10 @@ class SQLLineageVisualizer:
         chain_type = table_chain.get('chain_type', 'upstream')
         if layout == "horizontal":
             # Horizontal layout: upstream (RL), downstream (LR)
-            rankdir = 'RL' if chain_type == 'upstream' else 'LR'
+            rankdir = LAYOUT_DIRECTIONS['HORIZONTAL_UPSTREAM'] if chain_type == 'upstream' else LAYOUT_DIRECTIONS['HORIZONTAL_DOWNSTREAM']
         else:
             # Vertical layout: upstream (BT), downstream (TB)
-            rankdir = 'BT' if chain_type == 'upstream' else 'TB'
+            rankdir = LAYOUT_DIRECTIONS['VERTICAL_UPSTREAM'] if chain_type == 'upstream' else LAYOUT_DIRECTIONS['VERTICAL_DOWNSTREAM']
         
         # Create Graphviz digraph
         dot = self._create_digraph(table_chain, rankdir, config, sql_query)
@@ -264,10 +326,10 @@ class SQLLineageVisualizer:
         # Determine flow direction based on chain type and layout
         if layout == "horizontal":
             # Horizontal layout: upstream (RL), downstream (LR)
-            rankdir = 'RL' if chain_type == 'upstream' else 'LR'
+            rankdir = LAYOUT_DIRECTIONS['HORIZONTAL_UPSTREAM'] if chain_type == 'upstream' else LAYOUT_DIRECTIONS['HORIZONTAL_DOWNSTREAM']
         else:
             # Vertical layout: upstream (BT), downstream (TB)
-            rankdir = 'BT' if chain_type == 'upstream' else 'TB'
+            rankdir = LAYOUT_DIRECTIONS['VERTICAL_UPSTREAM'] if chain_type == 'upstream' else LAYOUT_DIRECTIONS['VERTICAL_DOWNSTREAM']
         
         # Create Graphviz digraph
         dot = self._create_lineage_chain_digraph(chain_data, rankdir, config, sql_query)
@@ -287,7 +349,7 @@ class SQLLineageVisualizer:
             self._merge_config(graph_config, config)
         
         # Create digraph
-        dot = Digraph(comment=f"SQL Lineage Chain - {chain_data.get('chain_type', 'unknown').title()}")
+        dot = Digraph(comment=f"SQL Lineage Chain - {chain_data.get('chain_type', UNKNOWN_VALUE).title()}")
         
         # Set graph attributes
         dot.attr(rankdir=rankdir)
@@ -297,7 +359,7 @@ class SQLLineageVisualizer:
         dot.graph_attr.update(graph_attrs)
         
         # Add title with SQL query
-        title = f"SQL Lineage Chain ({chain_data.get('chain_type', 'unknown').title()})"
+        title = f"SQL Lineage Chain ({chain_data.get('chain_type', UNKNOWN_VALUE).title()})"
         if chain_data.get('actual_max_depth'):
             title += f" - Depth: {chain_data['actual_max_depth']}"
         
@@ -318,6 +380,7 @@ class SQLLineageVisualizer:
         
         return dot
     
+
     def _add_lineage_chain_elements(self, dot: Digraph, chain_data: Dict, config: Optional[Dict] = None) -> None:
         """Add nodes and edges from lineage chain data."""
         chains = chain_data.get('chains', {})
@@ -333,72 +396,165 @@ class SQLLineageVisualizer:
         sql = chain_data.get('sql', '')
         is_ctas = sql.strip().upper().startswith('CREATE TABLE')
         
-        # Process each entity in the chains
-        for entity_name, entity_data in chains.items():
-            if entity_name != 'QUERY_RESULT' and entity_name != '_sql':  # Skip QUERY_RESULT and temp SQL context
-                # For CTAS queries, don't add the created table separately - it will be combined with result
-                if is_ctas:
-                    # Find the table with highest depth (the created table)
-                    max_depth = -1
-                    created_table = None
-                    for ent_name, ent_data in chains.items():
-                        depth = ent_data.get('depth', 0)
-                        if depth > max_depth:
-                            max_depth = depth
-                            created_table = ent_name
-                    
-                    # Don't add the created table node separately - it will be combined
-                    if entity_name != created_table:
-                        self._add_entity_with_columns_improved(dot, entity_name, entity_data, node_config, edge_config)
-                else:
-                    self._add_entity_with_columns_improved(dot, entity_name, entity_data, node_config, edge_config)
+        # First, deduplicate QUERY_RESULT nodes and merge their data
+        deduplicated_chains = self._deduplicate_query_result_nodes(chains)
         
-        # Add transformation boxes and edges
-        self._add_transformation_boxes(dot, chains, node_config, edge_config, chain_data)
+        # Recursively process all entities in the deduplicated chains
+        def add_entities_recursive(entity_name: str, entity_data: Dict, processed_entities: set = None):
+            """Recursively add entities and their dependencies, avoiding duplicates."""
+            if processed_entities is None:
+                processed_entities = set()
+            
+            # Skip if already processed (avoid duplicate nodes)
+            if entity_name in processed_entities:
+                return
+                
+            if entity_name != '_sql':  # Skip temp SQL context
+                processed_entities.add(entity_name)
+                # Add the current entity (pass SQL context for column analysis)
+                entity_data_with_sql = {**entity_data, '_sql_context': sql}
+                self._add_entity_with_columns_improved(dot, entity_name, entity_data_with_sql, node_config, edge_config)
+                
+                # Recursively add dependencies
+                dependencies = entity_data.get('dependencies', [])
+                for dep in dependencies:
+                    dep_entity = dep.get('entity')
+                    if dep_entity:
+                        add_entities_recursive(dep_entity, dep, processed_entities)
         
-        # Add connections between entities (with subquery handling)
-        self._add_entity_connections(dot, chains, edge_config)
+        # Process each top-level entity in the deduplicated chains
+        processed_entities = set()
+        for entity_name, entity_data in deduplicated_chains.items():
+            add_entities_recursive(entity_name, entity_data, processed_entities)
         
-        # Add result box at the end of the flow
-        self._add_final_result_box(dot, chain_data, node_config)
+        # For CTAS queries, ensure target entities are included for transformations
+        if is_ctas:
+            self._add_missing_ctas_target_entities(dot, chains, node_config, edge_config, chain_data)
+        
+        # Add transformation boxes and edges using deduplicated chains
+        self._add_transformation_boxes(dot, deduplicated_chains, node_config, edge_config, chain_data)
+        
+        # Add connections between entities using deduplicated chains (with subquery handling)
+        self._add_entity_connections(dot, deduplicated_chains, edge_config)
+        
+        # Add result box at the end of the flow (only if QUERY_RESULT not already processed)
+        # Check if QUERY_RESULT exists in the deduplicated chains
+        has_query_result = any(
+            self._has_query_result_in_chain(entity_data) 
+            for entity_data in deduplicated_chains.values()
+        )
+        
+        if not has_query_result:
+            self._add_final_result_box(dot, chain_data, node_config)
     
     def _add_entity_with_columns_improved(self, dot: Digraph, entity_name: str, entity_data: Dict, node_config: Dict, edge_config: Dict) -> None:
         """Add an entity node with only the columns used in query."""
         entity_type = entity_data.get('entity_type', 'table')
         metadata = entity_data.get('metadata', {})
         
-        # Build the node label with table and column information
-        if entity_type == 'table':
-            # Start with table name
+        # Build the node label based on entity type
+        if entity_type == 'cte':
+            # CTE entity styling
             label_parts = [f"**{entity_name}**"]
-            
-            # Get used columns from table_columns metadata (columns actually used in query)
-            table_columns = metadata.get('table_columns', [])
-            used_columns = []
-            
-            if table_columns:
-                # Extract used columns from table_columns
-                for col_info in table_columns:
-                    col_name = col_info.get('name', col_info.get('column_name', 'unknown'))  # Support both old and new format
-                    upstream_cols = col_info.get('upstream', col_info.get('upstream_columns', []))  # Support both old and new format
-                    if upstream_cols:
-                        for upstream_col in upstream_cols:
-                            used_columns.append(upstream_col)
+            label_parts.append("(CTE)")
+        elif entity_type == 'query_result':
+            # Query result entity styling
+            label_parts = [f"**{entity_name}**"]
+            label_parts.append("(FINAL RESULT)")
+        else:  # entity_type == 'table' or default
+            # Regular table entity styling
+            label_parts = [f"**{entity_name}**"]
+        
+        # Common column processing for all entity types
+        table_columns = metadata.get('table_columns', [])
+        used_columns = []
+        
+        # 1. Extract from table_columns metadata (columns listed as used in output)
+        if table_columns:
+            for col_info in table_columns:
+                col_name = col_info.get('name', col_info.get('column_name', UNKNOWN_VALUE))
+                col_type = col_info.get('type', COLUMN_TYPES['DIRECT'])
+                
+                # For CTE entities, show column type information
+                if entity_type == 'cte':
+                    if col_type == COLUMN_TYPES['COMPUTED']:
+                        used_columns.append(f"{col_name} (computed)")
                     else:
                         used_columns.append(col_name)
-            
-            # Always try to extract from transformations as well to capture JOIN columns
+                else:
+                    used_columns.append(col_name)
+        
+        # 2. Extract from transformations to capture JOIN columns, filter columns, etc.
+        if entity_type != 'query_result':  # Skip for query result to avoid duplication
             transformation_columns = self._extract_columns_from_transformations(entity_name, entity_data)
             used_columns.extend(transformation_columns)
             
-            # Also extract from dependencies/transformations if available
+            # 3. Extract from dependencies/transformations to capture additional usage patterns
             dependencies = entity_data.get('dependencies', [])
             for dep in dependencies:
-                dep_metadata = dep.get('metadata', {})
-                dep_table_columns = dep_metadata.get('table_columns', [])
-                for col_info in dep_table_columns:
-                    upstream_cols = col_info.get('upstream', col_info.get('upstream_columns', []))  # Support both old and new format
-                    used_columns.extend(upstream_cols)
+                # Extract from dependency transformations
+                dep_transformations = dep.get('transformations', [])
+                for trans in dep_transformations:
+                    source_table = trans.get('source_table', '')
+                    
+                    # If this entity is the source, extract all columns used in this transformation
+                    if source_table == entity_name:
+                        # Extract from JOIN conditions
+                        joins = trans.get('joins', [])
+                        for join in joins:
+                            for condition in join.get('conditions', []):
+                                if isinstance(condition, dict):
+                                    left_col = condition.get('left_column', '')
+                                    right_col = condition.get('right_column', '')
+                                
+                                # Extract column names, handling table prefixes generically
+                                # Check if column reference belongs to this entity (table.column or alias.column)
+                                if left_col:
+                                    col_parts = left_col.split('.')
+                                    if len(col_parts) == 2:
+                                        table_ref, col_name = col_parts
+                                        # Match by exact entity name or check if it's a table alias pattern
+                                        if (table_ref == entity_name or 
+                                            table_ref.lower() == entity_name.lower() or
+                                            self._is_table_alias_match(table_ref, entity_name)):
+                                            if col_name not in used_columns:
+                                                used_columns.append(col_name)
+                                    elif len(col_parts) == 1 and left_col not in used_columns:
+                                        # Column without prefix - might belong to this table
+                                        used_columns.append(left_col)
+                                
+                                if right_col:
+                                    col_parts = right_col.split('.')
+                                    if len(col_parts) == 2:
+                                        table_ref, col_name = col_parts
+                                        # Match by exact entity name or check if it's a table alias pattern
+                                        if (table_ref == entity_name or 
+                                            table_ref.lower() == entity_name.lower() or
+                                            self._is_table_alias_match(table_ref, entity_name)):
+                                            if col_name not in used_columns:
+                                                used_columns.append(col_name)
+                                    elif len(col_parts) == 1 and right_col not in used_columns:
+                                        # Column without prefix - might belong to this table
+                                        used_columns.append(right_col)
+                        
+                        # Extract from filter conditions
+                        filter_conditions = trans.get('filter_conditions', [])
+                        for condition in filter_conditions:
+                            if isinstance(condition, dict):
+                                column = condition.get('column', '')
+                                if column and column not in used_columns:
+                                    clean_col = column.split('.')[-1] if '.' in column else column
+                                    used_columns.append(clean_col)
+                        
+                        # Extract from group by and order by
+                        for col_list_key in ['group_by_columns', 'order_by_columns']:
+                            col_list = trans.get(col_list_key, [])
+                            for col in col_list:
+                                clean_col = str(col).split()[0] if col else ''  # Remove DESC/ASC
+                                clean_col = clean_col.split('.')[-1] if '.' in clean_col else clean_col
+                                if clean_col and clean_col not in used_columns:
+                                    used_columns.append(clean_col)
+            
             
             # Remove duplicates and sort, filter out QUERY_RESULT columns
             filtered_columns = []
@@ -406,47 +562,34 @@ class SQLLineageVisualizer:
                 col_str = str(col)
                 # Filter out QUERY_RESULT columns and other invalid column references
                 if not (col_str.startswith('QUERY_RESULT.') or 
-                       col_str == 'QUERY_RESULT' or 
-                       col_str.startswith('unknown') or
-                       col_str == 'unknown'):
+                       col_str == QUERY_RESULT_ENTITY or 
+                       col_str.startswith(UNKNOWN_VALUE) or
+                       col_str == UNKNOWN_VALUE):
                     filtered_columns.append(col)
             
             used_columns = sorted(list(set(filtered_columns)))
             
             # Add used columns with their types from full metadata
             all_columns = metadata.get('columns', [])
-            if used_columns and all_columns:
+            if used_columns:
                 label_parts.append("─" * 20)
                 label_parts.append("Used Columns:")
                 
-                # Only show columns that have proper metadata or are essential
-                valid_columns_to_show = []
+                # Show all used columns with type information
                 for col_name in used_columns:
                     # Find column details from full metadata
-                    col_details = next((col for col in all_columns if col.get('name') == col_name), None)
-                    if col_details:
-                        col_type = col_details.get('data_type', 'unknown')
-                        # Only show if data type is not 'unknown' or if it's an essential column
-                        if col_type != 'unknown' or col_name in ['id', 'name', 'email']:
-                            safe_col_name = str(col_name).replace('<', '&lt;').replace('>', '&gt;')
-                            safe_col_type = str(col_type).replace('<', '&lt;').replace('>', '&gt;')
-                            valid_columns_to_show.append(f"{safe_col_name}: {safe_col_type}")
-                    # Don't show columns without metadata at all to avoid "unknown" types
-                
-                # Add the valid columns to display
-                for col_display in valid_columns_to_show:
-                    label_parts.append(col_display)
+                    col_details = next((col for col in all_columns if col.get('name') == col_name), None) if all_columns else None
                     
-                # If we have used_columns but no valid ones to show, try once more with a more lenient approach
-                if not valid_columns_to_show and used_columns:
-                    label_parts.append("Used Columns:")
-                    for col_name in used_columns[:4]:  # Limit to 4 columns
-                        col_details = next((col for col in all_columns if col.get('name') == col_name), None)
-                        if col_details:
-                            col_type = col_details.get('data_type', 'VARCHAR')
-                            safe_col_name = str(col_name).replace('<', '&lt;').replace('>', '&gt;')
-                            safe_col_type = str(col_type).replace('<', '&lt;').replace('>', '&gt;')
-                            label_parts.append(f"{safe_col_name}: {safe_col_type}")
+                    if col_details:
+                        col_type = col_details.get('data_type', DEFAULT_DATA_TYPE)
+                        safe_col_name = str(col_name).replace('<', '&lt;').replace('>', '&gt;')
+                        safe_col_type = str(col_type).replace('<', '&lt;').replace('>', '&gt;')
+                        label_parts.append(f"{safe_col_name}: {safe_col_type}")
+                    else:
+                        # No metadata available - show without type
+                        safe_col_name = str(col_name).replace('<', '&lt;').replace('>', '&gt;')
+                        label_parts.append(f"{safe_col_name}")
+                    
             elif all_columns:
                 # For CTEs, try to extract output columns first
                 cte_output_columns = []
@@ -472,41 +615,29 @@ class SQLLineageVisualizer:
                     label_parts.append("Used Columns:")
                 
                 if columns_to_show:
-                    for col_name in columns_to_show[:8]:  # Limit to 8 columns
+                    for col_name in columns_to_show:
                         col_details = next((col for col in all_columns if col.get('name') == col_name), None)
                         if col_details:
                             col_type = col_details.get('data_type', 'unknown')
-                            # Only show if data type is not 'unknown' or if it's an essential column
-                            if col_type != 'unknown' or col_name in ['id', 'name', 'email']:
-                                safe_col_name = str(col_name).replace('<', '&lt;').replace('>', '&gt;')
+                            safe_col_name = str(col_name).replace('<', '&lt;').replace('>', '&gt;')
+                            
+                            if col_type != 'unknown':
                                 safe_col_type = str(col_type).replace('<', '&lt;').replace('>', '&gt;')
                                 label_parts.append(f"{safe_col_name}: {safe_col_type}")
+                            else:
+                                label_parts.append(f"{safe_col_name}")
                         else:
-                            # For CTE output columns, we can show them even without metadata if they're expected
-                            if cte_output_columns and col_name in ['id', 'name', 'email']:
-                                safe_col_name = str(col_name).replace('<', '&lt;').replace('>', '&gt;')
-                                label_parts.append(f"{safe_col_name}: VARCHAR")
-                elif len(all_columns) <= 6:  # Show all if few columns
-                    label_parts.append("─" * 20)
-                    for col in all_columns:
-                        col_name = col.get('name', 'unknown')
-                        col_type = col.get('data_type', 'unknown')
-                        # Only show columns with proper data types or essential columns
-                        if col_type != 'unknown' or col_name in ['id', 'name', 'email']:
-                            # Escape special characters for Graphviz
+                            # For CTE output columns, show all columns
                             safe_col_name = str(col_name).replace('<', '&lt;').replace('>', '&gt;')
-                            safe_col_type = str(col_type).replace('<', '&lt;').replace('>', '&gt;')
-                            label_parts.append(f"{safe_col_name}: {safe_col_type}")
+                            label_parts.append(f"{safe_col_name}")
+                # DO NOT show columns from metadata registry - only show columns discovered from SQL query
+                # The metadata registry should only provide additional details, not discover columns
             
-            # Join all parts
-            full_label = "\\n".join(label_parts)
-            
-        else:
-            # Simple entity name for non-table entities
-            full_label = entity_name
+        # Join all parts to create the final label
+        full_label = "\\n".join(label_parts)
         
-        # Get appropriate node style
-        node_style = self._get_node_style(entity_name, node_config)
+        # Get appropriate node style based on entity type
+        node_style = self._get_node_style_by_type(entity_name, entity_type, node_config)
         
         # Add the node
         dot.node(entity_name, full_label, **node_style)
@@ -664,8 +795,8 @@ class SQLLineageVisualizer:
             parts = column_name.split('.')
             if len(parts) >= 2:
                 # For "QUERY_RESULT.column", return "QUERY_RESULT"
-                if parts[0] == 'QUERY_RESULT':
-                    return 'QUERY_RESULT'
+                if parts[0] == QUERY_RESULT_ENTITY:
+                    return QUERY_RESULT_ENTITY
                 # For "table.column", return "table"  
                 elif len(parts) == 2:
                     return parts[0]
@@ -691,22 +822,22 @@ class SQLLineageVisualizer:
                             dep_table = dep_parts[0]
                             
                             # If dependency is from QUERY_RESULT, trace back to find actual source table
-                            if dep_table == 'QUERY_RESULT' and table_chain:
+                            if dep_table == QUERY_RESULT_ENTITY and table_chain:
                                 # Look for table lineage to find source tables
                                 table_chains = table_chain.get('chains', {})
-                                if 'QUERY_RESULT' in table_chains:
-                                    query_deps = table_chains['QUERY_RESULT'].get('dependencies', [])
+                                if QUERY_RESULT_ENTITY in table_chains:
+                                    query_deps = table_chains[QUERY_RESULT_ENTITY].get('dependencies', [])
                                     if query_deps:
                                         # Use the first source table as the most likely source
-                                        source_table = query_deps[0].get('table', 'orders')
+                                        source_table = query_deps[0].get('table', 'source_table')
                                         return source_table
-                            elif dep_table != 'QUERY_RESULT':
+                            elif dep_table != QUERY_RESULT_ENTITY:
                                 return dep_table
         
         # If no dot, it might be a computed column or aggregate
         # Try to infer from common patterns or return a meaningful default
         if any(keyword in column_name.lower() for keyword in ['count', 'sum', 'avg', 'max', 'min']):
-            return 'QUERY_RESULT'  # Group computed columns under result
+            return QUERY_RESULT_ENTITY  # Group computed columns under result
         
         # For columns without table prefixes (typically in downstream lineage),
         # use a more descriptive name than "Unknown"
@@ -721,11 +852,36 @@ class SQLLineageVisualizer:
     
     def _get_node_style(self, table_name: str, node_config: Dict) -> Dict:
         """Get appropriate node style based on table type."""
-        if table_name == 'QUERY_RESULT':
+        if table_name == QUERY_RESULT_ENTITY:
             return node_config.get('query_result', node_config['table'])
         elif self._is_cte(table_name):
             return node_config.get('cte', node_config['table'])
         else:
+            return node_config['table']
+    
+    def _get_node_style_by_type(self, entity_name: str, entity_type: str, node_config: Dict) -> Dict:
+        """Get appropriate node style based on entity type from enhanced analysis."""
+        if entity_type == 'cte':
+            # CTE entities get special styling
+            cte_style = node_config.get('cte', node_config['table']).copy()
+            cte_style.update({
+                'fillcolor': '#E8F4FD',  # Light blue for CTEs
+                'color': '#1976D2',      # Blue border
+                'fontcolor': '#0D47A1'   # Dark blue text
+            })
+            return cte_style
+        elif entity_type == 'query_result':
+            # Query result entities get final result styling
+            result_style = node_config.get('query_result', node_config['table']).copy()
+            result_style.update({
+                'fillcolor': '#E8F5E8',  # Light green for results
+                'color': '#2E7D32',      # Green border
+                'fontcolor': '#1B5E20',  # Dark green text
+                'style': 'filled,bold'   # Bold styling for emphasis
+            })
+            return result_style
+        else:  # entity_type == 'table' or default
+            # Regular table entities
             return node_config['table']
     
     def _add_transformation_boxes(self, dot: Digraph, chains: Dict, node_config: Dict, edge_config: Dict, chain_data: Optional[Dict] = None) -> None:
@@ -780,17 +936,18 @@ class SQLLineageVisualizer:
                 dot.edge(source_table, trans_id, color='#0066CC', style='dashed')
                 
                 # Connect to result
-                result_target = window_func.get('target', 'QUERY_RESULT')
-                if result_target == 'QUERY_RESULT':
+                result_target = window_func.get('target', QUERY_RESULT_ENTITY)
+                if result_target == QUERY_RESULT_ENTITY:
                     # We'll connect to result box later
                     pass
                 else:
                     dot.edge(trans_id, result_target, color='#0066CC', style='dashed')
         
-        # Collect all transformations from all entities and deduplicate
+        # Collect all transformations from all entities recursively and deduplicate
         all_transformations_with_context = []
         
-        for entity_name, entity_data in chains.items():
+        def collect_transformations_recursive(entity_name: str, entity_data: Dict):
+            """Recursively collect transformations from entity and all its dependencies."""
             # Get direct transformations
             transformations = entity_data.get('transformations', [])
             for trans in transformations:
@@ -800,63 +957,143 @@ class SQLLineageVisualizer:
                     'type': 'direct'
                 })
             
-            # Get dependency transformations 
+            # Recursively get dependency transformations 
             dependencies = entity_data.get('dependencies', [])
             for dep in dependencies:
-                dep_transformations = dep.get('transformations', [])
-                for trans in dep_transformations:
-                    all_transformations_with_context.append({
-                        'transformation': trans,
-                        'entity': entity_name,
-                        'type': 'dependency'
-                    })
+                dep_entity = dep.get('entity')
+                if dep_entity:
+                    # Add transformations from this dependency
+                    dep_transformations = dep.get('transformations', [])
+                    for trans in dep_transformations:
+                        all_transformations_with_context.append({
+                            'transformation': trans,
+                            'entity': dep_entity,
+                            'type': 'dependency'
+                        })
+                    
+                    # Recursively process nested dependencies
+                    collect_transformations_recursive(dep_entity, dep)
+        
+        # Process all top-level chains recursively
+        for entity_name, entity_data in chains.items():
+            collect_transformations_recursive(entity_name, entity_data)
         
         # Deduplicate transformations based on their signature
-        unique_transformations = self._deduplicate_transformations(all_transformations_with_context)
+        # First extract just the transformations from the context
+        raw_transformations = [item['transformation'] for item in all_transformations_with_context]
+        
+        # Use the simple deduplication that merges transformations to same target
+        merged_transformations = self._deduplicate_transformations_simple(raw_transformations)
+        
+        # Convert back to the expected format with context
+        unique_transformations = []
+        for trans in merged_transformations:
+            # Find the original context for this transformation (use first match)
+            original_context = None
+            for item in all_transformations_with_context:
+                if item['transformation'].get('target_table') == trans.get('target_table'):
+                    original_context = item
+                    break
+            
+            if original_context:
+                unique_transformations.append({
+                    'transformation': trans,
+                    'entity': original_context['entity'],
+                    'type': original_context['type'],
+                    'source_tables': trans.get('source_tables', [trans.get('source_table')])
+                })
+            else:
+                # Fallback if no context found
+                unique_transformations.append({
+                    'transformation': trans,
+                    'entity': QUERY_RESULT_ENTITY,
+                    'type': 'direct',
+                    'source_tables': trans.get('source_tables', [trans.get('source_table')])
+                })
+        
+        # Add missing CTE connections based on dependency structure
+        # This handles cases where CTEs depend on other CTEs but transformations are missing
+        missing_cte_transformations = self._create_missing_cte_transformations(chains)
+        for missing_trans in missing_cte_transformations:
+            unique_transformations.append(missing_trans)
         
         for transformation_info in unique_transformations:
             transformation = transformation_info['transformation']
+            
+            # Don't skip transformation boxes - all transformations should be nodes in the flow
+            # The flow integration will handle connecting them properly
+            
             transformation_counter += 1
             trans_id = f"trans_{transformation_counter}"
             
-            # Build transformation label - detect JOIN types first
-            join_type = transformation.get('join_type')
-            join_conditions = transformation.get('join_conditions', [])
+            # Build transformation label - use new joins format only
+            joins = transformation.get('joins', [])
             
-            # Determine the transformation type
-            if join_conditions or join_type:
-                # This is a JOIN transformation
-                if join_type:
-                    trans_type = f"{join_type.upper()} JOIN"
+            # Determine the transformation type - consider all available transformation information
+            group_by = transformation.get('group_by_columns', [])
+            filter_conditions = transformation.get('filter_conditions', [])
+            target_table = transformation.get('target_table', '')
+            source_tables = transformation_info.get('source_tables', [transformation.get('source_table')])
+            
+            # Check for column-level transformations in the target entity
+            column_transformations = self._extract_column_transformations(target_table, chains)
+            
+            if group_by:
+                # If there's GROUP BY, this is primarily an aggregation
+                trans_type = "GROUP BY AGGREGATION"
+            elif joins:
+                # This is a JOIN transformation (without GROUP BY)
+                if len(joins) > 1:
+                    # Multiple JOINs
+                    trans_type = "MULTI-JOIN"
+                elif len(joins) == 1:
+                    # Single JOIN
+                    trans_type = f"{joins[0].get('join_type', DEFAULT_JOIN_TYPE)}"
                 else:
-                    trans_type = "INNER JOIN"  # Default JOIN type
+                    trans_type = DEFAULT_JOIN_TYPE  # Default JOIN type
+            elif column_transformations.get('has_case'):
+                # If there are CASE statements in columns
+                trans_type = "CASE TRANSFORMATION"
+            elif column_transformations.get('has_computed'):
+                # If there are computed/aggregate columns
+                trans_type = "COMPUTED TRANSFORMATION"
+            elif filter_conditions:
+                # This is primarily a filter transformation
+                trans_type = TRANSFORMATION_TYPES['TABLE_TRANSFORMATION']
             else:
-                trans_type = transformation.get('type', 'TRANSFORM')
+                # Check if this looks like a multi-source final query (likely JOINs without explicit conditions)
+                if target_table == QUERY_RESULT_ENTITY and len(source_tables) > 1:
+                    trans_type = "MULTI-TABLE QUERY"
+                elif target_table == QUERY_RESULT_ENTITY:
+                    trans_type = "FINAL SELECT"
+                else:
+                    trans_type = transformation.get('type', TRANSFORMATION_TYPES['TRANSFORM'])
             
             label_parts = [f"**{trans_type.upper()}**"]
             
-            # Add join conditions (only if we have valid conditions)
-            if join_conditions:
-                valid_conditions = []
-                for condition in join_conditions[:3]:  # Limit to 3 conditions
-                    if isinstance(condition, dict):
-                        left_col = condition.get('left_column', '')
-                        operator = condition.get('operator', '=')
-                        right_col = condition.get('right_column', '')
-                        
-                        # Only add condition if we have valid column names
-                        if left_col and right_col and left_col != 'unknown' and right_col != 'unknown':
-                            valid_conditions.append(f"  {left_col} {operator} {right_col}")
-                    else:
-                        # Handle string conditions
-                        condition_str = str(condition).strip()
-                        if condition_str and condition_str != 'unknown' and condition_str != 'unknown =':
-                            safe_condition = condition_str.replace('<', '&lt;').replace('>', '&gt;')
-                            valid_conditions.append(f"  {safe_condition}")
-                
-                if valid_conditions:
-                    label_parts.append("Conditions:")
-                    label_parts.extend(valid_conditions)
+            # Add join information using new joins structure only
+            if joins:
+                for join in joins[:2]:  # Limit to first 2 JOINs to keep label manageable
+                    join_type_name = join.get('join_type', DEFAULT_JOIN_TYPE)
+                    right_table = join.get('right_table', '')
+                    conditions = join.get('conditions', [])
+                    
+                    if right_table:
+                        label_parts.append(f"**{join_type_name}** {right_table}")
+                    
+                    # Add conditions for this specific JOIN
+                    valid_conditions = []
+                    for condition in conditions[:2]:  # Limit to first 2 conditions per JOIN
+                        if isinstance(condition, dict):
+                            left_col = condition.get('left_column', '')
+                            operator = condition.get('operator', '=')
+                            right_col = condition.get('right_column', '')
+                            
+                            if left_col and right_col and left_col != 'unknown' and right_col != 'unknown':
+                                valid_conditions.append(f"  {left_col} {operator} {right_col}")
+                    
+                    if valid_conditions:
+                        label_parts.extend(valid_conditions)
             
             # Add filter conditions (only if we have valid conditions)
             filter_conditions = transformation.get('filter_conditions', [])
@@ -864,16 +1101,45 @@ class SQLLineageVisualizer:
                 valid_filters = []
                 for condition in filter_conditions[:2]:  # Limit to 2 filters
                     if isinstance(condition, dict):
-                        column = condition.get('column', '')
-                        operator = condition.get('operator', '=')
-                        value = condition.get('value', '')
-                        
-                        # Only add filter if we have valid column and value
-                        if column and column != 'unknown' and value != '':
-                            # Clean and format the condition
-                            safe_column = str(column).replace('<', '&lt;').replace('>', '&gt;')
-                            safe_value = str(value).replace('<', '&lt;').replace('>', '&gt;')
-                            valid_filters.append(f"  {safe_column} {operator} {safe_value}")
+                        # Handle nested filter structure: {"type": "FILTER", "conditions": [...]}
+                        if condition.get('type') == TRANSFORMATION_TYPES['FILTER'] and 'conditions' in condition:
+                            nested_conditions = condition.get('conditions', [])
+                            for nested_condition in nested_conditions[:2]:  # Limit nested conditions
+                                if isinstance(nested_condition, dict):
+                                    column = nested_condition.get('column', '')
+                                    operator = nested_condition.get('operator', '=')
+                                    value = nested_condition.get('value', '')
+                                    
+                                    # Only add filter if we have valid column and value
+                                    if column and column != 'unknown' and value != '':
+                                        # Clean and format the condition
+                                        safe_column = str(column).replace('<', '&lt;').replace('>', '&gt;')
+                                        safe_value = str(value).replace('<', '&lt;').replace('>', '&gt;').replace("'", "")
+                                        valid_filters.append(f"  {safe_column} {operator} {safe_value}")
+                        # Handle GROUP BY structure: {"type": "GROUP_BY", "columns": [...]}
+                        elif condition.get('type') == TRANSFORMATION_TYPES['GROUP_BY'] and 'columns' in condition:
+                            group_columns = condition.get('columns', [])
+                            if group_columns:
+                                # This should be handled by the main GROUP BY logic, but if it's in filter_conditions
+                                # we can add it as a note
+                                valid_filters.append(f"  GROUP BY: {', '.join(group_columns[:3])}")
+                        # Handle inferred transformation details
+                        elif condition.get('type') in [COLUMN_TYPES['COMPUTED'], COLUMN_TYPES['SELECT']] and 'description' in condition:
+                            description = condition.get('description', '')
+                            if description:
+                                valid_filters.append(f"  {description}")
+                        else:
+                            # Handle direct filter structure: {"column": "...", "operator": "...", "value": "..."}
+                            column = condition.get('column', '')
+                            operator = condition.get('operator', '=')
+                            value = condition.get('value', '')
+                            
+                            # Only add filter if we have valid column and value
+                            if column and column != 'unknown' and value != '':
+                                # Clean and format the condition
+                                safe_column = str(column).replace('<', '&lt;').replace('>', '&gt;')
+                                safe_value = str(value).replace('<', '&lt;').replace('>', '&gt;').replace("'", "")
+                                valid_filters.append(f"  {safe_column} {operator} {safe_value}")
                     else:
                         # Handle string conditions
                         condition_str = str(condition).strip()
@@ -885,77 +1151,329 @@ class SQLLineageVisualizer:
                     label_parts.append("Filters:")
                     label_parts.extend(valid_filters)
             
-            # Add group by information
-            group_by = transformation.get('group_by_columns', [])
+            # Add column transformation details if available
+            if column_transformations.get('details'):
+                for detail in column_transformations['details'][:3]:  # Limit to 3 details
+                    label_parts.append(f"  {detail}")
+            
+            # Add group by information (we already determined trans_type above)
             if group_by:
                 label_parts.append(f"Group By: {', '.join(group_by[:3])}")
-                # If this is the main transformation type, emphasize GROUP BY
-                if not join_type and not join_conditions and not filter_conditions:
-                    trans_type = "GROUP BY"
+            
+            # Add having conditions (post-aggregation filters)
+            having_conditions = transformation.get('having_conditions', [])
+            if having_conditions:
+                valid_having = []
+                for condition in having_conditions[:2]:  # Limit to 2 having conditions
+                    if isinstance(condition, dict):
+                        column = condition.get('column', '')
+                        operator = condition.get('operator', '=')
+                        value = condition.get('value', '')
+                        
+                        # Only add having condition if we have valid column and value
+                        if column and column != 'unknown' and value != '':
+                            # Clean and format the condition
+                            safe_column = str(column).replace('<', '&lt;').replace('>', '&gt;')
+                            safe_value = str(value).replace('<', '&lt;').replace('>', '&gt;')
+                            valid_having.append(f"  {safe_column} {operator} {safe_value}")
+                
+                if valid_having:
+                    label_parts.append("Having:")
+                    label_parts.extend(valid_having)
             
             # Add order by information
             order_by = transformation.get('order_by_columns', [])
             if order_by:
                 label_parts.append(f"Order By: {', '.join(order_by[:2])}")
             
-            trans_label = "\\n".join(label_parts)
-            
-            # Add transformation node
-            dot.node(trans_id, trans_label, **transformation_style)
-            
-            # Connect source to transformation
-            source_table = transformation.get('source_table')
+            # Connect multiple source tables to transformation (NEW LOGIC)
+            source_tables = transformation_info.get('source_tables', [transformation.get('source_table')])
             target_table = transformation.get('target_table')
             
-            if source_table and source_table in chains:
-                dot.edge(source_table, trans_id, color='#D2691E', style='dashed')
+            # Connect source entities to transformation
+            # For transformation from source to target, we want: source → transformation → target
             
-            # Connect transformation to target
-            if target_table:
-                if target_table in chains:
-                    # Target is another entity in the chain
-                    dot.edge(trans_id, target_table, color='#D2691E', style='dashed')
-                elif target_table == 'QUERY_RESULT':
-                    # Special handling for QUERY_RESULT - it will be handled by final result box
-                    # Store this transformation as needing connection to final result
-                    if not hasattr(dot, '_result_transformations'):
-                        dot._result_transformations = []
-                    dot._result_transformations.append(trans_id)
+            # Check if this transformation should be integrated into entity flow
+            # Use the comprehensive entity connection detection for ALL sources
+            flow_integration_sources = []
+            separate_connection_sources = []
+            
+            for source_table in source_tables:
+                if source_table and target_table:
+                    # Use the comprehensive connection detection method
+                    has_connection = self._has_entity_connection_in_chains(source_table, target_table, chains)
+                    
+                    if has_connection:
+                        flow_integration_sources.append(source_table)
+                    else:
+                        separate_connection_sources.append(source_table)
+            
+            # Always create transformation node for flow integration
+            trans_label = "\\n".join(label_parts)
+            dot.node(trans_id, trans_label, **transformation_style)
+            
+            # Always integrate ALL transformations into flow - no more disconnected transformations
+            if not hasattr(dot, '_flow_transformations'):
+                dot._flow_transformations = []
+            
+            # Use flow_integration_sources if detected, otherwise use all sources
+            sources_to_use = flow_integration_sources if flow_integration_sources else source_tables
+            
+            if sources_to_use and target_table:
+                # For multi-source transformations (JOINs), we need individual table names, not merged strings
+                if isinstance(sources_to_use, list) and len(sources_to_use) == 1 and '+' in str(sources_to_use[0]):
+                    # This is a merged string like "orders + users", split it back to individual tables
+                    merged_string = sources_to_use[0]
+                    individual_sources = [s.strip() for s in merged_string.split('+')]
                 else:
-                    # Unknown target, connect to current entity - use first entity that has this transformation
-                    entity_name = transformation_info.get('entity', '')
-                    if entity_name:
-                        dot.edge(trans_id, entity_name, color='#D2691E', style='dashed')
+                    # Use individual source tables or sources_to_use as is
+                    individual_sources = source_tables if source_tables else sources_to_use
+                
+                dot._flow_transformations.append({
+                    'trans_id': trans_id,
+                    'sources': individual_sources,  # Use actual individual table names
+                    'target': target_table,
+                    'all_sources': source_tables
+                })
+            # Flow transformations will be connected by the entity flow logic (entity → trans → target)
     
     def _extract_window_functions_from_context(self, chains: Dict) -> List[Dict]:
-        """Extract window functions from transformation context or dependencies."""
+        """Extract actual window functions from transformation context or dependencies."""
         window_functions = []
         
-        # Look through all dependencies to find potential window function indicators
+        # Only look for ACTUAL window functions in the analyzer data
+        # Don't assume ORDER BY means window functions - that's incorrect!
         for entity_name, entity_data in chains.items():
             dependencies = entity_data.get('dependencies', [])
             for dep in dependencies:
                 dep_transformations = dep.get('transformations', [])
                 for trans in dep_transformations:
-                    # Check if this involves window functions by looking at order_by patterns
-                    order_by_columns = trans.get('order_by_columns', [])
-                    if order_by_columns:
-                        # This might indicate window functions
-                        # For now, create a generic window function transformation
-                        window_functions.append({
-                            'function': 'WINDOW_FUNCTIONS',
-                            'partition_by': 'customer_id',  # Common pattern
-                            'order_by': ', '.join(order_by_columns),
-                            'source_table': entity_name,
-                            'target': dep.get('entity', 'QUERY_RESULT'),
-                            'alias': 'window_result'
-                        })
-                        break  # Only add one per dependency to avoid duplicates
+                    # Only process if this is explicitly marked as a window function transformation
+                    if trans.get('type') == 'window_function' and trans.get('window_functions'):
+                        # Extract actual window function data from analyzer
+                        for window_func in trans.get('window_functions', []):
+                            window_functions.append({
+                                'function': window_func.get('function', UNKNOWN_FUNCTION),
+                                'partition_by': ', '.join(window_func.get('partition_by', [])),
+                                'order_by': ', '.join(window_func.get('order_by', [])),
+                                'source_table': entity_name,
+                                'target': dep.get('entity', QUERY_RESULT_ENTITY),
+                                'alias': window_func.get('alias', '')
+                            })
         
         return window_functions
     
+    def _deduplicate_query_result_nodes(self, chains: Dict) -> Dict:
+        """Deduplicate QUERY_RESULT nodes and merge their transformations and metadata."""
+        # Find all QUERY_RESULT nodes and their data
+        query_result_nodes = []
+        merged_transformations = []
+        merged_columns = []
+        
+        def find_query_results_recursive(entity_name: str, entity_data: Dict, path: List[str] = None):
+            """Find all QUERY_RESULT nodes recursively."""
+            if path is None:
+                path = []
+            
+            if entity_name == QUERY_RESULT_ENTITY:
+                query_result_nodes.append({
+                    'entity_data': entity_data,
+                    'path': path.copy(),
+                    'parent_entities': [p for p in path if p != QUERY_RESULT_ENTITY]
+                })
+                
+                # Collect transformations
+                transformations = entity_data.get('transformations', [])
+                merged_transformations.extend(transformations)
+                
+                # Collect columns
+                metadata = entity_data.get('metadata', {})
+                table_columns = metadata.get('table_columns', [])
+                merged_columns.extend(table_columns)
+            
+            # Continue searching in dependencies
+            dependencies = entity_data.get('dependencies', [])
+            for dep in dependencies:
+                dep_entity = dep.get('entity')
+                if dep_entity:
+                    find_query_results_recursive(dep_entity, dep, path + [entity_name])
+        
+        # Find all QUERY_RESULT nodes
+        for entity_name, entity_data in chains.items():
+            find_query_results_recursive(entity_name, entity_data)
+        
+        # If we found multiple QUERY_RESULT nodes, merge them
+        if len(query_result_nodes) > 1:
+            # Create merged QUERY_RESULT
+            merged_query_result = {
+                'entity': QUERY_RESULT_ENTITY,
+                'entity_type': 'table',
+                'depth': max(qr['entity_data'].get('depth', 0) for qr in query_result_nodes),
+                'dependencies': [],
+                'metadata': {
+                    'table_columns': self._deduplicate_columns(merged_columns),
+                    'is_cte': False
+                },
+                'transformations': self._deduplicate_transformations_simple(merged_transformations)
+            }
+            
+            # Create new chains structure with merged QUERY_RESULT
+            new_chains = {}
+            
+            # Process each original chain and replace QUERY_RESULT dependencies
+            for entity_name, entity_data in chains.items():
+                new_entity_data = self._replace_query_result_dependencies(entity_data, merged_query_result)
+                new_chains[entity_name] = new_entity_data
+            
+            return new_chains
+        else:
+            # No duplication, return original chains
+            return chains
+    
+    def _deduplicate_columns(self, columns: List[Dict]) -> List[Dict]:
+        """Deduplicate columns by name, keeping the most complete data."""
+        seen_columns = {}
+        
+        for col in columns:
+            col_name = col.get('name', '')
+            if col_name:
+                if col_name not in seen_columns:
+                    seen_columns[col_name] = col
+                else:
+                    # Merge column data - prefer more complete entries
+                    existing = seen_columns[col_name]
+                    if len(col.get('upstream', [])) > len(existing.get('upstream', [])):
+                        seen_columns[col_name] = col
+                    elif col.get('transformation') and not existing.get('transformation'):
+                        seen_columns[col_name] = col
+        
+        return list(seen_columns.values())
+    
+    def _deduplicate_transformations_simple(self, transformations: List[Dict]) -> List[Dict]:
+        """Enhanced transformation deduplication with intelligent merging."""
+        if not transformations:
+            return []
+        
+        # For JOIN queries with multiple source tables, combine them into a single transformation
+        target_groups = {}
+        
+        # Group transformations by target table
+        for trans in transformations:
+            target = trans.get('target_table', QUERY_RESULT_ENTITY)
+            if target not in target_groups:
+                target_groups[target] = []
+            target_groups[target].append(trans)
+        
+        merged_transformations = []
+        
+        for target, trans_list in target_groups.items():
+            if len(trans_list) == 1:
+                # Single transformation, use as-is
+                merged_transformations.append(trans_list[0])
+            else:
+                # Multiple transformations to same target - merge them
+                merged_trans = self._merge_transformations_to_target(trans_list, target)
+                merged_transformations.append(merged_trans)
+        
+        return merged_transformations
+    
+    def _merge_transformations_to_target(self, transformations: List[Dict], target: str) -> Dict:
+        """Merge multiple transformations that go to the same target."""
+        # Start with the most complete transformation as base
+        base_trans = max(transformations, key=lambda t: (
+            len(t.get('filter_conditions', [])) +
+            len(t.get('group_by_columns', [])) +
+            len(t.get('having_conditions', [])) +
+            sum(len(j.get('conditions', [])) for j in t.get('joins', []))
+        ))
+        
+        merged = base_trans.copy()
+        
+        # Collect all source tables
+        source_tables = []
+        for trans in transformations:
+            source = trans.get('source_table', '')
+            if source and source not in source_tables:
+                source_tables.append(source)
+        
+        # Update source table to show combined sources
+        merged['source_tables'] = source_tables  # Store list for connection logic
+        if len(source_tables) > 1:
+            merged['source_table'] = ' + '.join(sorted(source_tables))
+            merged['multi_source'] = True
+        elif len(source_tables) == 1:
+            merged['source_table'] = source_tables[0]
+        
+        # Merge filter conditions from all transformations
+        all_filters = []
+        for trans in transformations:
+            filters = trans.get('filter_conditions', [])
+            for filt in filters:
+                if filt not in all_filters:
+                    all_filters.append(filt)
+        merged['filter_conditions'] = all_filters
+        
+        # Merge having conditions
+        all_having = []
+        for trans in transformations:
+            having = trans.get('having_conditions', [])
+            for hav in having:
+                if hav not in all_having:
+                    all_having.append(hav)
+        merged['having_conditions'] = all_having
+        
+        # Merge joins
+        all_joins = []
+        for trans in transformations:
+            joins = trans.get('joins', [])
+            for join in joins:
+                if join not in all_joins:
+                    all_joins.append(join)
+        merged['joins'] = all_joins
+        
+        # Keep the most complete group_by and order_by
+        for trans in transformations:
+            if len(trans.get('group_by_columns', [])) > len(merged.get('group_by_columns', [])):
+                merged['group_by_columns'] = trans.get('group_by_columns', [])
+            if len(trans.get('order_by_columns', [])) > len(merged.get('order_by_columns', [])):
+                merged['order_by_columns'] = trans.get('order_by_columns', [])
+        
+        return merged
+    
+    def _has_query_result_in_chain(self, entity_data: Dict) -> bool:
+        """Check if QUERY_RESULT exists in a chain recursively."""
+        if entity_data.get('entity') == QUERY_RESULT_ENTITY:
+            return True
+        
+        dependencies = entity_data.get('dependencies', [])
+        for dep in dependencies:
+            if self._has_query_result_in_chain(dep):
+                return True
+        
+        return False
+    
+    def _replace_query_result_dependencies(self, entity_data: Dict, merged_query_result: Dict) -> Dict:
+        """Replace QUERY_RESULT dependencies with the merged one."""
+        new_entity_data = entity_data.copy()
+        new_dependencies = []
+        
+        dependencies = entity_data.get('dependencies', [])
+        for dep in dependencies:
+            dep_entity = dep.get('entity')
+            if dep_entity == QUERY_RESULT_ENTITY:
+                # Replace with merged QUERY_RESULT (but only add once per entity)
+                if not any(d.get('entity') == QUERY_RESULT_ENTITY for d in new_dependencies):
+                    new_dependencies.append(merged_query_result)
+            else:
+                # Recursively process non-QUERY_RESULT dependencies
+                new_dep = self._replace_query_result_dependencies(dep, merged_query_result)
+                new_dependencies.append(new_dep)
+        
+        new_entity_data['dependencies'] = new_dependencies
+        return new_entity_data
+    
     def _add_entity_connections(self, dot: Digraph, chains: Dict, edge_config: Dict) -> None:
-        """Add connections between entities with special handling for subqueries."""
+        """Add connections between entities with special handling for subqueries and transformations."""
         subquery_edge_config = edge_config.copy()
         subquery_edge_config.update({
             'style': 'dashed',
@@ -964,21 +1482,228 @@ class SQLLineageVisualizer:
             'arrowhead': 'diamond'
         })
         
-        for entity_name, entity_data in chains.items():
-            if entity_name == 'QUERY_RESULT':
-                continue  # Skip QUERY_RESULT connections, handled in result box
-                
+        # Get list of connections that should have transformations inserted
+        flow_transformations = getattr(dot, '_flow_transformations', [])
+        transformation_connections = set()
+        for ft in flow_transformations:
+            # Handle both old format (single source) and new format (multiple sources)
+            if 'sources' in ft:
+                # New multi-source format - add all source connections
+                for source in ft['sources']:
+                    transformation_connections.add((source, ft['target']))
+            else:
+                # Old single-source format (backward compatibility)
+                transformation_connections.add((ft.get('source', ''), ft['target']))
+        
+        
+        # Recursively traverse all entity dependencies
+        def add_connections_recursive(entity_name: str, entity_data: Dict):
+            """Recursively add connections for entity and all its dependencies."""
             dependencies = entity_data.get('dependencies', [])
             for dep in dependencies:
                 dep_entity = dep.get('entity')
-                if dep_entity and dep_entity != 'QUERY_RESULT':
-                    # Check if this is a subquery connection
-                    if self._is_subquery_connection(entity_name, dep_entity, entity_data, dep):
-                        # Use dashed line for subqueries
-                        dot.edge(entity_name, dep_entity, **subquery_edge_config)
-                    else:
-                        # Use regular solid line for main flow
-                        dot.edge(entity_name, dep_entity, **edge_config)
+                if dep_entity:
+                    # Check if there's a transformation node that should be inserted in this flow
+                    transformation_in_flow = None
+                    
+                    # Look for transformation boxes that represent this entity connection
+                    if hasattr(dot, '_flow_transformations'):
+                        for ft in dot._flow_transformations:
+                            # Handle both old format (single source) and new format (multiple sources)
+                            if 'sources' in ft:
+                                # New multi-source format
+                                # When processing dependencies, we have entity_name (target) connecting to dep_entity (source)
+                                # For multi-source transformations, if the dependency is one of the transformation sources
+                                # and the current entity is the transformation target, route through transformation
+                                if dep_entity in ft['sources'] and ft['target'] == entity_name:
+                                    transformation_in_flow = ft['trans_id']
+                                    break
+                            else:
+                                # Old single-source format (backward compatibility)
+                                if ft.get('source') == dep_entity and ft['target'] == entity_name:
+                                    transformation_in_flow = ft['trans_id']
+                                    break
+                    
+                    # Skip all entity-level connections - transformations handle them directly
+                    # This prevents duplicate arrows
+                    pass
+                    
+                    # Recursively process dependencies of this dependency
+                    add_connections_recursive(dep_entity, dep)
+        
+        # Process all top-level chains and their nested dependencies
+        for entity_name, entity_data in chains.items():
+            add_connections_recursive(entity_name, entity_data)
+        
+        # Also process transformation targets that are not in chains (like QUERY_RESULT)
+        if hasattr(dot, '_flow_transformations'):
+            processed_targets = set()
+            for ft in dot._flow_transformations:
+                target = ft['target']
+                if target and target not in chains and target not in processed_targets:
+                    processed_targets.add(target)
+                    # Create a minimal entity data structure for the target
+                    target_dependencies = []
+                    # Find dependencies that point to this target
+                    for entity_name, entity_data in chains.items():
+                        deps = entity_data.get('dependencies', [])
+                        for dep in deps:
+                            if dep.get('entity') == target:
+                                target_dependencies.append({'entity': entity_name})
+                    
+                    if target_dependencies:
+                        target_entity_data = {'dependencies': target_dependencies}
+                        add_connections_recursive(target, target_entity_data)
+        
+        # DIRECT FIX: Ensure all transformations are connected regardless of entity routing
+        if hasattr(dot, '_flow_transformations'):
+            for ft in dot._flow_transformations:
+                trans_id = ft['trans_id']
+                target = ft['target'] 
+                sources = ft.get('sources', [])
+                
+                # Connect each source to transformation
+                for source in sources:
+                    # Connect all sources - they should exist as nodes by this point
+                    dot.edge(source, trans_id, **edge_config)
+                
+                # Connect transformation to target (always)
+                if target:
+                    dot.edge(trans_id, target, **edge_config)
+    
+    def _merge_transformations_for_edge(self, transformations: List[Dict]) -> Dict:
+        """Merge multiple transformations for display on an edge."""
+        if not transformations:
+            return {}
+        
+        if len(transformations) == 1:
+            return transformations[0]
+        
+        # Use the same merging logic as _merge_transformations_to_target
+        base_trans = max(transformations, key=lambda t: (
+            len(t.get('filter_conditions', [])) +
+            len(t.get('group_by_columns', [])) +
+            len(t.get('having_conditions', [])) +
+            sum(len(j.get('conditions', [])) for j in t.get('joins', []))
+        ))
+        
+        merged = base_trans.copy()
+        
+        # Merge conditions from all transformations
+        all_filters = []
+        all_having = []
+        all_joins = []
+        all_groups = set()
+        all_order_by = set()
+        
+        for trans in transformations:
+            # Merge filters
+            filters = trans.get('filter_conditions', [])
+            for filt in filters:
+                if filt not in all_filters:
+                    all_filters.append(filt)
+            
+            # Merge having conditions
+            having = trans.get('having_conditions', [])
+            for hav in having:
+                if hav not in all_having:
+                    all_having.append(hav)
+            
+            # Merge join conditions  
+            joins = trans.get('join_conditions', [])
+            for join in joins:
+                if join not in all_joins:
+                    all_joins.append(join)
+            
+            # Merge group by (use set to avoid duplicates)
+            groups = trans.get('group_by_columns', [])
+            all_groups.update(groups)
+            
+            # Merge order by
+            order_by = trans.get('order_by_columns', [])
+            all_order_by.update(order_by)
+        
+        merged['filter_conditions'] = all_filters
+        merged['having_conditions'] = all_having
+        merged['join_conditions'] = all_joins
+        merged['group_by_columns'] = list(all_groups)
+        merged['order_by_columns'] = list(all_order_by)
+        
+        return merged
+    
+    def _create_transformation_edge_label(self, transformation: Dict) -> str:
+        """Create a concise label for transformation information on edges."""
+        if not transformation:
+            return ""
+        
+        label_parts = []
+        
+        # Join type is now handled within the joins array, so this is no longer needed
+        
+        # Add key conditions (limit to keep label concise)
+        joins = transformation.get('joins', [])
+        if joins:
+            # Show first join and its first condition
+            first_join = joins[0]
+            conditions = first_join.get('conditions', [])
+            if conditions:
+                condition = conditions[0]
+                if isinstance(condition, dict):
+                    left_col = condition.get('left_column', '')
+                    right_col = condition.get('right_column', '')
+                    if left_col and right_col:
+                        # Simplify column names for edge labels
+                        left_simple = left_col.split('.')[-1] if '.' in left_col else left_col
+                        right_simple = right_col.split('.')[-1] if '.' in right_col else right_col
+                        label_parts.append(f"ON {left_simple}={right_simple}")
+        
+        # Add filter info if present
+        filters = transformation.get('filter_conditions', [])
+        if filters:
+            label_parts.append(f"WHERE ({len(filters)} filters)")
+        
+        # Add group by info if present
+        groups = transformation.get('group_by_columns', [])
+        if groups:
+            label_parts.append(f"GROUP BY ({len(groups)} cols)")
+        
+        # Add having info if present
+        having = transformation.get('having_conditions', [])
+        if having:
+            label_parts.append(f"HAVING ({len(having)} conditions)")
+        
+        return "\\n".join(label_parts)
+    
+    def _has_entity_connection_in_chains(self, source_entity: str, target_entity: str, chains: Dict) -> bool:
+        """Check if there's an entity connection from source to target anywhere in the nested chains structure."""
+        if not source_entity or not target_entity:
+            return False
+        
+        # Search through all entities in the nested structure
+        def search_for_connection(entity_name: str, entity_data: Dict) -> bool:
+            # Check if this entity matches the source we're looking for
+            if entity_name == source_entity:
+                # Check if any of its dependencies match the target
+                dependencies = entity_data.get('dependencies', [])
+                for dep in dependencies:
+                    if dep.get('entity') == target_entity:
+                        return True
+            
+            # Recursively search through dependencies
+            dependencies = entity_data.get('dependencies', [])
+            for dep in dependencies:
+                dep_entity = dep.get('entity')
+                if dep_entity and search_for_connection(dep_entity, dep):
+                    return True
+            
+            return False
+        
+        # Search through all top-level chains
+        for entity_name, entity_data in chains.items():
+            if search_for_connection(entity_name, entity_data):
+                return True
+        
+        return False
     
     def _is_subquery_connection(self, source_entity: str, target_entity: str, source_data: Dict, dependency: Dict) -> bool:
         """Determine if this connection represents a subquery relationship."""
@@ -992,17 +1717,19 @@ class SQLLineageVisualizer:
                 if isinstance(condition, dict):
                     operator = condition.get('operator', '').upper()
                     # IN, EXISTS, NOT EXISTS are typical subquery operators
-                    if operator in ['IN', 'EXISTS', 'NOT EXISTS']:
+                    if operator in [SQL_OPERATORS['IN'], SQL_OPERATORS['EXISTS'], SQL_OPERATORS['NOT_EXISTS']]:
                         return True
                     # Check for correlated subquery patterns
                     column = condition.get('column', '')
                     if '(' in str(condition.get('value', '')) or 'SELECT' in str(condition.get('value', '')).upper():
                         return True
         
-        # Check if source and target have different base tables (indicating subquery)
-        if source_entity in ['users', 'orders', 'products', 'categories'] and target_entity in ['users', 'orders', 'products', 'categories']:
-            if source_entity != target_entity:
-                return True
+        # Check if source and target are different table entities (indicating subquery)
+        # Generic check - if both are table entities (not CTEs) and different, might be subquery
+        if (not self._is_cte(source_entity) and not self._is_cte(target_entity) and 
+            source_entity != target_entity and 
+            source_entity not in [QUERY_RESULT_ENTITY] and target_entity not in [QUERY_RESULT_ENTITY]):
+            return True
         
         return False
     
@@ -1018,11 +1745,24 @@ class SQLLineageVisualizer:
         result_entity_name = None
         result_entity_data = None
         
-        if 'QUERY_RESULT' in chains:
-            result_entity_name = 'QUERY_RESULT'
-            result_entity_data = chains['QUERY_RESULT']
+        if QUERY_RESULT_ENTITY in chains:
+            result_entity_name = QUERY_RESULT_ENTITY
+            result_entity_data = chains[QUERY_RESULT_ENTITY]
         elif is_ctas:
-            # For CTAS, find the created table (entity with highest depth)
+            # For CTAS queries with transformations, don't create a separate result box
+            # The flow should end at the created table entity which already has its own node
+            # Check if there are transformations that would create the proper flow
+            has_transformations = any(
+                entity_data.get('transformations', []) or 
+                any(dep.get('transformations', []) for dep in entity_data.get('dependencies', []))
+                for entity_data in chains.values()
+            )
+            
+            if has_transformations:
+                # Skip creating final result box - transformations will handle the flow
+                return
+            
+            # For CTAS without transformations, find the created table (entity with highest depth)
             max_depth = -1
             for entity_name, entity_data in chains.items():
                 depth = entity_data.get('depth', 0)
@@ -1050,7 +1790,7 @@ class SQLLineageVisualizer:
             return
         
         # For CTAS queries, modify the existing table node instead of creating separate result box
-        if is_ctas and result_entity_name != 'QUERY_RESULT':
+        if is_ctas and result_entity_name != QUERY_RESULT_ENTITY:
             self._modify_ctas_result_node(dot, result_entity_name, result_entity_data, chain_data, node_config)
             return
         
@@ -1090,11 +1830,11 @@ class SQLLineageVisualizer:
             if table_columns:
                 label_parts.append("Output Columns:")
                 for col_info in table_columns[:6]:  # Limit for readability
-                    col_name = col_info.get('name', col_info.get('column_name', 'unknown'))  # Support both old and new format
+                    col_name = col_info.get('name', col_info.get('column_name', UNKNOWN_VALUE))  # Support both old and new format
                     
                     # Check for old format transformations first, then new format type
                     transformations = col_info.get('transformations', [])
-                    col_type = col_info.get('type', 'DIRECT')
+                    col_type = col_info.get('type', COLUMN_TYPES['DIRECT'])
                     
                     if transformations:
                         # Old format - use transformation expression
@@ -1105,7 +1845,7 @@ class SQLLineageVisualizer:
                             label_parts.append(f"• {safe_col_name}: {safe_expr}")
                         else:
                             label_parts.append(f"• {safe_col_name}")
-                    elif col_type and col_type != 'DIRECT':
+                    elif col_type and col_type != COLUMN_TYPES['DIRECT']:
                         # New format - show column with type
                         safe_col_name = str(col_name).replace('<', '&lt;').replace('>', '&gt;')
                         label_parts.append(f"• {safe_col_name} ({col_type})")
@@ -1115,7 +1855,7 @@ class SQLLineageVisualizer:
                         label_parts.append(f"• {safe_col_name}")
         
         result_label = "\\n".join(label_parts)
-        result_id = "FINAL_RESULT"
+        result_id = FINAL_RESULT_ENTITY
         
         # Add result box with rank constraint to position it at the end
         dot.node(result_id, result_label, **result_style)
@@ -1125,19 +1865,19 @@ class SQLLineageVisualizer:
         
         # First pass: identify entities that should connect to result
         for entity_name, entity_data in chains.items():
-            if entity_name == 'QUERY_RESULT':
+            if entity_name == QUERY_RESULT_ENTITY:
                 continue
                 
             # Check if this entity has dependencies that lead to QUERY_RESULT or has no dependencies
             dependencies = entity_data.get('dependencies', [])
-            has_query_result_dep = any(dep.get('entity') == 'QUERY_RESULT' for dep in dependencies)
+            has_query_result_dep = any(dep.get('entity') == QUERY_RESULT_ENTITY for dep in dependencies)
             has_no_deps = len(dependencies) == 0
             
             if has_query_result_dep or has_no_deps:
                 entities_connected_to_result.add(entity_name)
         
         # If no entities found, connect the one with highest depth
-        if not entities_connected_to_result and result_entity_name != 'QUERY_RESULT':
+        if not entities_connected_to_result and result_entity_name != QUERY_RESULT_ENTITY:
             entities_connected_to_result.add(result_entity_name)
         
         # Connect transformations to result box if any were stored
@@ -1152,6 +1892,71 @@ class SQLLineageVisualizer:
         
         # Add rank constraint to ensure result box appears at the end
         dot.body.append('{rank=sink; FINAL_RESULT}')
+    
+    def _add_missing_ctas_target_entities(self, dot: Digraph, chains: Dict, node_config: Dict, edge_config: Dict, chain_data: Dict) -> None:
+        """Add missing target entities for CTAS transformations."""
+        # Collect all transformation targets that are missing from chains
+        missing_targets = set()
+        
+        for entity_name, entity_data in chains.items():
+            # Check direct transformations
+            transformations = entity_data.get('transformations', [])
+            for trans in transformations:
+                target_table = trans.get('target_table')
+                if target_table and target_table not in chains:
+                    missing_targets.add(target_table)
+            
+            # Check dependency transformations
+            dependencies = entity_data.get('dependencies', [])
+            for dep in dependencies:
+                dep_transformations = dep.get('transformations', [])
+                for trans in dep_transformations:
+                    target_table = trans.get('target_table')
+                    if target_table and target_table not in chains:
+                        missing_targets.add(target_table)
+        
+        # Add missing target entities as nodes
+        for target_name in missing_targets:
+            # Create a basic entity node for the missing target
+            target_style = {
+                'shape': 'box',
+                'style': 'filled,bold',
+                'fillcolor': '#E8F5E8',
+                'color': '#2E7D32',
+                'fontname': 'Arial Bold',
+                'fontsize': '12',
+                'fontcolor': '#1B5E20'
+            }
+            
+            # Build label for the created table
+            label_parts = [f"**{target_name}**"]
+            label_parts.append("(CREATED TABLE)")
+            
+            # Try to extract columns from SQL if available  
+            sql = chain_data.get('sql', '')
+            if sql:
+                select_columns = self._extract_select_columns_from_sql(sql)
+                if select_columns:
+                    label_parts.append("─" * 20)
+                    label_parts.append("Columns:")
+                    for col in select_columns[:6]:  # Limit to 6 columns
+                        safe_col = str(col).replace('<', '&lt;').replace('>', '&gt;')
+                        label_parts.append(f"• {safe_col}")
+                    if len(select_columns) > 6:
+                        label_parts.append(f"... and {len(select_columns) - 6} more")
+            
+            target_label = "\\n".join(label_parts)
+            dot.node(target_name, target_label, **target_style)
+            
+            # Add the target to chains so transformation logic can find it
+            chains[target_name] = {
+                'entity': target_name,
+                'entity_type': 'table',
+                'depth': max([data.get('depth', 0) for data in chains.values()]) + 1,
+                'dependencies': [],
+                'transformations': [],
+                'metadata': {}
+            }
     
     def _modify_ctas_result_node(self, dot: Digraph, table_name: str, table_data: Dict, chain_data: Dict, node_config: Dict) -> None:
         """Modify the CTAS table node to show both table name and query result."""
@@ -1191,7 +1996,7 @@ class SQLLineageVisualizer:
             if table_columns:
                 label_parts.append("Output Columns:")
                 for col_info in table_columns[:6]:
-                    col_name = col_info.get('name', col_info.get('column_name', 'unknown'))  # Support both old and new format
+                    col_name = col_info.get('name', col_info.get('column_name', UNKNOWN_VALUE))  # Support both old and new format
                     safe_col_name = str(col_name).replace('<', '&lt;').replace('>', '&gt;')
                     label_parts.append(f"• {safe_col_name}")
         
@@ -1306,13 +2111,8 @@ class SQLLineageVisualizer:
                     if group_col and group_col not in used_columns:
                         used_columns.append(group_col)
         
-        # For window function queries, also add common columns
-        if any('order_by_columns' in trans for dep in dependencies for trans in dep.get('transformations', [])):
-            # This looks like a window function query, add common columns
-            common_window_columns = ['customer_id', 'order_date', 'order_total', 'total']
-            for col_name in common_window_columns:
-                if any(col.get('name') == col_name for col in all_columns) and col_name not in used_columns:
-                    used_columns.append(col_name)
+        # For window function queries, DO NOT add columns from metadata registry
+        # Only show columns that are actually used in the SQL query transformations
         
         return used_columns
     
@@ -1349,18 +2149,9 @@ class SQLLineageVisualizer:
                             if column and column not in output_columns:
                                 output_columns.append(column)
         
-        # For specific patterns, add common columns based on CTE name or source patterns
-        if not output_columns:
-            if 'active_users' in cte_name.lower():
-                # For active_users CTE, typically id and name are selected
-                output_columns = ['id', 'name']
-            elif 'users' in cte_name.lower():
-                output_columns = ['id', 'name']
-            elif 'orders' in cte_name.lower():
-                output_columns = ['id', 'customer_id', 'order_date', 'total']
-            else:
-                # Generic fallback
-                output_columns = ['id', 'name']
+        # If no output columns found, don't assume any hardcoded column names
+        # The visualizer should work with whatever columns are actually present in the metadata
+        # or detected from transformations, without making assumptions about field names
         
         # Remove duplicates while preserving order
         seen = set()
@@ -1395,24 +2186,24 @@ class SQLLineageVisualizer:
             if clean_col:
                 columns.append(clean_col)
         
-        # For common patterns based on source table name
-        if 'users' in source_table.lower():
-            # For user tables, if we have 'active' filter, likely selecting id, name
-            has_active_filter = any(
-                isinstance(condition, dict) and condition.get('column') == 'active'
-                for condition in filter_conditions
-            )
-            if has_active_filter:
-                for col in ['id', 'name']:
-                    if col not in columns:
-                        columns.append(col)
+        # For common patterns based on source table name - make it generic
+        source_lower = source_table.lower()
+        
+        # Look for filter conditions to identify additional columns being used
+        for condition in filter_conditions:
+            if isinstance(condition, dict):
+                column = condition.get('column', '')
+                if column and column not in columns:
+                    columns.append(column)
+        
+        # No hardcoded column assumptions - let the actual transformation data drive what columns are shown
         
         # Filter out QUERY_RESULT columns and invalid references
         filtered_columns = []
         for col in columns:
             col_str = str(col)
             if not (col_str.startswith('QUERY_RESULT.') or 
-                   col_str == 'QUERY_RESULT' or 
+                   col_str == QUERY_RESULT_ENTITY or 
                    col_str.startswith('unknown') or
                    col_str == 'unknown'):
                 filtered_columns.append(col)
@@ -1420,16 +2211,18 @@ class SQLLineageVisualizer:
         return filtered_columns
     
     def _deduplicate_transformations(self, transformations_with_context: List[Dict]) -> List[Dict]:
-        """Deduplicate transformations based on their signature to avoid showing the same transformation multiple times."""
+        """Deduplicate transformations based on their signature, merging multiple source tables for identical transformations."""
         unique_transformations = {}
         
         for trans_info in transformations_with_context:
             transformation = trans_info['transformation']
             
-            # Create a signature based on transformation characteristics
-            source_table = transformation.get('source_table', '')
+            # Create a signature based on transformation characteristics (excluding source_table for true deduplication)
             target_table = transformation.get('target_table', '')
-            trans_type = transformation.get('type', 'TRANSFORM')
+            trans_type = transformation.get('type', TRANSFORMATION_TYPES['TRANSFORM'])
+            # Extract join_type from joins array for signature
+            joins = transformation.get('joins', [])
+            join_type = joins[0].get('join_type', '') if joins else ''
             
             # Sort conditions for consistent comparison
             filter_conditions = transformation.get('filter_conditions', [])
@@ -1438,21 +2231,31 @@ class SQLLineageVisualizer:
                 for c in filter_conditions if isinstance(c, dict)
             ]))
             
-            join_conditions = transformation.get('join_conditions', [])
+            joins = transformation.get('joins', [])
             join_signature = tuple(sorted([
                 f"{c.get('left_column', 'unknown')}_{c.get('operator', '=')}_{c.get('right_column', 'unknown')}"
-                for c in join_conditions if isinstance(c, dict)
+                for join in joins for c in join.get('conditions', []) if isinstance(c, dict)
             ]))
             
             group_by = tuple(sorted(transformation.get('group_by_columns', [])))
             order_by = tuple(sorted(transformation.get('order_by_columns', [])))
             
-            # Create unique signature
-            signature = (source_table, target_table, trans_type, filter_signature, join_signature, group_by, order_by)
+            # Create unique signature WITHOUT source_table to allow merging from multiple sources
+            signature = (target_table, trans_type, join_type, filter_signature, join_signature, group_by, order_by)
             
-            # Only keep the first occurrence of each unique transformation
             if signature not in unique_transformations:
-                unique_transformations[signature] = trans_info
+                # First occurrence - store with source tables list
+                unique_transformations[signature] = {
+                    'transformation': transformation,
+                    'entity': trans_info['entity'],
+                    'type': trans_info['type'],
+                    'source_tables': [transformation.get('source_table', '')]  # Track all source tables
+                }
+            else:
+                # Duplicate found - add source table to the list if not already present
+                source_table = transformation.get('source_table', '')
+                if source_table and source_table not in unique_transformations[signature]['source_tables']:
+                    unique_transformations[signature]['source_tables'].append(source_table)
         
         return list(unique_transformations.values())
     
@@ -1476,11 +2279,12 @@ class SQLLineageVisualizer:
                             extracted_columns.append(column)
                 
                 # Extract from join conditions - be more specific about which column belongs to which table
-                join_conditions = trans.get('join_conditions', [])
-                for condition in join_conditions:
-                    if isinstance(condition, dict):
-                        left_col = condition.get('left_column', '')
-                        right_col = condition.get('right_column', '')
+                joins = trans.get('joins', [])
+                for join in joins:
+                    for condition in join.get('conditions', []):
+                        if isinstance(condition, dict):
+                            left_col = condition.get('left_column', '')
+                            right_col = condition.get('right_column', '')
                         
                         # For JOIN conditions like u.id = o.user_id, extract the relevant column for this table
                         if left_col:
@@ -1548,40 +2352,91 @@ class SQLLineageVisualizer:
                                 clean_column = column.split('.')[-1] if '.' in column else column
                                 extracted_columns.append(clean_column)
         
-        # For specific CTE pattern: "WITH active_users AS (SELECT id, name FROM users WHERE active = true)"
-        # If this is a users table and we have 'active' in filter conditions, we can infer id, name are selected
-        if 'users' in entity_name.lower():
-            # Check if there's an 'active' filter condition, which suggests id, name are selected
-            has_active_condition = any(
-                isinstance(condition, dict) and condition.get('column') == 'active'
-                for trans in transformations + [t for dep in dependencies for t in dep.get('transformations', [])]
-                for condition in trans.get('filter_conditions', [])
-            )
-            if has_active_condition:
-                # Common pattern: SELECT id, name FROM users WHERE active = true
-                for col in ['id', 'name']:
-                    if col not in extracted_columns:
-                        extracted_columns.append(col)
+        # Generic pattern detection for any entity name
+        # Extract columns from JOIN conditions involving this entity
+        for trans in transformations + [t for dep in dependencies for t in dep.get('transformations', [])]:
+            joins = trans.get('joins', [])
+            for join in joins:
+                for condition in join.get('conditions', []):
+                    if isinstance(condition, dict):
+                        left_col = condition.get('left_column', '')
+                        right_col = condition.get('right_column', '')
+                    
+                    # Check if this entity is referenced in JOIN conditions
+                    for col_ref in [left_col, right_col]:
+                        if col_ref and '.' in col_ref:
+                            table_ref, col_name = col_ref.split('.', 1)
+                            if (table_ref == entity_name or 
+                                table_ref.lower() == entity_name.lower() or
+                                self._is_table_alias_match(table_ref, entity_name)):
+                                if col_name not in extracted_columns:
+                                    extracted_columns.append(col_name)
+        
+        # Extract columns from filter conditions for this entity
+        for trans in transformations + [t for dep in dependencies for t in dep.get('transformations', [])]:
+            filter_conditions = trans.get('filter_conditions', [])
+            for condition in filter_conditions:
+                if isinstance(condition, dict):
+                    column = condition.get('column', '')
+                    if column and column not in extracted_columns:
+                        # If column has table prefix, check if it belongs to this entity
+                        if '.' in column:
+                            table_ref, col_name = column.split('.', 1)
+                            if (table_ref == entity_name or 
+                                table_ref.lower() == entity_name.lower() or
+                                self._is_table_alias_match(table_ref, entity_name)):
+                                extracted_columns.append(col_name)
+                        else:
+                            # Column without prefix - might belong to this entity if it's the source
+                            source_table = trans.get('source_table', '')
+                            if source_table == entity_name:
+                                extracted_columns.append(column)
         
         # Filter out QUERY_RESULT columns and invalid references
         filtered_columns = []
         for col in extracted_columns:
             col_str = str(col)
             if not (col_str.startswith('QUERY_RESULT.') or 
-                   col_str == 'QUERY_RESULT' or 
+                   col_str == QUERY_RESULT_ENTITY or 
                    col_str.startswith('unknown') or
                    col_str == 'unknown'):
                 filtered_columns.append(col)
         
         return filtered_columns
     
+    def _is_table_alias_match(self, alias: str, table_name: str) -> bool:
+        """Check if an alias matches a table name using common alias patterns."""
+        if not alias or not table_name:
+            return False
+        
+        alias_lower = alias.lower()
+        table_lower = table_name.lower()
+        
+        # Common alias patterns:
+        # 1. First letter (table_name -> t)
+        if len(alias_lower) == 1 and table_lower.startswith(alias_lower):
+            return True
+        
+        # 2. First few characters (table_name -> tabl)
+        if len(alias_lower) <= 4 and table_lower.startswith(alias_lower):
+            return True
+        
+        # 3. Abbreviations (customer_orders -> co, user_profiles -> up)
+        if '_' in table_lower:
+            parts = table_lower.split('_')
+            abbrev = ''.join(part[0] for part in parts if part)
+            if alias_lower == abbrev:
+                return True
+        
+        return False
+    
     def _is_cte(self, table_name: str) -> bool:
         """Check if table name represents a CTE."""
         # Simple heuristic - CTEs typically don't have schema prefixes
-        # and are often lowercase or have specific patterns
-        return '.' not in table_name and table_name.lower() not in [
-            'users', 'orders', 'products', 'categories', 'customers'
-        ]
+        # and often contain underscores or are descriptive names
+        return ('.' not in table_name and 
+                ('_' in table_name or 
+                 table_name.lower() not in ['table', 'view', 'temp']))  # Avoid common reserved words
     
     def _clean_column_name(self, column_name: str) -> str:
         """Clean column name for display."""
@@ -1591,6 +2446,188 @@ class SQLLineageVisualizer:
             return parts[-1]  # Return just the column name
         return column_name
     
+    def _create_missing_cte_transformations(self, chains: Dict) -> List[Dict]:
+        """Create missing transformations for CTE dependencies that lack explicit transformations."""
+        missing_transformations = []
+        existing_targets = set()
+        
+        # First, collect all existing transformation targets
+        for entity_name, entity_data in chains.items():
+            def collect_targets_recursive(data):
+                transformations = data.get('transformations', [])
+                for trans in transformations:
+                    target = trans.get('target_table')
+                    if target:
+                        existing_targets.add(target)
+                
+                dependencies = data.get('dependencies', [])
+                for dep in dependencies:
+                    collect_targets_recursive(dep)
+            
+            collect_targets_recursive(entity_data)
+        
+        # Find CTEs that are dependency targets but don't have transformations
+        def find_missing_connections(parent_name, parent_data):
+            dependencies = parent_data.get('dependencies', [])
+            for dep in dependencies:
+                dep_name = dep.get('entity', '')
+                dep_type = dep.get('entity_type', '')
+                
+                # If this is a CTE dependency but no transformation creates it
+                if dep_type == 'cte' and dep_name not in existing_targets:
+                    # Try to infer transformation details from dependency metadata
+                    transformation_details = self._infer_cte_transformation_details(parent_name, dep_name, dep)
+                    
+                    # Create an implicit transformation with inferred details
+                    missing_transformations.append({
+                        'transformation': {
+                            'type': 'table_transformation',
+                            'source_table': parent_name,
+                            'target_table': dep_name,
+                            'filter_conditions': transformation_details.get('filter_conditions', []),
+                            'group_by_columns': transformation_details.get('group_by_columns', []),
+                            'joins': transformation_details.get('joins', [])
+                        },
+                        'entity': dep_name,
+                        'type': 'cte',
+                        'source_tables': [parent_name]
+                    })
+                    existing_targets.add(dep_name)  # Prevent duplicates
+                
+                # Recursively check deeper dependencies
+                find_missing_connections(dep_name, dep)
+        
+        # Check all chains for missing CTE connections
+        for entity_name, entity_data in chains.items():
+            find_missing_connections(entity_name, entity_data)
+        
+        return missing_transformations
+
+    def _infer_cte_transformation_details(self, source_name: str, target_name: str, target_data: Dict) -> Dict:
+        """Infer transformation details for missing CTE connections based on metadata."""
+        details = {
+            'filter_conditions': [],
+            'group_by_columns': [],
+            'joins': []
+        }
+        
+        # Look at the target CTE's metadata to infer what transformation might have occurred
+        metadata = target_data.get('metadata', {})
+        table_columns = metadata.get('table_columns', [])
+        
+        # Check for computed columns which suggest transformations
+        computed_columns = []
+        for col in table_columns:
+            transformation = col.get('transformation', {})
+            if transformation:
+                transformation_type = transformation.get('transformation_type', '')
+                function_type = transformation.get('function_type', '')
+                source_expression = transformation.get('source_expression', '')
+                
+                if transformation_type == TRANSFORMATION_TYPES['CASE']:
+                    # This suggests a CASE statement transformation
+                    details['filter_conditions'].append({
+                        'type': COLUMN_TYPES['COMPUTED'], 
+                        'description': f"CASE statement for {col.get('name', 'column')}"
+                    })
+                elif transformation_type in [TRANSFORMATION_TYPES['COMPUTED'], TRANSFORMATION_TYPES['AGGREGATE']]:
+                    # Avoid double function names like COUNT(COUNT(*))
+                    if function_type and source_expression and f"{function_type}(" in source_expression.upper():
+                        computed_columns.append(source_expression)
+                    else:
+                        computed_columns.append(f"{function_type}({source_expression})")
+        
+        # If we found computed columns, add them as a note
+        if computed_columns:
+            details['filter_conditions'].append({
+                'type': COLUMN_TYPES['COMPUTED'],
+                'description': f"Computed: {', '.join(computed_columns[:2])}"
+            })
+        
+        # If no specific details found, add a generic note
+        if not details['filter_conditions']:
+            details['filter_conditions'].append({
+                'type': COLUMN_TYPES['SELECT'],
+                'description': f"SELECT from {source_name}"
+            })
+        
+        return details
+
+    def _extract_column_transformations(self, target_table: str, chains: Dict) -> Dict:
+        """Extract column-level transformation information from target entity metadata."""
+        result = {
+            'has_case': False,
+            'has_computed': False,
+            'has_aggregation': False,
+            'details': []
+        }
+        
+        # Find the target entity in chains
+        target_entity_data = None
+        
+        def find_entity_recursive(entity_name, entity_data):
+            if entity_name == target_table:
+                return entity_data
+            
+            dependencies = entity_data.get('dependencies', [])
+            for dep in dependencies:
+                dep_name = dep.get('entity', '')
+                if dep_name == target_table:
+                    return dep
+                
+                # Recursively search deeper
+                found = find_entity_recursive(dep_name, dep)
+                if found:
+                    return found
+            return None
+        
+        # Search for the target entity
+        for entity_name, entity_data in chains.items():
+            if entity_name == target_table:
+                target_entity_data = entity_data
+                break
+            else:
+                target_entity_data = find_entity_recursive(entity_name, entity_data)
+                if target_entity_data:
+                    break
+        
+        if not target_entity_data:
+            return result
+        
+        # Extract column transformations from metadata
+        metadata = target_entity_data.get('metadata', {})
+        table_columns = metadata.get('table_columns', [])
+        
+        for col in table_columns:
+            transformation = col.get('transformation', {})
+            if transformation:
+                transformation_type = transformation.get('transformation_type', '')
+                function_type = transformation.get('function_type', '')
+                source_expression = transformation.get('source_expression', '')
+                column_name = col.get('name', 'column')
+                
+                if transformation_type == TRANSFORMATION_TYPES['CASE']:
+                    result['has_case'] = True
+                    # Simplify CASE statement display
+                    if 'WHEN' in source_expression and 'THEN' in source_expression:
+                        result['details'].append(f"CASE ==> {column_name}")
+                    else:
+                        result['details'].append(f"{source_expression[:50]}... ==> {column_name}")
+                
+                elif transformation_type in [TRANSFORMATION_TYPES['COMPUTED'], TRANSFORMATION_TYPES['AGGREGATE']]:
+                    if function_type in SQL_FUNCTIONS['AGGREGATE_FUNCTIONS']:
+                        result['has_aggregation'] = True
+                        # Avoid double function names like COUNT(COUNT(*))
+                        if function_type and source_expression and f"{function_type}(" in source_expression.upper():
+                            result['details'].append(f"{source_expression} ==> {column_name}")
+                        else:
+                            result['details'].append(f"{function_type}({source_expression}) ==> {column_name}")
+                    else:
+                        result['has_computed'] = True
+                        result['details'].append(f"Computed ==> {column_name}")
+        
+        return result
+
     def _merge_config(self, base_config: Dict, user_config: Dict) -> None:
         """Recursively merge user configuration with default configuration."""
         for key, value in user_config.items():
