@@ -166,6 +166,52 @@ class SQLLineageAnalyzer:
                 errors=[f"Analysis failed: {str(e)}"]
             )
     
+    def set_metadata_registry(self, metadata_registry: MetadataRegistry) -> None:
+        """
+        Set the metadata registry for the analyzer.
+        
+        Args:
+            metadata_registry: MetadataRegistry instance to use
+        """
+        self.metadata_registry = metadata_registry
+        self.extractor = LineageExtractor()
+    
+    def add_metadata_provider(self, provider) -> None:
+        """Add a metadata provider to the registry."""
+        self.metadata_registry.add_provider(provider)
+    
+    def set_dialect(self, dialect: str) -> None:
+        """Set the SQL dialect for parsing."""
+        self.dialect = dialect
+    
+    def get_lineage_result(self, sql: str, **kwargs) -> LineageResult:
+        """
+        Get the LineageResult object for a SQL query.
+        
+        Args:
+            sql: SQL query string to analyze
+            **kwargs: Additional options
+            
+        Returns:
+            LineageResult object containing table and column lineage information
+        """
+        return self.analyze(sql, **kwargs)
+    
+    def get_lineage_json(self, sql: str, **kwargs) -> str:
+        """
+        Get the JSON representation of lineage analysis for a SQL query.
+        
+        Args:
+            sql: SQL query string to analyze
+            **kwargs: Additional options
+            
+        Returns:
+            JSON string representation of the lineage analysis
+        """
+        import json
+        result = self.analyze(sql, **kwargs)
+        return json.dumps(result.to_dict(), indent=2)
+    
     # Lineage chain methods - delegate to LineageChainBuilder
     def get_table_lineage_chain(self, sql: str, chain_type: str = "upstream", depth: int = 1, **kwargs) -> Dict[str, Any]:
         """Get the table lineage chain for a SQL query."""
