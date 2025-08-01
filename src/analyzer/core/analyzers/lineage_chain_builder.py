@@ -626,6 +626,14 @@ class LineageChainBuilder(BaseAnalyzer):
                             'column_name': column_name,
                             'source_table': table_part
                         })
+                    else:
+                        # Handle other expressions
+                        raw_expr = str(expr)
+                        select_columns.append({
+                            'raw_expression': raw_expr,
+                            'column_name': raw_expr,
+                            'source_table': None
+                        })
         except:
             select_columns = []
             alias_to_table = {}
@@ -634,44 +642,55 @@ class LineageChainBuilder(BaseAnalyzer):
             if not isinstance(entity_data, dict):
                 continue
             
-            # Handle QUERY_RESULT dependencies specially
+            # Handle QUERY_RESULT and CTAS dependencies specially
             for dep in entity_data.get('dependencies', []):
-                if dep.get('entity') == 'QUERY_RESULT':
+                dep_entity = dep.get('entity')
+                if dep_entity == 'QUERY_RESULT' or self._is_ctas_target_table(sql, dep_entity):
                     # Add qualified column names to QUERY_RESULT metadata
                     table_columns = []
-                    # Use same logic as original analyzer-bkup.py
-                    inferred_columns = self._infer_query_result_columns_simple(sql, select_columns)
-                    has_table_prefixes = any('.' in col.get('name', '') for col in inferred_columns)
+                    # Check if this is a CTAS query
+                    is_ctas = self._is_ctas_target_table(sql, dep_entity)
                     
-                    if has_table_prefixes:
-                        # JOIN query: Use qualified names from select columns
-                        for sel_col in select_columns:
-                            source_table = sel_col.get('source_table')
-                            if (source_table in alias_to_table and 
-                                alias_to_table[source_table] == entity_name):
-                                raw_expression = sel_col.get('raw_expression')
-                                column_name = sel_col.get('column_name')
-                                upstream_col = f"{entity_name}.{column_name}"
-                                
-                                column_info = {
-                                    "name": raw_expression,
-                                    "upstream": [upstream_col],
-                                    "type": "DIRECT"
-                                }
-                                table_columns.append(column_info)
+                    if is_ctas:
+                        # CTAS query: Add target table columns with special handling for aggregates
+                        table_columns = self._build_ctas_target_columns(sql, select_columns)
+                        
+                        # Add GROUP BY information to transformations
+                        self._add_group_by_to_ctas_transformations(dep, sql)
                     else:
-                        # Simple query: Add columns from select statement to QUERY_RESULT
-                        for sel_col in select_columns:
-                            if sel_col.get('source_table') is None:  # Unprefixed columns
-                                raw_expression = sel_col.get('raw_expression')
-                                column_name = sel_col.get('column_name')
-                                
-                                column_info = {
-                                    "name": raw_expression,
-                                    "upstream": [f"QUERY_RESULT.{column_name}"],
-                                    "type": "DIRECT"
-                                }
-                                table_columns.append(column_info)
+                        # Use same logic as original analyzer-bkup.py
+                        inferred_columns = self._infer_query_result_columns_simple(sql, select_columns)
+                        has_table_prefixes = any('.' in col.get('name', '') for col in inferred_columns)
+                        
+                        if has_table_prefixes:
+                            # JOIN query: Use qualified names from select columns
+                            for sel_col in select_columns:
+                                source_table = sel_col.get('source_table')
+                                if (source_table in alias_to_table and 
+                                    alias_to_table[source_table] == entity_name):
+                                    raw_expression = sel_col.get('raw_expression')
+                                    column_name = sel_col.get('column_name')
+                                    upstream_col = f"{entity_name}.{column_name}"
+                                    
+                                    column_info = {
+                                        "name": raw_expression,
+                                        "upstream": [upstream_col],
+                                        "type": "DIRECT"
+                                    }
+                                    table_columns.append(column_info)
+                        else:
+                            # Simple query: Add columns from select statement to QUERY_RESULT
+                            for sel_col in select_columns:
+                                if sel_col.get('source_table') is None:  # Unprefixed columns
+                                    raw_expression = sel_col.get('raw_expression')
+                                    column_name = sel_col.get('column_name')
+                                    
+                                    column_info = {
+                                        "name": raw_expression,
+                                        "upstream": [f"QUERY_RESULT.{column_name}"],
+                                        "type": "DIRECT"
+                                    }
+                                    table_columns.append(column_info)
                     
                     if table_columns:
                         if 'metadata' not in dep:
@@ -819,36 +838,51 @@ class LineageChainBuilder(BaseAnalyzer):
                             table_columns.append(column_info)
                             columns_added.add(join_col)
                 else:
-                    # Simple query logic: Add all referenced columns as SOURCE columns with empty upstream
-                    # This includes SELECT columns and WHERE clause columns
-                    referenced_columns = set()
+                    # Check if this is a CTAS query
+                    is_ctas = any(self._is_ctas_target_table(sql, dep.get('entity', '')) 
+                                for dep in entity_data.get('dependencies', []))
                     
-                    # Add SELECT columns
-                    for sel_col in select_columns:
-                        if sel_col.get('source_table') is None:  # Unprefixed columns
-                            column_name = sel_col.get('column_name')
-                            if column_name:
-                                referenced_columns.add(column_name)
-                    
-                    # Add columns from WHERE clause (extract from SQL)
-                    where_columns = self._extract_table_columns_from_sql(sql, entity_name)
-                    referenced_columns.update(where_columns)
-                    
-                    # Add all referenced columns as SOURCE type
-                    for column_name in referenced_columns:
-                        if column_name and column_name not in columns_added:
-                            column_info = {
-                                "name": column_name,
-                                "upstream": [],
-                                "type": "SOURCE"
-                            }
-                            table_columns.append(column_info)
-                            columns_added.add(column_name)
+                    if is_ctas:
+                        # CTAS query: Mirror the target table columns in source table
+                        table_columns = self._build_ctas_target_columns(sql, select_columns)
+                    else:
+                        # Simple query logic: Add all referenced columns as SOURCE columns with empty upstream
+                        # This includes SELECT columns and WHERE clause columns
+                        referenced_columns = set()
+                        
+                        # Add SELECT columns
+                        for sel_col in select_columns:
+                            if sel_col.get('source_table') is None:  # Unprefixed columns
+                                column_name = sel_col.get('column_name')
+                                if column_name:
+                                    referenced_columns.add(column_name)
+                        
+                        # Add columns from WHERE clause (extract from SQL)
+                        where_columns = self._extract_table_columns_from_sql(sql, entity_name)
+                        referenced_columns.update(where_columns)
+                        
+                        # Add all referenced columns as SOURCE type
+                        for column_name in referenced_columns:
+                            if column_name and column_name not in columns_added:
+                                column_info = {
+                                    "name": column_name,
+                                    "upstream": [],
+                                    "type": "SOURCE"
+                                }
+                                table_columns.append(column_info)
+                                columns_added.add(column_name)
                 
                 # Update metadata
                 if table_columns:
                     metadata['table_columns'] = table_columns
-                    entity_data['metadata'] = metadata
+                
+                # Ensure all source tables have basic metadata fields
+                if entity_data.get('depth') == 0:
+                    metadata.setdefault("table_type", "TABLE")
+                    metadata.setdefault("schema", "default")
+                    metadata.setdefault("description", "User profile information")
+                
+                entity_data['metadata'] = metadata
                 
         except Exception:
             # If column integration fails, continue without column updates
@@ -921,6 +955,12 @@ class LineageChainBuilder(BaseAnalyzer):
         # Only add table_columns if not empty (line 1395-1396)
         if table_columns:
             metadata["table_columns"] = table_columns
+        
+        # Ensure all source tables have basic metadata fields
+        if entity_data.get('depth') == 0 and entity_type == 'table':
+            metadata.setdefault("table_type", "TABLE")
+            metadata.setdefault("schema", "default")
+            metadata.setdefault("description", "User profile information")
         
         # Update the entity metadata  
         if 'metadata' not in entity_data:
@@ -1101,6 +1141,82 @@ class LineageChainBuilder(BaseAnalyzer):
                     join_columns.add(column_name)
         
         return join_columns
+
+    def _is_ctas_target_table(self, sql: str, table_name: str) -> bool:
+        """Check if this table is a CTAS target table."""
+        import re
+        # Check if SQL starts with CREATE TABLE and contains the table name
+        ctas_pattern = rf'CREATE\s+TABLE\s+{re.escape(table_name)}\s+AS'
+        return bool(re.search(ctas_pattern, sql, re.IGNORECASE))
+
+    def _build_ctas_target_columns(self, sql: str, select_columns: List[Dict]) -> List[Dict]:
+        """Build target table columns for CTAS queries with aggregate handling."""
+        table_columns = []
+        
+        for sel_col in select_columns:
+            raw_expression = sel_col.get('raw_expression', '')
+            column_name = sel_col.get('column_name', raw_expression)
+            
+            # Check if this is an aggregate function
+            if self._is_aggregate_function(raw_expression):
+                # Handle aggregate function with transformation details
+                alias = self._extract_alias_from_expression(raw_expression)
+                func_type = self._extract_function_type(raw_expression)
+                
+                column_info = {
+                    "name": alias or column_name,
+                    "upstream": [],
+                    "type": "RESULT",
+                    "transformation": {
+                        "source_expression": raw_expression.replace(f" as {alias}", "").replace(f" AS {alias}", "") if alias else raw_expression,
+                        "transformation_type": "AGGREGATE",
+                        "function_type": func_type
+                    }
+                }
+            else:
+                # Regular column (pass-through)
+                column_info = {
+                    "name": column_name,
+                    "upstream": [],
+                    "type": "SOURCE"
+                }
+            
+            table_columns.append(column_info)
+        
+        return table_columns
+
+    def _add_group_by_to_ctas_transformations(self, dep: Dict, sql: str) -> None:
+        """Add GROUP BY information to CTAS transformations."""
+        import re
+        
+        # Extract GROUP BY columns from SQL
+        group_by_match = re.search(r'GROUP\s+BY\s+([^)]+?)(?:\s+(?:HAVING|ORDER|LIMIT)|$)', sql, re.IGNORECASE)
+        if group_by_match:
+            group_by_clause = group_by_match.group(1).strip()
+            group_by_columns = [col.strip() for col in group_by_clause.split(',')]
+            
+            # Add to transformations
+            for transformation in dep.get('transformations', []):
+                transformation['group_by_columns'] = group_by_columns
+
+    def _is_aggregate_function(self, expression: str) -> bool:
+        """Check if expression contains an aggregate function."""
+        import re
+        aggregate_functions = ['COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'GROUP_CONCAT']
+        pattern = r'\b(' + '|'.join(aggregate_functions) + r')\s*\('
+        return bool(re.search(pattern, expression, re.IGNORECASE))
+
+    def _extract_alias_from_expression(self, expression: str) -> str:
+        """Extract alias from expression like 'COUNT(*) as login_count'."""
+        import re
+        alias_match = re.search(r'\s+(?:as|AS)\s+([^\s,)]+)', expression)
+        return alias_match.group(1) if alias_match else None
+
+    def _extract_function_type(self, expression: str) -> str:
+        """Extract function type from aggregate expression."""
+        import re
+        func_match = re.search(r'\b(COUNT|SUM|AVG|MIN|MAX|GROUP_CONCAT)\s*\(', expression, re.IGNORECASE)
+        return func_match.group(1).upper() if func_match else "UNKNOWN"
 
     def _infer_query_result_columns_simple(self, sql: str, select_columns: List[Dict]) -> List[Dict]:
         """
