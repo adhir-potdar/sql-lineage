@@ -73,12 +73,21 @@ class LineageExtractor:
             target_name = "QUERY_RESULT"
             source_tables = self._get_source_tables_from_node(expression, alias_mappings, cte_mapping)
             
+            # Check if this is a simple pass-through of a single CTE (SELECT * FROM cte [ORDER BY ...])
+            passthrough_cte = self._detect_main_query_passthrough(expression, source_tables, cte_mapping)
+            
             for source in source_tables:
                 # If this source is a skipped CTE, replace it with its dependencies
                 if source in ctes_to_skip and source in skipped_cte_dependencies:
                     # Add the dependencies of the skipped CTE instead
                     for skipped_cte_dependency in skipped_cte_dependencies[source]:
                         lineage.add_dependency(target_name, skipped_cte_dependency)
+                # If this is a pass-through CTE, connect directly to its dependencies
+                elif source == passthrough_cte and source in lineage.upstream:
+                    for cte_dependency in lineage.upstream[source]:
+                        lineage.add_dependency(target_name, cte_dependency)
+                    # Remove the pass-through CTE from lineage
+                    del lineage.upstream[source]
                 else:
                     lineage.add_dependency(target_name, source)
                     
@@ -478,20 +487,19 @@ class LineageExtractor:
             # For nested CTE visualization, we want to be much more conservative
             # Only skip CTEs in very specific cases where there's only ONE CTE
             # and it's a true passthrough with no transformations
+            # 
+            # However, we also want to skip CTEs that are simple pass-throughs even in multi-CTE scenarios
+            # if they just add ORDER BY or other non-transformational operations
             
-            if len(cte_mapping) > 1:
-                # If there are multiple CTEs, don't skip any - we want to show the full chain
-                return ctes_to_skip
-            
-            # Only consider skipping if there's exactly one CTE
-            if len(cte_mapping) == 1:
-                cte_name = list(cte_mapping.keys())[0]
-                cte_node = cte_mapping[cte_name]
-                
-                # Check if the CTE is a simple passthrough (like SELECT * FROM table)
-                # and the main query is also simple (SELECT * FROM cte)
+            # Check each CTE individually for pass-through patterns
+            for cte_name, cte_node in cte_mapping.items():
                 if self._is_simple_passthrough_cte(cte_node, expression, cte_name):
                     ctes_to_skip.add(cte_name)
+            
+            # If we have multiple CTEs but only found pass-throughs among the final ones, that's still valid
+            # Example: WITH a AS (...), b AS (...) SELECT * FROM b ORDER BY col
+            # Here 'b' could be a pass-through if it just does SELECT * FROM a with minor changes
+            
                 
         except Exception:
             # If we can't determine, err on the side of caution and don't skip
@@ -514,12 +522,12 @@ class LineageExtractor:
                 cte_select.find(exp.Window)):
                 return False
             
-            # Check if main query is simple SELECT * FROM cte_name
+            # Check if main query is simple SELECT * FROM cte_name (with optional ORDER BY)
             main_sql = str(main_expression).strip()
             import re
             
-            # Very restrictive pattern for main query
-            simple_main_pattern = fr'SELECT\s+\*\s+FROM\s+{re.escape(cte_name)}\s*$'
+            # Allow SELECT * FROM cte_name with optional ORDER BY (which is still a pass-through)
+            simple_main_pattern = fr'SELECT\s+\*\s+FROM\s+{re.escape(cte_name)}(?:\s+ORDER\s+BY\s+[^\s]+(?:\s+(?:ASC|DESC))?)?(?:\s+(?:LIMIT|OFFSET)\s+\d+)*\s*$'
             if not re.search(simple_main_pattern, main_sql, re.IGNORECASE):
                 return False
             
@@ -527,6 +535,45 @@ class LineageExtractor:
             
         except Exception:
             return False
+    
+    def _detect_main_query_passthrough(self, expression: exp.Select, source_tables: Set[str], cte_mapping: Dict[str, exp.Expression]) -> Optional[str]:
+        """
+        Detect if the main query is a simple pass-through of a single CTE.
+        
+        Returns the CTE name if this is a pass-through, None otherwise.
+        """
+        try:
+            # Must reference exactly one table and it must be a CTE
+            if len(source_tables) != 1:
+                return None
+            
+            source_table = list(source_tables)[0]
+            if source_table not in cte_mapping:
+                return None
+            
+            # Check if the main query is simple: SELECT * FROM cte [ORDER BY ...] [LIMIT ...]
+            main_sql = str(expression).strip()
+            
+            # Remove any WITH clause from the main SQL for pattern matching
+            import re
+            # Find the main SELECT part (after WITH clause)
+            with_match = re.search(r'WITH\s+.*?\s+SELECT', main_sql, re.IGNORECASE | re.DOTALL)
+            if with_match:
+                # Extract just the SELECT part
+                select_part = main_sql[with_match.end()-6:].strip()  # -6 to include "SELECT"
+            else:
+                select_part = main_sql
+            
+            # Pattern for SELECT * FROM cte_name with optional ORDER BY and LIMIT
+            passthrough_pattern = fr'SELECT\s+\*\s+FROM\s+{re.escape(source_table)}(?:\s+ORDER\s+BY\s+[^\s]+(?:\s+(?:ASC|DESC))?)?(?:\s+(?:LIMIT|OFFSET)\s+\d+)*\s*$'
+            
+            if re.search(passthrough_pattern, select_part, re.IGNORECASE):
+                return source_table
+                
+            return None
+            
+        except Exception:
+            return None
     
     def _extract_table_transformation(
         self, 

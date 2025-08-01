@@ -147,7 +147,7 @@ class SQLLineageAnalyzer:
             column_lineage = self.extractor.extract_column_lineage(parsed)
             
             # Extract metadata
-            metadata = {}
+            metadata = self._collect_metadata(table_lineage)
             
             return LineageResult(
                 sql=sql,
@@ -165,6 +165,24 @@ class SQLLineageAnalyzer:
                 column_lineage=self.extractor.extract_column_lineage(sqlglot.expressions.Anonymous()),
                 errors=[f"Analysis failed: {str(e)}"]
             )
+    
+    def _collect_metadata(self, table_lineage) -> Dict[str, TableMetadata]:
+        """Collect metadata for tables involved in lineage."""
+        metadata = {}
+        
+        # Collect all table names from upstream and downstream
+        all_tables = set()
+        for target, sources in table_lineage.upstream.items():
+            all_tables.add(target)
+            all_tables.update(sources)
+        
+        # Get metadata for each table
+        for table_name in all_tables:
+            table_metadata = self.metadata_registry.get_table_metadata(table_name)
+            if table_metadata:
+                metadata[table_name] = table_metadata
+        
+        return metadata
     
     def set_metadata_registry(self, metadata_registry: MetadataRegistry) -> None:
         """
