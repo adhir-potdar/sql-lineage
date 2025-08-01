@@ -1,0 +1,301 @@
+{
+  "sql": "\n         SELECT \n             u.department, \n             u.status,\n             COUNT(*) as employee_count,\n             AVG(u.salary) as avg_salary,\n             SUM(u.salary) as total_salary,\n             MAX(u.hire_date) as latest_hire_date\n         FROM users u \n         LEFT JOIN orders o ON u.id = o.user_id\n         WHERE u.active = true AND u.salary > 30000\n         GROUP BY u.department, u.status\n         HAVING COUNT(*) > 5 AND AVG(u.salary) > 50000\n         ORDER BY u.department ASC, avg_salary DESC, employee_count DESC\n         LIMIT 100\n         ",
+  "dialect": "trino",
+  "chain_type": "downstream",
+  "max_depth": "unlimited",
+  "actual_max_depth": 1,
+  "target_entity": null,
+  "chains": {
+    "orders": {
+      "entity": "orders",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": []
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "orders",
+              "target_table": "QUERY_RESULT",
+              "joins": [
+                {
+                  "join_type": "LEFT",
+                  "right_table": "orders",
+                  "conditions": [
+                    {
+                      "left_column": "users.id",
+                      "operator": "=",
+                      "right_column": "orders.user_id"
+                    }
+                  ]
+                }
+              ],
+              "having_conditions": [
+                {
+                  "column": "COUNT(*)",
+                  "operator": ">",
+                  "value": "5"
+                }
+              ],
+              "order_by_columns": [
+                "avg_salary DESC",
+                "employee_count DESC"
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_type": "TABLE",
+        "schema": "default",
+        "description": "Customer order transactions",
+        "table_columns": [
+          {
+            "name": "user_id",
+            "upstream": [],
+            "type": "SOURCE"
+          }
+        ]
+      }
+    },
+    "users": {
+      "entity": "users",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "u.department",
+                "upstream": [
+                  "users.department"
+                ],
+                "type": "DIRECT"
+              },
+              {
+                "name": "u.status",
+                "upstream": [
+                  "users.status"
+                ],
+                "type": "DIRECT"
+              },
+              {
+                "name": "employee_count",
+                "upstream": [
+                  "users.employee_count"
+                ],
+                "type": "DIRECT",
+                "transformation": {
+                  "source_expression": "COUNT(*)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "COUNT"
+                }
+              },
+              {
+                "name": "avg_salary",
+                "upstream": [
+                  "users.avg_salary"
+                ],
+                "type": "DIRECT",
+                "transformation": {
+                  "source_expression": "AVG(u.salary)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "AVG"
+                }
+              },
+              {
+                "name": "total_salary",
+                "upstream": [
+                  "users.total_salary"
+                ],
+                "type": "DIRECT",
+                "transformation": {
+                  "source_expression": "SUM(u.salary)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "SUM"
+                }
+              },
+              {
+                "name": "latest_hire_date",
+                "upstream": [
+                  "users.latest_hire_date"
+                ],
+                "type": "DIRECT",
+                "transformation": {
+                  "source_expression": "MAX(u.hire_date)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "MAX"
+                }
+              }
+            ]
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "users",
+              "target_table": "QUERY_RESULT",
+              "joins": [
+                {
+                  "join_type": "LEFT",
+                  "right_table": "orders",
+                  "conditions": [
+                    {
+                      "left_column": "users.id",
+                      "operator": "=",
+                      "right_column": "orders.user_id"
+                    }
+                  ]
+                }
+              ],
+              "filter_conditions": [
+                {
+                  "column": "users.active",
+                  "operator": "=",
+                  "value": "TRUE"
+                },
+                {
+                  "column": "users.salary",
+                  "operator": ">",
+                  "value": "30000"
+                }
+              ],
+              "group_by_columns": [
+                "users.department",
+                "users.status"
+              ],
+              "having_conditions": [
+                {
+                  "column": "COUNT(*)",
+                  "operator": ">",
+                  "value": "5"
+                },
+                {
+                  "column": "AVG(u.salary)",
+                  "operator": ">",
+                  "value": "50000"
+                }
+              ],
+              "order_by_columns": [
+                "users.department ASC NULLS LAST",
+                "avg_salary DESC",
+                "employee_count DESC"
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_type": "TABLE",
+        "schema": "default",
+        "description": "User profile information",
+        "table_columns": [
+          {
+            "name": "department",
+            "upstream": [
+              "QUERY_RESULT.department"
+            ],
+            "type": "DIRECT"
+          },
+          {
+            "name": "status",
+            "upstream": [
+              "QUERY_RESULT.status"
+            ],
+            "type": "DIRECT"
+          },
+          {
+            "name": "salary",
+            "upstream": [
+              "QUERY_RESULT.total_salary",
+              "QUERY_RESULT.avg_salary"
+            ],
+            "type": "DIRECT"
+          },
+          {
+            "name": "hire_date",
+            "upstream": [
+              "QUERY_RESULT.latest_hire_date"
+            ],
+            "type": "DIRECT"
+          },
+          {
+            "name": "users.active",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "users.salary",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "id",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "employee_count",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "COUNT(*)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "COUNT"
+            }
+          },
+          {
+            "name": "avg_salary",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "AVG(u.salary)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "AVG"
+            }
+          },
+          {
+            "name": "total_salary",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "SUM(u.salary)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "SUM"
+            }
+          },
+          {
+            "name": "latest_hire_date",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "MAX(u.hire_date)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "MAX"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "summary": {
+    "total_tables": 3,
+    "total_columns": 12,
+    "has_transformations": true,
+    "has_metadata": true,
+    "chain_count": 2
+  },
+  "errors": [],
+  "warnings": []
+}

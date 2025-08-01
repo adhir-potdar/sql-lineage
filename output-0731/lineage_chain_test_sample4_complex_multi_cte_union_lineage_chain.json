@@ -1,0 +1,511 @@
+{
+  "sql": "\n         WITH order_base AS (\n             SELECT customer_id, order_total, product_id\n             FROM orders \n             WHERE order_date >= '2023-01-01'\n         ),\n         customer_stats AS (\n             SELECT \n                 customer_id,\n                 COUNT(*) as order_count,\n                 SUM(order_total) as total_spent,\n                 AVG(order_total) as avg_order\n             FROM order_base\n             GROUP BY customer_id\n         ),\n         customer_segments AS (\n             SELECT \n                 cs.customer_id,\n                 cs.order_count,\n                 cs.total_spent,\n                 cs.avg_order,\n                 u.name,\n                 CASE \n                     WHEN cs.total_spent > 2000 THEN 'Platinum'\n                     WHEN cs.total_spent > 1000 THEN 'Gold'\n                     WHEN cs.total_spent > 500 THEN 'Silver'\n                     ELSE 'Bronze'\n                 END as segment\n             FROM customer_stats cs\n             JOIN users u ON cs.customer_id = u.id\n         ),\n         segment_analysis AS (\n             SELECT \n                 segment,\n                 COUNT(*) as customer_count,\n                 AVG(total_spent) as avg_segment_spend,\n                 MIN(total_spent) as min_spend,\n                 MAX(total_spent) as max_spend\n             FROM customer_segments\n             GROUP BY segment\n         )\n         SELECT \n             sa.segment,\n             sa.customer_count,\n             sa.avg_segment_spend,\n             sa.min_spend,\n             sa.max_spend\n         FROM segment_analysis sa\n         ORDER BY sa.avg_segment_spend DESC\n         ",
+  "dialect": "trino",
+  "chain_type": "downstream",
+  "max_depth": "unlimited",
+  "actual_max_depth": 0,
+  "target_entity": null,
+  "chains": {
+    "orders": {
+      "entity": "orders",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "order_base",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "customer_stats",
+              "entity_type": "cte",
+              "depth": 2,
+              "dependencies": [
+                {
+                  "entity": "customer_segments",
+                  "entity_type": "cte",
+                  "depth": 3,
+                  "dependencies": [
+                    {
+                      "entity": "segment_analysis",
+                      "entity_type": "cte",
+                      "depth": 4,
+                      "dependencies": [
+                        {
+                          "entity": "QUERY_RESULT",
+                          "entity_type": "table",
+                          "depth": 5,
+                          "dependencies": [],
+                          "metadata": {
+                            "table_columns": [],
+                            "is_cte": false
+                          },
+                          "transformations": [
+                            {
+                              "type": "table_transformation",
+                              "source_table": "segment_analysis",
+                              "target_table": "QUERY_RESULT",
+                              "filter_conditions": [],
+                              "group_by_columns": [],
+                              "joins": [
+                                {
+                                  "join_type": "INNER JOIN",
+                                  "right_table": "users",
+                                  "conditions": [
+                                    {
+                                      "left_column": "cs.customer_id",
+                                      "operator": "=",
+                                      "right_column": "u.id"
+                                    }
+                                  ]
+                                }
+                              ],
+                              "order_by_columns": [
+                                "sa.avg_segment_spend DESC"
+                              ]
+                            }
+                          ]
+                        }
+                      ],
+                      "metadata": {
+                        "table_columns": [
+                          {
+                            "name": "segment",
+                            "upstream": [],
+                            "type": "VARCHAR"
+                          },
+                          {
+                            "name": "customer_count",
+                            "upstream": [],
+                            "type": "VARCHAR",
+                            "transformation": {
+                              "column_name": "customer_count",
+                              "source_expression": "COUNT(*)",
+                              "transformation_type": "COMPUTED",
+                              "function_type": "COUNT",
+                              "full_expression": "COUNT(*) AS customer_count"
+                            }
+                          },
+                          {
+                            "name": "avg_segment_spend",
+                            "upstream": [],
+                            "type": "VARCHAR",
+                            "transformation": {
+                              "column_name": "avg_segment_spend",
+                              "source_expression": "AVG(total_spent)",
+                              "transformation_type": "COMPUTED",
+                              "function_type": "AVG",
+                              "full_expression": "AVG(total_spent) AS avg_segment_spend"
+                            }
+                          },
+                          {
+                            "name": "min_spend",
+                            "upstream": [],
+                            "type": "VARCHAR",
+                            "transformation": {
+                              "column_name": "min_spend",
+                              "source_expression": "MIN(total_spent)",
+                              "transformation_type": "COMPUTED",
+                              "function_type": "MIN",
+                              "full_expression": "MIN(total_spent) AS min_spend"
+                            }
+                          },
+                          {
+                            "name": "max_spend",
+                            "upstream": [],
+                            "type": "VARCHAR",
+                            "transformation": {
+                              "column_name": "max_spend",
+                              "source_expression": "MAX(total_spent)",
+                              "transformation_type": "COMPUTED",
+                              "function_type": "MAX",
+                              "full_expression": "MAX(total_spent) AS max_spend"
+                            }
+                          }
+                        ],
+                        "is_cte": true
+                      },
+                      "transformations": [
+                        {
+                          "type": "table_transformation",
+                          "source_table": "customer_segments",
+                          "target_table": "segment_analysis",
+                          "filter_conditions": [
+                            {
+                              "type": "GROUP_BY",
+                              "columns": [
+                                "segment"
+                              ]
+                            }
+                          ],
+                          "group_by_columns": [],
+                          "joins": []
+                        }
+                      ]
+                    }
+                  ],
+                  "metadata": {
+                    "table_columns": [
+                      {
+                        "name": "customer_id",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "order_count",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "total_spent",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "avg_order",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "name",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "segment",
+                        "upstream": [],
+                        "type": "VARCHAR",
+                        "transformation": {
+                          "column_name": "segment",
+                          "source_expression": "CASE WHEN cs.total_spent > 2000 THEN 'Platinum' WHEN cs.total_spent > 1000 THEN 'Gold' WHEN cs.total_spent > 500 THEN 'Silver' ELSE 'Bronze' END",
+                          "transformation_type": "CASE",
+                          "function_type": "CASE",
+                          "full_expression": "CASE WHEN cs.total_spent > 2000 THEN 'Platinum' WHEN cs.total_spent > 1000 THEN 'Gold' WHEN cs.total_spent > 500 THEN 'Silver' ELSE 'Bronze' END AS segment"
+                        }
+                      }
+                    ],
+                    "is_cte": true
+                  },
+                  "transformations": [
+                    {
+                      "type": "table_transformation",
+                      "source_table": "customer_stats",
+                      "target_table": "customer_segments",
+                      "filter_conditions": [],
+                      "group_by_columns": [],
+                      "joins": []
+                    }
+                  ]
+                }
+              ],
+              "metadata": {
+                "table_columns": [
+                  {
+                    "name": "customer_id",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "order_count",
+                    "upstream": [],
+                    "type": "VARCHAR",
+                    "transformation": {
+                      "column_name": "order_count",
+                      "source_expression": "COUNT(*)",
+                      "transformation_type": "COMPUTED",
+                      "function_type": "COUNT",
+                      "full_expression": "COUNT(*) AS order_count"
+                    }
+                  },
+                  {
+                    "name": "total_spent",
+                    "upstream": [],
+                    "type": "VARCHAR",
+                    "transformation": {
+                      "column_name": "total_spent",
+                      "source_expression": "SUM(order_total)",
+                      "transformation_type": "COMPUTED",
+                      "function_type": "SUM",
+                      "full_expression": "SUM(order_total) AS total_spent"
+                    }
+                  },
+                  {
+                    "name": "avg_order",
+                    "upstream": [],
+                    "type": "VARCHAR",
+                    "transformation": {
+                      "column_name": "avg_order",
+                      "source_expression": "AVG(order_total)",
+                      "transformation_type": "COMPUTED",
+                      "function_type": "AVG",
+                      "full_expression": "AVG(order_total) AS avg_order"
+                    }
+                  }
+                ],
+                "is_cte": true
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "order_base",
+                  "target_table": "customer_stats",
+                  "filter_conditions": [
+                    {
+                      "type": "GROUP_BY",
+                      "columns": [
+                        "customer_id"
+                      ]
+                    }
+                  ],
+                  "group_by_columns": [],
+                  "joins": []
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "customer_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_total",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "orders",
+              "target_table": "order_base",
+              "filter_conditions": [
+                {
+                  "type": "FILTER",
+                  "conditions": [
+                    {
+                      "column": "order_date",
+                      "operator": ">=",
+                      "value": "'2023-01-01'"
+                    }
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "users": {
+      "entity": "users",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "customer_segments",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "segment_analysis",
+              "entity_type": "cte",
+              "depth": 2,
+              "dependencies": [
+                {
+                  "entity": "QUERY_RESULT",
+                  "entity_type": "table",
+                  "depth": 3,
+                  "dependencies": [],
+                  "metadata": {
+                    "table_columns": [],
+                    "is_cte": false
+                  },
+                  "transformations": [
+                    {
+                      "type": "table_transformation",
+                      "source_table": "segment_analysis",
+                      "target_table": "QUERY_RESULT",
+                      "filter_conditions": [],
+                      "group_by_columns": [],
+                      "joins": [
+                        {
+                          "join_type": "INNER JOIN",
+                          "right_table": "users",
+                          "conditions": [
+                            {
+                              "left_column": "cs.customer_id",
+                              "operator": "=",
+                              "right_column": "u.id"
+                            }
+                          ]
+                        }
+                      ],
+                      "order_by_columns": [
+                        "sa.avg_segment_spend DESC"
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "metadata": {
+                "table_columns": [
+                  {
+                    "name": "segment",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "customer_count",
+                    "upstream": [],
+                    "type": "VARCHAR",
+                    "transformation": {
+                      "column_name": "customer_count",
+                      "source_expression": "COUNT(*)",
+                      "transformation_type": "COMPUTED",
+                      "function_type": "COUNT",
+                      "full_expression": "COUNT(*) AS customer_count"
+                    }
+                  },
+                  {
+                    "name": "avg_segment_spend",
+                    "upstream": [],
+                    "type": "VARCHAR",
+                    "transformation": {
+                      "column_name": "avg_segment_spend",
+                      "source_expression": "AVG(total_spent)",
+                      "transformation_type": "COMPUTED",
+                      "function_type": "AVG",
+                      "full_expression": "AVG(total_spent) AS avg_segment_spend"
+                    }
+                  },
+                  {
+                    "name": "min_spend",
+                    "upstream": [],
+                    "type": "VARCHAR",
+                    "transformation": {
+                      "column_name": "min_spend",
+                      "source_expression": "MIN(total_spent)",
+                      "transformation_type": "COMPUTED",
+                      "function_type": "MIN",
+                      "full_expression": "MIN(total_spent) AS min_spend"
+                    }
+                  },
+                  {
+                    "name": "max_spend",
+                    "upstream": [],
+                    "type": "VARCHAR",
+                    "transformation": {
+                      "column_name": "max_spend",
+                      "source_expression": "MAX(total_spent)",
+                      "transformation_type": "COMPUTED",
+                      "function_type": "MAX",
+                      "full_expression": "MAX(total_spent) AS max_spend"
+                    }
+                  }
+                ],
+                "is_cte": true
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "customer_segments",
+                  "target_table": "segment_analysis",
+                  "filter_conditions": [
+                    {
+                      "type": "GROUP_BY",
+                      "columns": [
+                        "segment"
+                      ]
+                    }
+                  ],
+                  "group_by_columns": [],
+                  "joins": []
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "customer_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_count",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "total_spent",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "avg_order",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "segment",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "segment",
+                  "source_expression": "CASE WHEN cs.total_spent > 2000 THEN 'Platinum' WHEN cs.total_spent > 1000 THEN 'Gold' WHEN cs.total_spent > 500 THEN 'Silver' ELSE 'Bronze' END",
+                  "transformation_type": "CASE",
+                  "function_type": "CASE",
+                  "full_expression": "CASE WHEN cs.total_spent > 2000 THEN 'Platinum' WHEN cs.total_spent > 1000 THEN 'Gold' WHEN cs.total_spent > 500 THEN 'Silver' ELSE 'Bronze' END AS segment"
+                }
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "users",
+              "target_table": "customer_segments",
+              "filter_conditions": [],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    }
+  },
+  "summary": {
+    "total_tables": 7,
+    "total_columns": 0,
+    "has_transformations": true,
+    "has_metadata": true,
+    "chain_count": 2
+  },
+  "errors": [],
+  "warnings": []
+}

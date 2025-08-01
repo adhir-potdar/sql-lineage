@@ -1,0 +1,483 @@
+{
+  "sql": "\n         SELECT \n             c.category_name,\n             COUNT(DISTINCT p.product_id) as product_count,\n             COUNT(DISTINCT o.order_id) as order_count,\n             SUM(o.order_total) as total_revenue,\n             AVG(o.order_total) as avg_order_value,\n             COUNT(DISTINCT o.customer_id) as unique_customers\n         FROM categories c\n             LEFT JOIN products p ON c.category_id = p.category_id\n             LEFT JOIN orders o ON p.product_id = o.product_id\n             LEFT JOIN users u ON o.customer_id = u.id\n         WHERE o.order_date >= CURRENT_DATE - INTERVAL '1' YEAR\n             AND u.age >= 18\n         GROUP BY c.category_id, c.category_name\n         HAVING COUNT(DISTINCT o.order_id) > 10\n         ORDER BY total_revenue DESC\n         LIMIT 20\n         ",
+  "dialect": "trino",
+  "chain_type": "downstream",
+  "max_depth": "unlimited",
+  "actual_max_depth": 1,
+  "target_entity": null,
+  "chains": {
+    "orders": {
+      "entity": "orders",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "order_count",
+                "upstream": [],
+                "type": "RESULT",
+                "transformation": {
+                  "source_expression": "COUNT(DISTINCT o.order_id)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "COUNT"
+                }
+              },
+              {
+                "name": "total_revenue",
+                "upstream": [],
+                "type": "RESULT",
+                "transformation": {
+                  "source_expression": "SUM(o.order_total)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "SUM"
+                }
+              },
+              {
+                "name": "avg_order_value",
+                "upstream": [],
+                "type": "RESULT",
+                "transformation": {
+                  "source_expression": "AVG(o.order_total)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "AVG"
+                }
+              },
+              {
+                "name": "unique_customers",
+                "upstream": [],
+                "type": "RESULT",
+                "transformation": {
+                  "source_expression": "COUNT(DISTINCT o.customer_id)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "COUNT"
+                }
+              }
+            ]
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "orders",
+              "target_table": "QUERY_RESULT",
+              "joins": [
+                {
+                  "join_type": "LEFT",
+                  "right_table": "products",
+                  "conditions": [
+                    {
+                      "left_column": "categories.category_id",
+                      "operator": "=",
+                      "right_column": "products.category_id"
+                    },
+                    {
+                      "left_column": "products.product_id",
+                      "operator": "=",
+                      "right_column": "orders.product_id"
+                    },
+                    {
+                      "left_column": "orders.customer_id",
+                      "operator": "=",
+                      "right_column": "users.id"
+                    }
+                  ]
+                }
+              ],
+              "filter_conditions": [
+                {
+                  "column": "orders.order_date",
+                  "operator": ">=",
+                  "value": "CURRENT_DATE - INTERVAL '1' YEAR"
+                }
+              ],
+              "having_conditions": [
+                {
+                  "column": "COUNT(DISTINCT o.order_id)",
+                  "operator": ">",
+                  "value": "10"
+                }
+              ],
+              "order_by_columns": [
+                "total_revenue DESC"
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_type": "TABLE",
+        "schema": "default",
+        "description": "Customer order transactions",
+        "table_columns": [
+          {
+            "name": "order_id",
+            "upstream": [
+              "QUERY_RESULT.order_count"
+            ],
+            "type": "DIRECT"
+          },
+          {
+            "name": "order_total",
+            "upstream": [
+              "QUERY_RESULT.total_revenue",
+              "QUERY_RESULT.avg_order_value"
+            ],
+            "type": "DIRECT"
+          },
+          {
+            "name": "customer_id",
+            "upstream": [
+              "QUERY_RESULT.unique_customers"
+            ],
+            "type": "DIRECT"
+          },
+          {
+            "name": "orders.order_date",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "product_id",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "order_count",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "COUNT(DISTINCT o.order_id)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "COUNT"
+            }
+          },
+          {
+            "name": "total_revenue",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "SUM(o.order_total)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "SUM"
+            }
+          },
+          {
+            "name": "avg_order_value",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "AVG(o.order_total)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "AVG"
+            }
+          },
+          {
+            "name": "unique_customers",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "COUNT(DISTINCT o.customer_id)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "COUNT"
+            }
+          }
+        ]
+      }
+    },
+    "categories": {
+      "entity": "categories",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "c.category_name",
+                "upstream": [
+                  "categories.category_name"
+                ],
+                "type": "DIRECT"
+              },
+              {
+                "name": "product_count",
+                "upstream": [
+                  "categories.product_count"
+                ],
+                "type": "DIRECT",
+                "transformation": {
+                  "source_expression": "COUNT(DISTINCT p.product_id)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "COUNT"
+                }
+              },
+              {
+                "name": "order_count",
+                "upstream": [
+                  "categories.order_count"
+                ],
+                "type": "DIRECT",
+                "transformation": {
+                  "source_expression": "COUNT(DISTINCT o.order_id)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "COUNT"
+                }
+              },
+              {
+                "name": "total_revenue",
+                "upstream": [
+                  "categories.total_revenue"
+                ],
+                "type": "DIRECT",
+                "transformation": {
+                  "source_expression": "SUM(o.order_total)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "SUM"
+                }
+              },
+              {
+                "name": "avg_order_value",
+                "upstream": [
+                  "categories.avg_order_value"
+                ],
+                "type": "DIRECT",
+                "transformation": {
+                  "source_expression": "AVG(o.order_total)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "AVG"
+                }
+              },
+              {
+                "name": "unique_customers",
+                "upstream": [
+                  "categories.unique_customers"
+                ],
+                "type": "DIRECT",
+                "transformation": {
+                  "source_expression": "COUNT(DISTINCT o.customer_id)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "COUNT"
+                }
+              }
+            ]
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "categories",
+              "target_table": "QUERY_RESULT",
+              "joins": [
+                {
+                  "join_type": "LEFT",
+                  "right_table": "products",
+                  "conditions": [
+                    {
+                      "left_column": "categories.category_id",
+                      "operator": "=",
+                      "right_column": "products.category_id"
+                    },
+                    {
+                      "left_column": "products.product_id",
+                      "operator": "=",
+                      "right_column": "orders.product_id"
+                    },
+                    {
+                      "left_column": "orders.customer_id",
+                      "operator": "=",
+                      "right_column": "users.id"
+                    }
+                  ]
+                }
+              ],
+              "group_by_columns": [
+                "categories.category_id",
+                "categories.category_name"
+              ],
+              "order_by_columns": [
+                "total_revenue DESC"
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_type": "TABLE",
+        "schema": "default",
+        "description": "Product categories",
+        "table_columns": [
+          {
+            "name": "category_name",
+            "upstream": [
+              "QUERY_RESULT.category_name"
+            ],
+            "type": "DIRECT"
+          },
+          {
+            "name": "category_id",
+            "upstream": [],
+            "type": "SOURCE"
+          }
+        ]
+      }
+    },
+    "products": {
+      "entity": "products",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": []
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "products",
+              "target_table": "QUERY_RESULT",
+              "joins": [
+                {
+                  "join_type": "LEFT",
+                  "right_table": "products",
+                  "conditions": [
+                    {
+                      "left_column": "categories.category_id",
+                      "operator": "=",
+                      "right_column": "products.category_id"
+                    },
+                    {
+                      "left_column": "products.product_id",
+                      "operator": "=",
+                      "right_column": "orders.product_id"
+                    },
+                    {
+                      "left_column": "orders.customer_id",
+                      "operator": "=",
+                      "right_column": "users.id"
+                    }
+                  ]
+                }
+              ],
+              "order_by_columns": [
+                "total_revenue DESC"
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_type": "TABLE",
+        "schema": "default",
+        "description": "Product catalog",
+        "table_columns": [
+          {
+            "name": "product_id",
+            "upstream": [
+              "QUERY_RESULT.product_count"
+            ],
+            "type": "DIRECT"
+          },
+          {
+            "name": "category_id",
+            "upstream": [],
+            "type": "SOURCE"
+          }
+        ]
+      }
+    },
+    "users": {
+      "entity": "users",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": []
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "users",
+              "target_table": "QUERY_RESULT",
+              "joins": [
+                {
+                  "join_type": "LEFT",
+                  "right_table": "products",
+                  "conditions": [
+                    {
+                      "left_column": "categories.category_id",
+                      "operator": "=",
+                      "right_column": "products.category_id"
+                    },
+                    {
+                      "left_column": "products.product_id",
+                      "operator": "=",
+                      "right_column": "orders.product_id"
+                    },
+                    {
+                      "left_column": "orders.customer_id",
+                      "operator": "=",
+                      "right_column": "users.id"
+                    }
+                  ]
+                }
+              ],
+              "filter_conditions": [
+                {
+                  "column": "users.age",
+                  "operator": ">=",
+                  "value": "18"
+                }
+              ],
+              "order_by_columns": [
+                "total_revenue DESC"
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_type": "TABLE",
+        "schema": "default",
+        "description": "User profile information",
+        "table_columns": [
+          {
+            "name": "users.age",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "id",
+            "upstream": [],
+            "type": "SOURCE"
+          }
+        ]
+      }
+    }
+  },
+  "summary": {
+    "total_tables": 5,
+    "total_columns": 11,
+    "has_transformations": true,
+    "has_metadata": true,
+    "chain_count": 4
+  },
+  "errors": [],
+  "warnings": []
+}

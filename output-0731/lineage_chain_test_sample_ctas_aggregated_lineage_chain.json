@@ -1,0 +1,255 @@
+{
+  "sql": "\n         CREATE TABLE customer_metrics AS\n         SELECT \n             u.id,\n             u.name,\n             u.region,\n             COUNT(o.id) as order_count,\n             SUM(o.total) as total_spent,\n             AVG(o.total) as avg_order_value,\n             MAX(o.order_date) as last_order_date,\n             MIN(o.order_date) as first_order_date\n         FROM users u\n         LEFT JOIN orders o ON u.id = o.user_id\n         WHERE u.active = true\n         GROUP BY u.id, u.name, u.region\n         HAVING COUNT(o.id) >= 1\n         ",
+  "dialect": "trino",
+  "chain_type": "downstream",
+  "max_depth": "unlimited",
+  "actual_max_depth": 1,
+  "target_entity": null,
+  "chains": {
+    "orders": {
+      "entity": "orders",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "customer_metrics",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "order_count",
+                "upstream": [],
+                "type": "RESULT",
+                "transformation": {
+                  "source_expression": "COUNT(o.id)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "COUNT"
+                }
+              },
+              {
+                "name": "total_spent",
+                "upstream": [],
+                "type": "RESULT",
+                "transformation": {
+                  "source_expression": "SUM(o.total)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "SUM"
+                }
+              },
+              {
+                "name": "avg_order_value",
+                "upstream": [],
+                "type": "RESULT",
+                "transformation": {
+                  "source_expression": "AVG(o.total)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "AVG"
+                }
+              },
+              {
+                "name": "last_order_date",
+                "upstream": [],
+                "type": "RESULT",
+                "transformation": {
+                  "source_expression": "MAX(o.order_date)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "MAX"
+                }
+              },
+              {
+                "name": "first_order_date",
+                "upstream": [],
+                "type": "RESULT",
+                "transformation": {
+                  "source_expression": "MIN(o.order_date)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "MIN"
+                }
+              }
+            ]
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "orders",
+              "target_table": "customer_metrics",
+              "joins": [
+                {
+                  "join_type": "LEFT",
+                  "right_table": "orders",
+                  "conditions": [
+                    {
+                      "left_column": "users.id",
+                      "operator": "=",
+                      "right_column": "orders.user_id"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_type": "TABLE",
+        "schema": "default",
+        "description": "Customer order transactions",
+        "table_columns": [
+          {
+            "name": "id",
+            "upstream": [
+              "customer_metrics.order_count"
+            ],
+            "type": "DIRECT"
+          },
+          {
+            "name": "total",
+            "upstream": [
+              "customer_metrics.total_spent",
+              "customer_metrics.avg_order_value"
+            ],
+            "type": "DIRECT"
+          },
+          {
+            "name": "order_date",
+            "upstream": [
+              "customer_metrics.first_order_date",
+              "customer_metrics.last_order_date"
+            ],
+            "type": "DIRECT"
+          },
+          {
+            "name": "user_id",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "order_count",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "COUNT(o.id)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "COUNT"
+            }
+          },
+          {
+            "name": "total_spent",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "SUM(o.total)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "SUM"
+            }
+          },
+          {
+            "name": "avg_order_value",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "AVG(o.total)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "AVG"
+            }
+          },
+          {
+            "name": "last_order_date",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "MAX(o.order_date)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "MAX"
+            }
+          },
+          {
+            "name": "first_order_date",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "MIN(o.order_date)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "MIN"
+            }
+          }
+        ]
+      }
+    },
+    "users": {
+      "entity": "users",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "customer_metrics",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": []
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "users",
+              "target_table": "customer_metrics",
+              "joins": [
+                {
+                  "join_type": "LEFT",
+                  "right_table": "orders",
+                  "conditions": [
+                    {
+                      "left_column": "users.id",
+                      "operator": "=",
+                      "right_column": "orders.user_id"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_type": "TABLE",
+        "schema": "default",
+        "description": "User profile information",
+        "table_columns": [
+          {
+            "name": "id",
+            "upstream": [
+              "customer_metrics.id"
+            ],
+            "type": "DIRECT"
+          },
+          {
+            "name": "name",
+            "upstream": [
+              "customer_metrics.name"
+            ],
+            "type": "DIRECT"
+          },
+          {
+            "name": "region",
+            "upstream": [
+              "customer_metrics.region"
+            ],
+            "type": "DIRECT"
+          }
+        ]
+      }
+    }
+  },
+  "summary": {
+    "total_tables": 3,
+    "total_columns": 13,
+    "has_transformations": true,
+    "has_metadata": true,
+    "chain_count": 2
+  },
+  "errors": [],
+  "warnings": []
+}

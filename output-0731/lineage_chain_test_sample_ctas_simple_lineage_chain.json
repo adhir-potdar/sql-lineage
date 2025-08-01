@@ -1,0 +1,117 @@
+{
+  "sql": "\n         CREATE TABLE user_summary AS\n         SELECT \n             id, \n             name, \n             email,\n             age,\n             created_at\n         FROM users \n         WHERE age >= 18 AND active = true\n         ",
+  "dialect": "trino",
+  "chain_type": "downstream",
+  "max_depth": "unlimited",
+  "actual_max_depth": 1,
+  "target_entity": null,
+  "chains": {
+    "users": {
+      "entity": "users",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "user_summary",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "name",
+                "upstream": [],
+                "type": "SOURCE"
+              },
+              {
+                "name": "age",
+                "upstream": [],
+                "type": "SOURCE"
+              },
+              {
+                "name": "email",
+                "upstream": [],
+                "type": "SOURCE"
+              },
+              {
+                "name": "created_at",
+                "upstream": [],
+                "type": "SOURCE"
+              },
+              {
+                "name": "id",
+                "upstream": [],
+                "type": "SOURCE"
+              }
+            ]
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "users",
+              "target_table": "user_summary",
+              "filter_conditions": [
+                {
+                  "column": "active",
+                  "operator": "=",
+                  "value": "TRUE"
+                },
+                {
+                  "column": "age",
+                  "operator": ">=",
+                  "value": "18"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_type": "TABLE",
+        "schema": "default",
+        "description": "User profile information",
+        "table_columns": [
+          {
+            "name": "name",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "age",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "email",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "created_at",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "id",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "active",
+            "upstream": [],
+            "type": "SOURCE"
+          }
+        ]
+      }
+    }
+  },
+  "summary": {
+    "total_tables": 2,
+    "total_columns": 6,
+    "has_transformations": true,
+    "has_metadata": true,
+    "chain_count": 1
+  },
+  "errors": [],
+  "warnings": []
+}

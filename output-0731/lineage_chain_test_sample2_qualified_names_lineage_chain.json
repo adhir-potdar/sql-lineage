@@ -1,0 +1,705 @@
+{
+  "sql": "\n         WITH SalesSummary AS (\n             SELECT\n                 \"production\".\"orders\".\"order_id\" AS \"FullyQualifiedTableId\",\n                 \"production\".\"orders\".\"customer_id\",\n                 \"production\".\"orders\".\"order_date\",\n                 \"production\".\"orders\".\"product_id\",\n                 SUM(\"production\".\"orders\".\"order_total\") AS \"TotalOrderValue\",\n                 ROW_NUMBER() OVER (\n                     PARTITION BY \"production\".\"orders\".\"customer_id\"\n                     ORDER BY \"production\".\"orders\".\"order_date\" DESC\n                 ) AS \"OrderRank\"\n             FROM\n                 \"production\".\"orders\"\n             WHERE\n                 \"production\".\"orders\".\"order_date\" >= DATEADD(YEAR, -2, CURRENT_TIMESTAMP)\n             GROUP BY\n                 \"production\".\"orders\".\"order_id\",\n                 \"production\".\"orders\".\"customer_id\",\n                 \"production\".\"orders\".\"order_date\",\n                 \"production\".\"orders\".\"product_id\"\n         ),\n         TopProducts AS (\n             SELECT\n                 \"catalog\".\"products\".\"product_id\",\n                 \"catalog\".\"categories\".\"category_name\",\n                 COUNT(\"production\".\"orders\".\"order_id\") AS \"NumberOfOrders\",\n                 RANK() OVER (\n                     PARTITION BY \"catalog\".\"categories\".\"category_id\"\n                     ORDER BY COUNT(\"production\".\"orders\".\"order_id\") DESC\n                 ) AS \"ProductRank\"\n             FROM\n                 \"catalog\".\"categories\"\n             INNER JOIN\n                 \"catalog\".\"products\" ON \"catalog\".\"categories\".\"category_id\" = \"catalog\".\"products\".\"category_id\"\n             LEFT JOIN\n                 \"production\".\"orders\" ON \"catalog\".\"products\".\"product_id\" = \"production\".\"orders\".\"product_id\"\n             GROUP BY\n                 \"catalog\".\"products\".\"product_id\",\n                 \"catalog\".\"categories\".\"category_name\",\n                 \"catalog\".\"categories\".\"category_id\"\n         )\n         SELECT\n             ss.\"FullyQualifiedTableId\" AS \"Order_Id\",\n             ss.\"customer_id\",\n             ss.\"order_date\",\n             tp.\"category_name\",\n             tp.\"NumberOfOrders\",\n             tp.\"ProductRank\",\n             ss.\"TotalOrderValue\"\n         FROM\n             SalesSummary ss\n         INNER JOIN\n             TopProducts tp ON tp.\"product_id\" = ss.\"product_id\"\n         WHERE\n             tp.\"ProductRank\" <= 5\n         ORDER BY\n             tp.\"category_name\",\n             ss.\"order_date\" DESC\n         ",
+  "dialect": "trino",
+  "chain_type": "downstream",
+  "max_depth": "unlimited",
+  "actual_max_depth": 0,
+  "target_entity": null,
+  "chains": {
+    "\"catalog\".\"products\"": {
+      "entity": "\"catalog\".\"products\"",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [],
+            "is_cte": false
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "\"catalog\".\"products\"",
+              "target_table": "QUERY_RESULT",
+              "filter_conditions": [
+                {
+                  "type": "FILTER",
+                  "conditions": [
+                    {
+                      "column": "tp.\"ProductRank\"",
+                      "operator": "<=",
+                      "value": "5"
+                    }
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": [
+                {
+                  "join_type": "INNER JOIN",
+                  "right_table": "TopProducts",
+                  "conditions": [
+                    {
+                      "left_column": "tp.\"product_id\"",
+                      "operator": "=",
+                      "right_column": "ss.\"product_id\""
+                    }
+                  ]
+                },
+                {
+                  "join_type": "INNER JOIN",
+                  "right_table": "products",
+                  "conditions": [
+                    {
+                      "left_column": "\"catalog\".\"categories\".\"category_id\"",
+                      "operator": "=",
+                      "right_column": "\"catalog\".\"products\".\"category_id\""
+                    }
+                  ]
+                },
+                {
+                  "join_type": "LEFT JOIN",
+                  "right_table": "orders",
+                  "conditions": [
+                    {
+                      "left_column": "\"catalog\".\"products\".\"product_id\"",
+                      "operator": "=",
+                      "right_column": "\"production\".\"orders\".\"product_id\""
+                    }
+                  ]
+                }
+              ],
+              "order_by_columns": [
+                "tp.\"category_name\" DESC",
+                "ss.\"order_date\" DESC"
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "\"production\".\"orders\"": {
+      "entity": "\"production\".\"orders\"",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [],
+            "is_cte": false
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "\"production\".\"orders\"",
+              "target_table": "QUERY_RESULT",
+              "filter_conditions": [
+                {
+                  "type": "FILTER",
+                  "conditions": [
+                    {
+                      "column": "tp.\"ProductRank\"",
+                      "operator": "<=",
+                      "value": "5"
+                    }
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": [
+                {
+                  "join_type": "INNER JOIN",
+                  "right_table": "TopProducts",
+                  "conditions": [
+                    {
+                      "left_column": "tp.\"product_id\"",
+                      "operator": "=",
+                      "right_column": "ss.\"product_id\""
+                    }
+                  ]
+                },
+                {
+                  "join_type": "INNER JOIN",
+                  "right_table": "products",
+                  "conditions": [
+                    {
+                      "left_column": "\"catalog\".\"categories\".\"category_id\"",
+                      "operator": "=",
+                      "right_column": "\"catalog\".\"products\".\"category_id\""
+                    }
+                  ]
+                },
+                {
+                  "join_type": "LEFT JOIN",
+                  "right_table": "orders",
+                  "conditions": [
+                    {
+                      "left_column": "\"catalog\".\"products\".\"product_id\"",
+                      "operator": "=",
+                      "right_column": "\"production\".\"orders\".\"product_id\""
+                    }
+                  ]
+                }
+              ],
+              "order_by_columns": [
+                "tp.\"category_name\" DESC",
+                "ss.\"order_date\" DESC"
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "\"catalog\".\"categories\"": {
+      "entity": "\"catalog\".\"categories\"",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [],
+            "is_cte": false
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "\"catalog\".\"categories\"",
+              "target_table": "QUERY_RESULT",
+              "filter_conditions": [
+                {
+                  "type": "FILTER",
+                  "conditions": [
+                    {
+                      "column": "tp.\"ProductRank\"",
+                      "operator": "<=",
+                      "value": "5"
+                    }
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": [
+                {
+                  "join_type": "INNER JOIN",
+                  "right_table": "TopProducts",
+                  "conditions": [
+                    {
+                      "left_column": "tp.\"product_id\"",
+                      "operator": "=",
+                      "right_column": "ss.\"product_id\""
+                    }
+                  ]
+                },
+                {
+                  "join_type": "INNER JOIN",
+                  "right_table": "products",
+                  "conditions": [
+                    {
+                      "left_column": "\"catalog\".\"categories\".\"category_id\"",
+                      "operator": "=",
+                      "right_column": "\"catalog\".\"products\".\"category_id\""
+                    }
+                  ]
+                },
+                {
+                  "join_type": "LEFT JOIN",
+                  "right_table": "orders",
+                  "conditions": [
+                    {
+                      "left_column": "\"catalog\".\"products\".\"product_id\"",
+                      "operator": "=",
+                      "right_column": "\"production\".\"orders\".\"product_id\""
+                    }
+                  ]
+                }
+              ],
+              "order_by_columns": [
+                "tp.\"category_name\" DESC",
+                "ss.\"order_date\" DESC"
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "orders": {
+      "entity": "orders",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "SalesSummary",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "QUERY_RESULT",
+              "entity_type": "table",
+              "depth": 2,
+              "dependencies": [],
+              "metadata": {
+                "table_columns": [],
+                "is_cte": false
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "SalesSummary",
+                  "target_table": "QUERY_RESULT",
+                  "filter_conditions": [
+                    {
+                      "type": "FILTER",
+                      "conditions": [
+                        {
+                          "column": "tp.\"ProductRank\"",
+                          "operator": "<=",
+                          "value": "5"
+                        }
+                      ]
+                    }
+                  ],
+                  "group_by_columns": [],
+                  "joins": [
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "TopProducts",
+                      "conditions": [
+                        {
+                          "left_column": "tp.\"product_id\"",
+                          "operator": "=",
+                          "right_column": "ss.\"product_id\""
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "products",
+                      "conditions": [
+                        {
+                          "left_column": "\"catalog\".\"categories\".\"category_id\"",
+                          "operator": "=",
+                          "right_column": "\"catalog\".\"products\".\"category_id\""
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "LEFT JOIN",
+                      "right_table": "orders",
+                      "conditions": [
+                        {
+                          "left_column": "\"catalog\".\"products\".\"product_id\"",
+                          "operator": "=",
+                          "right_column": "\"production\".\"orders\".\"product_id\""
+                        }
+                      ]
+                    }
+                  ],
+                  "order_by_columns": [
+                    "tp.\"category_name\" DESC",
+                    "ss.\"order_date\" DESC"
+                  ]
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "FullyQualifiedTableId",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "customer_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_date",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "TotalOrderValue",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "TotalOrderValue",
+                  "source_expression": "SUM(\"production\".\"orders\".\"order_total\")",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "SUM",
+                  "full_expression": "SUM(\"production\".\"orders\".\"order_total\") AS \"TotalOrderValue\""
+                }
+              },
+              {
+                "name": "OrderRank",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "OrderRank",
+                  "source_expression": "ROW_NUMBER() OVER (PARTITION BY \"production\".\"orders\".\"customer_id\" ORDER BY \"production\".\"orders\".\"order_date\" DESC)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "ROW_NUMBER",
+                  "full_expression": "ROW_NUMBER() OVER (PARTITION BY \"production\".\"orders\".\"customer_id\" ORDER BY \"production\".\"orders\".\"order_date\" DESC) AS \"OrderRank\""
+                }
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "orders",
+              "target_table": "SalesSummary",
+              "filter_conditions": [
+                {
+                  "type": "GROUP_BY",
+                  "columns": [
+                    "\"production\".\"orders\".\"order_id\"",
+                    "\"production\".\"orders\".\"customer_id\"",
+                    "\"production\".\"orders\".\"order_date\"",
+                    "\"production\".\"orders\".\"product_id\""
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "products": {
+      "entity": "products",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "TopProducts",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "QUERY_RESULT",
+              "entity_type": "table",
+              "depth": 2,
+              "dependencies": [],
+              "metadata": {
+                "table_columns": [],
+                "is_cte": false
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "TopProducts",
+                  "target_table": "QUERY_RESULT",
+                  "filter_conditions": [
+                    {
+                      "type": "FILTER",
+                      "conditions": [
+                        {
+                          "column": "tp.\"ProductRank\"",
+                          "operator": "<=",
+                          "value": "5"
+                        }
+                      ]
+                    }
+                  ],
+                  "group_by_columns": [],
+                  "joins": [
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "TopProducts",
+                      "conditions": [
+                        {
+                          "left_column": "tp.\"product_id\"",
+                          "operator": "=",
+                          "right_column": "ss.\"product_id\""
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "products",
+                      "conditions": [
+                        {
+                          "left_column": "\"catalog\".\"categories\".\"category_id\"",
+                          "operator": "=",
+                          "right_column": "\"catalog\".\"products\".\"category_id\""
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "LEFT JOIN",
+                      "right_table": "orders",
+                      "conditions": [
+                        {
+                          "left_column": "\"catalog\".\"products\".\"product_id\"",
+                          "operator": "=",
+                          "right_column": "\"production\".\"orders\".\"product_id\""
+                        }
+                      ]
+                    }
+                  ],
+                  "order_by_columns": [
+                    "tp.\"category_name\" DESC",
+                    "ss.\"order_date\" DESC"
+                  ]
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "product_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "category_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "NumberOfOrders",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "NumberOfOrders",
+                  "source_expression": "COUNT(\"production\".\"orders\".\"order_id\")",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "COUNT",
+                  "full_expression": "COUNT(\"production\".\"orders\".\"order_id\") AS \"NumberOfOrders\""
+                }
+              },
+              {
+                "name": "ProductRank",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "ProductRank",
+                  "source_expression": "RANK() OVER (PARTITION BY \"catalog\".\"categories\".\"category_id\" ORDER BY COUNT(\"production\".\"orders\".\"order_id\") DESC)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "RANK",
+                  "full_expression": "RANK() OVER (PARTITION BY \"catalog\".\"categories\".\"category_id\" ORDER BY COUNT(\"production\".\"orders\".\"order_id\") DESC) AS \"ProductRank\""
+                }
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "products",
+              "target_table": "TopProducts",
+              "filter_conditions": [
+                {
+                  "type": "GROUP_BY",
+                  "columns": [
+                    "\"catalog\".\"products\".\"product_id\"",
+                    "\"catalog\".\"categories\".\"category_name\"",
+                    "\"catalog\".\"categories\".\"category_id\""
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "categories": {
+      "entity": "categories",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "TopProducts",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "QUERY_RESULT",
+              "entity_type": "table",
+              "depth": 2,
+              "dependencies": [],
+              "metadata": {
+                "table_columns": [],
+                "is_cte": false
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "TopProducts",
+                  "target_table": "QUERY_RESULT",
+                  "filter_conditions": [
+                    {
+                      "type": "FILTER",
+                      "conditions": [
+                        {
+                          "column": "tp.\"ProductRank\"",
+                          "operator": "<=",
+                          "value": "5"
+                        }
+                      ]
+                    }
+                  ],
+                  "group_by_columns": [],
+                  "joins": [
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "TopProducts",
+                      "conditions": [
+                        {
+                          "left_column": "tp.\"product_id\"",
+                          "operator": "=",
+                          "right_column": "ss.\"product_id\""
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "products",
+                      "conditions": [
+                        {
+                          "left_column": "\"catalog\".\"categories\".\"category_id\"",
+                          "operator": "=",
+                          "right_column": "\"catalog\".\"products\".\"category_id\""
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "LEFT JOIN",
+                      "right_table": "orders",
+                      "conditions": [
+                        {
+                          "left_column": "\"catalog\".\"products\".\"product_id\"",
+                          "operator": "=",
+                          "right_column": "\"production\".\"orders\".\"product_id\""
+                        }
+                      ]
+                    }
+                  ],
+                  "order_by_columns": [
+                    "tp.\"category_name\" DESC",
+                    "ss.\"order_date\" DESC"
+                  ]
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "product_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "category_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "NumberOfOrders",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "NumberOfOrders",
+                  "source_expression": "COUNT(\"production\".\"orders\".\"order_id\")",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "COUNT",
+                  "full_expression": "COUNT(\"production\".\"orders\".\"order_id\") AS \"NumberOfOrders\""
+                }
+              },
+              {
+                "name": "ProductRank",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "ProductRank",
+                  "source_expression": "RANK() OVER (PARTITION BY \"catalog\".\"categories\".\"category_id\" ORDER BY COUNT(\"production\".\"orders\".\"order_id\") DESC)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "RANK",
+                  "full_expression": "RANK() OVER (PARTITION BY \"catalog\".\"categories\".\"category_id\" ORDER BY COUNT(\"production\".\"orders\".\"order_id\") DESC) AS \"ProductRank\""
+                }
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "categories",
+              "target_table": "TopProducts",
+              "filter_conditions": [
+                {
+                  "type": "GROUP_BY",
+                  "columns": [
+                    "\"catalog\".\"products\".\"product_id\"",
+                    "\"catalog\".\"categories\".\"category_name\"",
+                    "\"catalog\".\"categories\".\"category_id\""
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    }
+  },
+  "summary": {
+    "total_tables": 6,
+    "total_columns": 0,
+    "has_transformations": true,
+    "has_metadata": false,
+    "chain_count": 6
+  },
+  "errors": [],
+  "warnings": []
+}

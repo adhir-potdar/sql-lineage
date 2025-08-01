@@ -1,0 +1,98 @@
+{
+  "sql": "SELECT id, name, email FROM users WHERE age > 25",
+  "dialect": "trino",
+  "chain_type": "downstream",
+  "max_depth": "unlimited",
+  "actual_max_depth": 1,
+  "target_entity": null,
+  "chains": {
+    "users": {
+      "entity": "users",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "id",
+                "upstream": [
+                  "QUERY_RESULT.id"
+                ],
+                "type": "DIRECT"
+              },
+              {
+                "name": "name",
+                "upstream": [
+                  "QUERY_RESULT.name"
+                ],
+                "type": "DIRECT"
+              },
+              {
+                "name": "email",
+                "upstream": [
+                  "QUERY_RESULT.email"
+                ],
+                "type": "DIRECT"
+              }
+            ]
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "users",
+              "target_table": "QUERY_RESULT",
+              "filter_conditions": [
+                {
+                  "column": "age",
+                  "operator": ">",
+                  "value": "25"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_type": "TABLE",
+        "schema": "default",
+        "description": "User profile information",
+        "table_columns": [
+          {
+            "name": "email",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "name",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "id",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "age",
+            "upstream": [],
+            "type": "SOURCE"
+          }
+        ]
+      }
+    }
+  },
+  "summary": {
+    "total_tables": 2,
+    "total_columns": 4,
+    "has_transformations": true,
+    "has_metadata": true,
+    "chain_count": 1
+  },
+  "errors": [],
+  "warnings": []
+}

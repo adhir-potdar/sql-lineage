@@ -1,0 +1,104 @@
+{
+  "sql": "\n         WITH active_users AS (SELECT id, name FROM users WHERE active = true)\n         SELECT * FROM active_users WHERE name LIKE 'A%'\n         ",
+  "dialect": "trino",
+  "chain_type": "downstream",
+  "max_depth": "unlimited",
+  "actual_max_depth": 0,
+  "target_entity": null,
+  "chains": {
+    "users": {
+      "entity": "users",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "active_users",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "QUERY_RESULT",
+              "entity_type": "table",
+              "depth": 2,
+              "dependencies": [],
+              "metadata": {
+                "table_columns": [],
+                "is_cte": false
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "active_users",
+                  "target_table": "QUERY_RESULT",
+                  "filter_conditions": [
+                    {
+                      "type": "FILTER",
+                      "conditions": [
+                        {
+                          "column": "name",
+                          "operator": "LIKE",
+                          "value": "'A%'"
+                        }
+                      ]
+                    }
+                  ],
+                  "group_by_columns": [],
+                  "joins": []
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "name",
+                "upstream": [],
+                "type": "VARCHAR"
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "users",
+              "target_table": "active_users",
+              "filter_conditions": [
+                {
+                  "type": "FILTER",
+                  "conditions": [
+                    {
+                      "column": "active",
+                      "operator": "=",
+                      "value": "TRUE"
+                    }
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    }
+  },
+  "summary": {
+    "total_tables": 3,
+    "total_columns": 0,
+    "has_transformations": true,
+    "has_metadata": true,
+    "chain_count": 1
+  },
+  "errors": [],
+  "warnings": []
+}

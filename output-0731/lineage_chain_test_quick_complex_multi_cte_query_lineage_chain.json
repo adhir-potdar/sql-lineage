@@ -1,0 +1,292 @@
+{
+  "sql": "\n         WITH order_stats AS (\n             SELECT customer_id, COUNT(*) as orders, SUM(total) as spent\n             FROM orders WHERE order_date >= '2023-01-01'\n             GROUP BY customer_id\n         ),\n         customer_tiers AS (\n             SELECT \n                 os.customer_id,\n                 os.orders,\n                 os.spent,\n                 CASE WHEN os.spent > 1000 THEN 'Premium' ELSE 'Standard' END as tier\n             FROM order_stats os\n         ),\n         tier_summary AS (\n             SELECT tier, COUNT(*) as customer_count, AVG(spent) as avg_spent\n             FROM customer_tiers\n             GROUP BY tier\n         )\n         SELECT ts.tier, ts.customer_count, ts.avg_spent, u.name\n         FROM tier_summary ts\n         JOIN customer_tiers ct ON ts.tier = ct.tier\n         JOIN users u ON ct.customer_id = u.id\n         ",
+  "dialect": "trino",
+  "chain_type": "downstream",
+  "max_depth": "unlimited",
+  "actual_max_depth": 0,
+  "target_entity": null,
+  "chains": {
+    "orders": {
+      "entity": "orders",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "order_stats",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "customer_tiers",
+              "entity_type": "cte",
+              "depth": 2,
+              "dependencies": [
+                {
+                  "entity": "tier_summary",
+                  "entity_type": "cte",
+                  "depth": 3,
+                  "dependencies": [
+                    {
+                      "entity": "QUERY_RESULT",
+                      "entity_type": "table",
+                      "depth": 4,
+                      "dependencies": [],
+                      "metadata": {
+                        "table_columns": [],
+                        "is_cte": false
+                      },
+                      "transformations": [
+                        {
+                          "type": "table_transformation",
+                          "source_table": "tier_summary",
+                          "target_table": "QUERY_RESULT",
+                          "filter_conditions": [],
+                          "group_by_columns": [],
+                          "joins": [
+                            {
+                              "join_type": "INNER JOIN",
+                              "right_table": "customer_tiers",
+                              "conditions": [
+                                {
+                                  "left_column": "ts.tier",
+                                  "operator": "=",
+                                  "right_column": "ct.tier"
+                                }
+                              ]
+                            },
+                            {
+                              "join_type": "INNER JOIN",
+                              "right_table": "users",
+                              "conditions": [
+                                {
+                                  "left_column": "ct.customer_id",
+                                  "operator": "=",
+                                  "right_column": "u.id"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "metadata": {
+                    "table_columns": [
+                      {
+                        "name": "tier",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "customer_count",
+                        "upstream": [],
+                        "type": "VARCHAR",
+                        "transformation": {
+                          "column_name": "customer_count",
+                          "source_expression": "COUNT(*)",
+                          "transformation_type": "COMPUTED",
+                          "function_type": "COUNT",
+                          "full_expression": "COUNT(*) AS customer_count"
+                        }
+                      },
+                      {
+                        "name": "avg_spent",
+                        "upstream": [],
+                        "type": "VARCHAR",
+                        "transformation": {
+                          "column_name": "avg_spent",
+                          "source_expression": "AVG(spent)",
+                          "transformation_type": "COMPUTED",
+                          "function_type": "AVG",
+                          "full_expression": "AVG(spent) AS avg_spent"
+                        }
+                      }
+                    ],
+                    "is_cte": true
+                  },
+                  "transformations": [
+                    {
+                      "type": "table_transformation",
+                      "source_table": "customer_tiers",
+                      "target_table": "tier_summary",
+                      "filter_conditions": [
+                        {
+                          "type": "GROUP_BY",
+                          "columns": [
+                            "tier"
+                          ]
+                        }
+                      ],
+                      "group_by_columns": [],
+                      "joins": []
+                    }
+                  ]
+                }
+              ],
+              "metadata": {
+                "table_columns": [
+                  {
+                    "name": "customer_id",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "orders",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "spent",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "tier",
+                    "upstream": [],
+                    "type": "VARCHAR",
+                    "transformation": {
+                      "column_name": "tier",
+                      "source_expression": "CASE WHEN os.spent > 1000 THEN 'Premium' ELSE 'Standard' END",
+                      "transformation_type": "CASE",
+                      "function_type": "CASE",
+                      "full_expression": "CASE WHEN os.spent > 1000 THEN 'Premium' ELSE 'Standard' END AS tier"
+                    }
+                  }
+                ],
+                "is_cte": true
+              }
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "customer_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "orders",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "orders",
+                  "source_expression": "COUNT(*)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "COUNT",
+                  "full_expression": "COUNT(*) AS orders"
+                }
+              },
+              {
+                "name": "spent",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "spent",
+                  "source_expression": "SUM(total)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "SUM",
+                  "full_expression": "SUM(total) AS spent"
+                }
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "orders",
+              "target_table": "order_stats",
+              "filter_conditions": [
+                {
+                  "type": "FILTER",
+                  "conditions": [
+                    {
+                      "column": "order_date",
+                      "operator": ">=",
+                      "value": "'2023-01-01'"
+                    }
+                  ]
+                },
+                {
+                  "type": "GROUP_BY",
+                  "columns": [
+                    "customer_id"
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "users": {
+      "entity": "users",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [],
+            "is_cte": false
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "users",
+              "target_table": "QUERY_RESULT",
+              "filter_conditions": [],
+              "group_by_columns": [],
+              "joins": [
+                {
+                  "join_type": "INNER JOIN",
+                  "right_table": "customer_tiers",
+                  "conditions": [
+                    {
+                      "left_column": "ts.tier",
+                      "operator": "=",
+                      "right_column": "ct.tier"
+                    }
+                  ]
+                },
+                {
+                  "join_type": "INNER JOIN",
+                  "right_table": "users",
+                  "conditions": [
+                    {
+                      "left_column": "ct.customer_id",
+                      "operator": "=",
+                      "right_column": "u.id"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    }
+  },
+  "summary": {
+    "total_tables": 6,
+    "total_columns": 0,
+    "has_transformations": true,
+    "has_metadata": true,
+    "chain_count": 2
+  },
+  "errors": [],
+  "warnings": []
+}

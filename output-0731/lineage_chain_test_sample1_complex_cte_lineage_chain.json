@@ -1,0 +1,653 @@
+{
+  "sql": "\n         WITH CategorySales AS (SELECT c.category_name,\n                                       p.product_id,\n                                       p.product_name,\n                                       SUM(o.order_total)         AS total_sales,\n                                       COUNT(DISTINCT o.order_id) AS total_orders,\n                                       AVG(o.order_total)         AS avg_order_value\n                                FROM orders o\n                                         INNER JOIN\n                                     products p ON o.product_id = p.product_id\n                                         INNER JOIN\n                                     categories c ON p.category_id = c.category_id\n                                WHERE o.order_date >= DATEADD(YEAR, -1, GETDATE())\n                                GROUP BY c.category_name, p.product_id, p.product_name),\n              TopCustomers AS (SELECT c.category_name,\n                                      o.customer_id,\n                                      SUM(o.order_total) AS customer_total,\n                                      RANK()                OVER (\n                         PARTITION BY c.category_name\n                         ORDER BY SUM(o.order_total) DESC\n                     ) AS rank\n                               FROM orders o\n                                        INNER JOIN\n                                    products p ON o.product_id = p.product_id\n                                        INNER JOIN\n                                    categories c ON p.category_id = c.category_id\n                               WHERE o.order_date >= DATEADD(YEAR, -1, GETDATE())\n                               GROUP BY c.category_name, o.customer_id)\n         SELECT cs.category_name,\n                cs.product_id,\n                cs.product_name,\n                cs.total_sales,\n                cs.total_orders,\n                cs.avg_order_value,\n                tc.customer_id    AS top_customer_id,\n                tc.customer_total AS top_customer_revenue\n         FROM CategorySales cs\n                  LEFT JOIN\n              TopCustomers tc\n              ON\n                  cs.category_name = tc.category_name\n         WHERE tc.rank <= 3\n         ORDER BY cs.category_name,\n                  cs.total_sales DESC\n         ",
+  "dialect": "trino",
+  "chain_type": "downstream",
+  "max_depth": "unlimited",
+  "actual_max_depth": 0,
+  "target_entity": null,
+  "chains": {
+    "orders": {
+      "entity": "orders",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "CategorySales",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "QUERY_RESULT",
+              "entity_type": "table",
+              "depth": 2,
+              "dependencies": [],
+              "metadata": {
+                "table_columns": [],
+                "is_cte": false
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "CategorySales",
+                  "target_table": "QUERY_RESULT",
+                  "filter_conditions": [
+                    {
+                      "type": "FILTER",
+                      "conditions": [
+                        {
+                          "column": "tc.rank",
+                          "operator": "<=",
+                          "value": "3"
+                        }
+                      ]
+                    }
+                  ],
+                  "group_by_columns": [],
+                  "joins": [
+                    {
+                      "join_type": "LEFT JOIN",
+                      "right_table": "TopCustomers",
+                      "conditions": [
+                        {
+                          "left_column": "cs.category_name",
+                          "operator": "=",
+                          "right_column": "tc.category_name"
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "products",
+                      "conditions": [
+                        {
+                          "left_column": "o.product_id",
+                          "operator": "=",
+                          "right_column": "p.product_id"
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "categories",
+                      "conditions": [
+                        {
+                          "left_column": "p.category_id",
+                          "operator": "=",
+                          "right_column": "c.category_id"
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "products",
+                      "conditions": [
+                        {
+                          "left_column": "o.product_id",
+                          "operator": "=",
+                          "right_column": "p.product_id"
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "categories",
+                      "conditions": [
+                        {
+                          "left_column": "p.category_id",
+                          "operator": "=",
+                          "right_column": "c.category_id"
+                        }
+                      ]
+                    }
+                  ],
+                  "order_by_columns": [
+                    "cs.category_name DESC",
+                    "cs.total_sales DESC"
+                  ]
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "category_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "total_sales",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "total_sales",
+                  "source_expression": "SUM(o.order_total)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "SUM",
+                  "full_expression": "SUM(o.order_total) AS total_sales"
+                }
+              },
+              {
+                "name": "total_orders",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "total_orders",
+                  "source_expression": "COUNT(DISTINCT o.order_id)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "COUNT",
+                  "full_expression": "COUNT(DISTINCT o.order_id) AS total_orders"
+                }
+              },
+              {
+                "name": "avg_order_value",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "avg_order_value",
+                  "source_expression": "AVG(o.order_total)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "AVG",
+                  "full_expression": "AVG(o.order_total) AS avg_order_value"
+                }
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "orders",
+              "target_table": "CategorySales",
+              "filter_conditions": [
+                {
+                  "type": "FILTER",
+                  "conditions": [
+                    {
+                      "column": "o.order_date",
+                      "operator": ">=",
+                      "value": "DATEADD(YEAR, -1, GETDATE())"
+                    }
+                  ]
+                },
+                {
+                  "type": "GROUP_BY",
+                  "columns": [
+                    "c.category_name",
+                    "p.product_id",
+                    "p.product_name"
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "categories": {
+      "entity": "categories",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "CategorySales",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "QUERY_RESULT",
+              "entity_type": "table",
+              "depth": 2,
+              "dependencies": [],
+              "metadata": {
+                "table_columns": [],
+                "is_cte": false
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "CategorySales",
+                  "target_table": "QUERY_RESULT",
+                  "filter_conditions": [
+                    {
+                      "type": "FILTER",
+                      "conditions": [
+                        {
+                          "column": "tc.rank",
+                          "operator": "<=",
+                          "value": "3"
+                        }
+                      ]
+                    }
+                  ],
+                  "group_by_columns": [],
+                  "joins": [
+                    {
+                      "join_type": "LEFT JOIN",
+                      "right_table": "TopCustomers",
+                      "conditions": [
+                        {
+                          "left_column": "cs.category_name",
+                          "operator": "=",
+                          "right_column": "tc.category_name"
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "products",
+                      "conditions": [
+                        {
+                          "left_column": "o.product_id",
+                          "operator": "=",
+                          "right_column": "p.product_id"
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "categories",
+                      "conditions": [
+                        {
+                          "left_column": "p.category_id",
+                          "operator": "=",
+                          "right_column": "c.category_id"
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "products",
+                      "conditions": [
+                        {
+                          "left_column": "o.product_id",
+                          "operator": "=",
+                          "right_column": "p.product_id"
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "categories",
+                      "conditions": [
+                        {
+                          "left_column": "p.category_id",
+                          "operator": "=",
+                          "right_column": "c.category_id"
+                        }
+                      ]
+                    }
+                  ],
+                  "order_by_columns": [
+                    "cs.category_name DESC",
+                    "cs.total_sales DESC"
+                  ]
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "category_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "total_sales",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "total_sales",
+                  "source_expression": "SUM(o.order_total)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "SUM",
+                  "full_expression": "SUM(o.order_total) AS total_sales"
+                }
+              },
+              {
+                "name": "total_orders",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "total_orders",
+                  "source_expression": "COUNT(DISTINCT o.order_id)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "COUNT",
+                  "full_expression": "COUNT(DISTINCT o.order_id) AS total_orders"
+                }
+              },
+              {
+                "name": "avg_order_value",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "avg_order_value",
+                  "source_expression": "AVG(o.order_total)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "AVG",
+                  "full_expression": "AVG(o.order_total) AS avg_order_value"
+                }
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "categories",
+              "target_table": "CategorySales",
+              "filter_conditions": [
+                {
+                  "type": "FILTER",
+                  "conditions": [
+                    {
+                      "column": "o.order_date",
+                      "operator": ">=",
+                      "value": "DATEADD(YEAR, -1, GETDATE())"
+                    }
+                  ]
+                },
+                {
+                  "type": "GROUP_BY",
+                  "columns": [
+                    "c.category_name",
+                    "p.product_id",
+                    "p.product_name"
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "products": {
+      "entity": "products",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "CategorySales",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "QUERY_RESULT",
+              "entity_type": "table",
+              "depth": 2,
+              "dependencies": [],
+              "metadata": {
+                "table_columns": [],
+                "is_cte": false
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "CategorySales",
+                  "target_table": "QUERY_RESULT",
+                  "filter_conditions": [
+                    {
+                      "type": "FILTER",
+                      "conditions": [
+                        {
+                          "column": "tc.rank",
+                          "operator": "<=",
+                          "value": "3"
+                        }
+                      ]
+                    }
+                  ],
+                  "group_by_columns": [],
+                  "joins": [
+                    {
+                      "join_type": "LEFT JOIN",
+                      "right_table": "TopCustomers",
+                      "conditions": [
+                        {
+                          "left_column": "cs.category_name",
+                          "operator": "=",
+                          "right_column": "tc.category_name"
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "products",
+                      "conditions": [
+                        {
+                          "left_column": "o.product_id",
+                          "operator": "=",
+                          "right_column": "p.product_id"
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "categories",
+                      "conditions": [
+                        {
+                          "left_column": "p.category_id",
+                          "operator": "=",
+                          "right_column": "c.category_id"
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "products",
+                      "conditions": [
+                        {
+                          "left_column": "o.product_id",
+                          "operator": "=",
+                          "right_column": "p.product_id"
+                        }
+                      ]
+                    },
+                    {
+                      "join_type": "INNER JOIN",
+                      "right_table": "categories",
+                      "conditions": [
+                        {
+                          "left_column": "p.category_id",
+                          "operator": "=",
+                          "right_column": "c.category_id"
+                        }
+                      ]
+                    }
+                  ],
+                  "order_by_columns": [
+                    "cs.category_name DESC",
+                    "cs.total_sales DESC"
+                  ]
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "category_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "total_sales",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "total_sales",
+                  "source_expression": "SUM(o.order_total)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "SUM",
+                  "full_expression": "SUM(o.order_total) AS total_sales"
+                }
+              },
+              {
+                "name": "total_orders",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "total_orders",
+                  "source_expression": "COUNT(DISTINCT o.order_id)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "COUNT",
+                  "full_expression": "COUNT(DISTINCT o.order_id) AS total_orders"
+                }
+              },
+              {
+                "name": "avg_order_value",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "avg_order_value",
+                  "source_expression": "AVG(o.order_total)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "AVG",
+                  "full_expression": "AVG(o.order_total) AS avg_order_value"
+                }
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "products",
+              "target_table": "CategorySales",
+              "filter_conditions": [
+                {
+                  "type": "FILTER",
+                  "conditions": [
+                    {
+                      "column": "o.order_date",
+                      "operator": ">=",
+                      "value": "DATEADD(YEAR, -1, GETDATE())"
+                    }
+                  ]
+                },
+                {
+                  "type": "GROUP_BY",
+                  "columns": [
+                    "c.category_name",
+                    "p.product_id",
+                    "p.product_name"
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "TopCustomers": {
+      "entity": "TopCustomers",
+      "entity_type": "cte",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [],
+            "is_cte": false
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "TopCustomers",
+              "target_table": "QUERY_RESULT",
+              "filter_conditions": [],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [
+          {
+            "name": "category_name",
+            "upstream": [],
+            "type": "VARCHAR"
+          },
+          {
+            "name": "customer_id",
+            "upstream": [],
+            "type": "VARCHAR"
+          },
+          {
+            "name": "customer_total",
+            "upstream": [],
+            "type": "VARCHAR"
+          },
+          {
+            "name": "rank",
+            "upstream": [],
+            "type": "VARCHAR"
+          }
+        ],
+        "is_cte": true
+      }
+    }
+  },
+  "summary": {
+    "total_tables": 6,
+    "total_columns": 0,
+    "has_transformations": true,
+    "has_metadata": true,
+    "chain_count": 4
+  },
+  "errors": [],
+  "warnings": []
+}

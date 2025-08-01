@@ -1,0 +1,1414 @@
+{
+  "sql": "\n    CREATE TABLE analytics_summary AS\n    WITH sales_data AS (\n        SELECT \n            o.customer_id,\n            o.product_id,\n            o.order_date,\n            o.order_total,\n            p.product_name,\n            p.category_id,\n            c.category_name,\n            u.name as customer_name,\n            u.region,\n            ROW_NUMBER() OVER (PARTITION BY o.customer_id ORDER BY o.order_date) as order_sequence,\n            SUM(o.order_total) OVER (PARTITION BY o.customer_id ORDER BY o.order_date \n                                   ROWS UNBOUNDED PRECEDING) as running_customer_total,\n            AVG(o.order_total) OVER (PARTITION BY c.category_id) as category_avg_order\n        FROM orders o\n        INNER JOIN products p ON o.product_id = p.product_id\n        INNER JOIN categories c ON p.category_id = c.category_id\n        INNER JOIN users u ON o.customer_id = u.id\n        WHERE o.order_date >= '2023-01-01'\n    ),\n    customer_metrics AS (\n        SELECT \n            customer_id,\n            customer_name,\n            region,\n            COUNT(*) as total_orders,\n            SUM(order_total) as lifetime_value,\n            AVG(order_total) as avg_order_value,\n            MAX(order_date) as last_order_date,\n            COUNT(DISTINCT category_id) as unique_categories,\n            CASE \n                WHEN SUM(order_total) > 10000 THEN 'VIP'\n                WHEN SUM(order_total) > 5000 THEN 'Premium'\n                WHEN SUM(order_total) > 1000 THEN 'Standard'\n                ELSE 'Basic'\n            END as customer_tier,\n            RANK() OVER (PARTITION BY region ORDER BY SUM(order_total) DESC) as region_rank\n        FROM sales_data\n        GROUP BY customer_id, customer_name, region\n    ),\n    category_performance AS (\n        SELECT \n            category_id,\n            category_name,\n            COUNT(DISTINCT customer_id) as unique_customers,\n            SUM(order_total) as category_revenue,\n            AVG(order_total) as avg_category_order,\n            COUNT(*) as total_category_orders\n        FROM sales_data\n        GROUP BY category_id, category_name\n    ),\n    combined_analysis AS (\n        SELECT \n            cm.customer_id,\n            cm.customer_name,\n            cm.region,\n            cm.total_orders,\n            cm.lifetime_value,\n            cm.avg_order_value,\n            cm.customer_tier,\n            cm.region_rank,\n            cp.category_name as top_category,\n            cp.category_revenue,\n            CASE \n                WHEN cm.region_rank <= 5 THEN 'Top Regional Customer'\n                WHEN cm.customer_tier = 'VIP' THEN 'VIP Customer'\n                ELSE 'Regular Customer'\n            END as final_classification\n        FROM customer_metrics cm\n        CROSS JOIN (\n            SELECT category_name, category_revenue,\n                   ROW_NUMBER() OVER (ORDER BY category_revenue DESC) as cat_rank\n            FROM category_performance\n        ) cp\n        WHERE cp.cat_rank = 1  -- Top category only\n    )\n    SELECT \n        customer_id,\n        customer_name,\n        region,\n        total_orders,\n        lifetime_value,\n        ROUND(avg_order_value, 2) as avg_order_value,\n        customer_tier,\n        region_rank,\n        top_category,\n        final_classification,\n        CURRENT_TIMESTAMP as analysis_timestamp\n    FROM combined_analysis\n    WHERE lifetime_value > 500\n    ORDER BY lifetime_value DESC, region_rank ASC\n    ",
+  "dialect": "trino",
+  "chain_type": "downstream",
+  "max_depth": "unlimited",
+  "actual_max_depth": 0,
+  "target_entity": null,
+  "chains": {
+    "orders": {
+      "entity": "orders",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "sales_data",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "customer_metrics",
+              "entity_type": "cte",
+              "depth": 2,
+              "dependencies": [
+                {
+                  "entity": "combined_analysis",
+                  "entity_type": "cte",
+                  "depth": 3,
+                  "dependencies": [
+                    {
+                      "entity": "QUERY_RESULT",
+                      "entity_type": "table",
+                      "depth": 4,
+                      "dependencies": [],
+                      "metadata": {
+                        "table_columns": [],
+                        "is_cte": false
+                      },
+                      "transformations": [
+                        {
+                          "type": "table_transformation",
+                          "source_table": "combined_analysis",
+                          "target_table": "QUERY_RESULT",
+                          "filter_conditions": [
+                            {
+                              "type": "FILTER",
+                              "conditions": [
+                                {
+                                  "column": "lifetime_value",
+                                  "operator": ">",
+                                  "value": "500"
+                                }
+                              ]
+                            }
+                          ],
+                          "group_by_columns": [],
+                          "joins": [
+                            {
+                              "join_type": "INNER JOIN",
+                              "right_table": "products",
+                              "conditions": [
+                                {
+                                  "left_column": "o.product_id",
+                                  "operator": "=",
+                                  "right_column": "p.product_id"
+                                }
+                              ]
+                            },
+                            {
+                              "join_type": "INNER JOIN",
+                              "right_table": "categories",
+                              "conditions": [
+                                {
+                                  "left_column": "p.category_id",
+                                  "operator": "=",
+                                  "right_column": "c.category_id"
+                                }
+                              ]
+                            },
+                            {
+                              "join_type": "INNER JOIN",
+                              "right_table": "users",
+                              "conditions": [
+                                {
+                                  "left_column": "o.customer_id",
+                                  "operator": "=",
+                                  "right_column": "u.id"
+                                }
+                              ]
+                            },
+                            {
+                              "join_type": "CROSS JOIN",
+                              "right_table": "",
+                              "conditions": []
+                            }
+                          ],
+                          "order_by_columns": [
+                            "lifetime_value DESC",
+                            "region_rank DESC"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "metadata": {
+                    "table_columns": [
+                      {
+                        "name": "customer_id",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "customer_name",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "region",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "total_orders",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "lifetime_value",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "avg_order_value",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "customer_tier",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "region_rank",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "top_category",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "category_revenue",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "final_classification",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      }
+                    ],
+                    "is_cte": true
+                  },
+                  "transformations": [
+                    {
+                      "type": "table_transformation",
+                      "source_table": "customer_metrics",
+                      "target_table": "combined_analysis",
+                      "filter_conditions": [],
+                      "group_by_columns": [],
+                      "joins": []
+                    }
+                  ]
+                }
+              ],
+              "metadata": {
+                "table_columns": [
+                  {
+                    "name": "customer_id",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "customer_name",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "region",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "total_orders",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "lifetime_value",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "avg_order_value",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "last_order_date",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "unique_categories",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "customer_tier",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "region_rank",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  }
+                ],
+                "is_cte": true
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "sales_data",
+                  "target_table": "customer_metrics",
+                  "filter_conditions": [
+                    {
+                      "type": "GROUP_BY",
+                      "columns": [
+                        "customer_id",
+                        "customer_name",
+                        "region"
+                      ]
+                    }
+                  ],
+                  "group_by_columns": [],
+                  "joins": []
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "customer_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_date",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_total",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "category_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "category_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "customer_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "region",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_sequence",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "running_customer_total",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "category_avg_order",
+                "upstream": [],
+                "type": "VARCHAR"
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "orders",
+              "target_table": "sales_data",
+              "filter_conditions": [
+                {
+                  "type": "FILTER",
+                  "conditions": [
+                    {
+                      "column": "o.order_date",
+                      "operator": ">=",
+                      "value": "'2023-01-01'"
+                    }
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "categories": {
+      "entity": "categories",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "sales_data",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "customer_metrics",
+              "entity_type": "cte",
+              "depth": 2,
+              "dependencies": [
+                {
+                  "entity": "combined_analysis",
+                  "entity_type": "cte",
+                  "depth": 3,
+                  "dependencies": [
+                    {
+                      "entity": "QUERY_RESULT",
+                      "entity_type": "table",
+                      "depth": 4,
+                      "dependencies": [],
+                      "metadata": {
+                        "table_columns": [],
+                        "is_cte": false
+                      },
+                      "transformations": [
+                        {
+                          "type": "table_transformation",
+                          "source_table": "combined_analysis",
+                          "target_table": "QUERY_RESULT",
+                          "filter_conditions": [
+                            {
+                              "type": "FILTER",
+                              "conditions": [
+                                {
+                                  "column": "lifetime_value",
+                                  "operator": ">",
+                                  "value": "500"
+                                }
+                              ]
+                            }
+                          ],
+                          "group_by_columns": [],
+                          "joins": [
+                            {
+                              "join_type": "INNER JOIN",
+                              "right_table": "products",
+                              "conditions": [
+                                {
+                                  "left_column": "o.product_id",
+                                  "operator": "=",
+                                  "right_column": "p.product_id"
+                                }
+                              ]
+                            },
+                            {
+                              "join_type": "INNER JOIN",
+                              "right_table": "categories",
+                              "conditions": [
+                                {
+                                  "left_column": "p.category_id",
+                                  "operator": "=",
+                                  "right_column": "c.category_id"
+                                }
+                              ]
+                            },
+                            {
+                              "join_type": "INNER JOIN",
+                              "right_table": "users",
+                              "conditions": [
+                                {
+                                  "left_column": "o.customer_id",
+                                  "operator": "=",
+                                  "right_column": "u.id"
+                                }
+                              ]
+                            },
+                            {
+                              "join_type": "CROSS JOIN",
+                              "right_table": "",
+                              "conditions": []
+                            }
+                          ],
+                          "order_by_columns": [
+                            "lifetime_value DESC",
+                            "region_rank DESC"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "metadata": {
+                    "table_columns": [
+                      {
+                        "name": "customer_id",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "customer_name",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "region",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "total_orders",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "lifetime_value",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "avg_order_value",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "customer_tier",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "region_rank",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "top_category",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "category_revenue",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "final_classification",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      }
+                    ],
+                    "is_cte": true
+                  },
+                  "transformations": [
+                    {
+                      "type": "table_transformation",
+                      "source_table": "customer_metrics",
+                      "target_table": "combined_analysis",
+                      "filter_conditions": [],
+                      "group_by_columns": [],
+                      "joins": []
+                    }
+                  ]
+                }
+              ],
+              "metadata": {
+                "table_columns": [
+                  {
+                    "name": "customer_id",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "customer_name",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "region",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "total_orders",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "lifetime_value",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "avg_order_value",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "last_order_date",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "unique_categories",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "customer_tier",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "region_rank",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  }
+                ],
+                "is_cte": true
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "sales_data",
+                  "target_table": "customer_metrics",
+                  "filter_conditions": [
+                    {
+                      "type": "GROUP_BY",
+                      "columns": [
+                        "customer_id",
+                        "customer_name",
+                        "region"
+                      ]
+                    }
+                  ],
+                  "group_by_columns": [],
+                  "joins": []
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "customer_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_date",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_total",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "category_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "category_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "customer_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "region",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_sequence",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "running_customer_total",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "category_avg_order",
+                "upstream": [],
+                "type": "VARCHAR"
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "categories",
+              "target_table": "sales_data",
+              "filter_conditions": [
+                {
+                  "type": "FILTER",
+                  "conditions": [
+                    {
+                      "column": "o.order_date",
+                      "operator": ">=",
+                      "value": "'2023-01-01'"
+                    }
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "products": {
+      "entity": "products",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "sales_data",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "customer_metrics",
+              "entity_type": "cte",
+              "depth": 2,
+              "dependencies": [
+                {
+                  "entity": "combined_analysis",
+                  "entity_type": "cte",
+                  "depth": 3,
+                  "dependencies": [
+                    {
+                      "entity": "QUERY_RESULT",
+                      "entity_type": "table",
+                      "depth": 4,
+                      "dependencies": [],
+                      "metadata": {
+                        "table_columns": [],
+                        "is_cte": false
+                      },
+                      "transformations": [
+                        {
+                          "type": "table_transformation",
+                          "source_table": "combined_analysis",
+                          "target_table": "QUERY_RESULT",
+                          "filter_conditions": [
+                            {
+                              "type": "FILTER",
+                              "conditions": [
+                                {
+                                  "column": "lifetime_value",
+                                  "operator": ">",
+                                  "value": "500"
+                                }
+                              ]
+                            }
+                          ],
+                          "group_by_columns": [],
+                          "joins": [
+                            {
+                              "join_type": "INNER JOIN",
+                              "right_table": "products",
+                              "conditions": [
+                                {
+                                  "left_column": "o.product_id",
+                                  "operator": "=",
+                                  "right_column": "p.product_id"
+                                }
+                              ]
+                            },
+                            {
+                              "join_type": "INNER JOIN",
+                              "right_table": "categories",
+                              "conditions": [
+                                {
+                                  "left_column": "p.category_id",
+                                  "operator": "=",
+                                  "right_column": "c.category_id"
+                                }
+                              ]
+                            },
+                            {
+                              "join_type": "INNER JOIN",
+                              "right_table": "users",
+                              "conditions": [
+                                {
+                                  "left_column": "o.customer_id",
+                                  "operator": "=",
+                                  "right_column": "u.id"
+                                }
+                              ]
+                            },
+                            {
+                              "join_type": "CROSS JOIN",
+                              "right_table": "",
+                              "conditions": []
+                            }
+                          ],
+                          "order_by_columns": [
+                            "lifetime_value DESC",
+                            "region_rank DESC"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "metadata": {
+                    "table_columns": [
+                      {
+                        "name": "customer_id",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "customer_name",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "region",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "total_orders",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "lifetime_value",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "avg_order_value",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "customer_tier",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "region_rank",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "top_category",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "category_revenue",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "final_classification",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      }
+                    ],
+                    "is_cte": true
+                  },
+                  "transformations": [
+                    {
+                      "type": "table_transformation",
+                      "source_table": "customer_metrics",
+                      "target_table": "combined_analysis",
+                      "filter_conditions": [],
+                      "group_by_columns": [],
+                      "joins": []
+                    }
+                  ]
+                }
+              ],
+              "metadata": {
+                "table_columns": [
+                  {
+                    "name": "customer_id",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "customer_name",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "region",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "total_orders",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "lifetime_value",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "avg_order_value",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "last_order_date",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "unique_categories",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "customer_tier",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "region_rank",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  }
+                ],
+                "is_cte": true
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "sales_data",
+                  "target_table": "customer_metrics",
+                  "filter_conditions": [
+                    {
+                      "type": "GROUP_BY",
+                      "columns": [
+                        "customer_id",
+                        "customer_name",
+                        "region"
+                      ]
+                    }
+                  ],
+                  "group_by_columns": [],
+                  "joins": []
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "customer_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_date",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_total",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "category_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "category_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "customer_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "region",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_sequence",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "running_customer_total",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "category_avg_order",
+                "upstream": [],
+                "type": "VARCHAR"
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "products",
+              "target_table": "sales_data",
+              "filter_conditions": [
+                {
+                  "type": "FILTER",
+                  "conditions": [
+                    {
+                      "column": "o.order_date",
+                      "operator": ">=",
+                      "value": "'2023-01-01'"
+                    }
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "users": {
+      "entity": "users",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "sales_data",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "customer_metrics",
+              "entity_type": "cte",
+              "depth": 2,
+              "dependencies": [
+                {
+                  "entity": "combined_analysis",
+                  "entity_type": "cte",
+                  "depth": 3,
+                  "dependencies": [
+                    {
+                      "entity": "QUERY_RESULT",
+                      "entity_type": "table",
+                      "depth": 4,
+                      "dependencies": [],
+                      "metadata": {
+                        "table_columns": [],
+                        "is_cte": false
+                      },
+                      "transformations": [
+                        {
+                          "type": "table_transformation",
+                          "source_table": "combined_analysis",
+                          "target_table": "QUERY_RESULT",
+                          "filter_conditions": [
+                            {
+                              "type": "FILTER",
+                              "conditions": [
+                                {
+                                  "column": "lifetime_value",
+                                  "operator": ">",
+                                  "value": "500"
+                                }
+                              ]
+                            }
+                          ],
+                          "group_by_columns": [],
+                          "joins": [
+                            {
+                              "join_type": "INNER JOIN",
+                              "right_table": "products",
+                              "conditions": [
+                                {
+                                  "left_column": "o.product_id",
+                                  "operator": "=",
+                                  "right_column": "p.product_id"
+                                }
+                              ]
+                            },
+                            {
+                              "join_type": "INNER JOIN",
+                              "right_table": "categories",
+                              "conditions": [
+                                {
+                                  "left_column": "p.category_id",
+                                  "operator": "=",
+                                  "right_column": "c.category_id"
+                                }
+                              ]
+                            },
+                            {
+                              "join_type": "INNER JOIN",
+                              "right_table": "users",
+                              "conditions": [
+                                {
+                                  "left_column": "o.customer_id",
+                                  "operator": "=",
+                                  "right_column": "u.id"
+                                }
+                              ]
+                            },
+                            {
+                              "join_type": "CROSS JOIN",
+                              "right_table": "",
+                              "conditions": []
+                            }
+                          ],
+                          "order_by_columns": [
+                            "lifetime_value DESC",
+                            "region_rank DESC"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "metadata": {
+                    "table_columns": [
+                      {
+                        "name": "customer_id",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "customer_name",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "region",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "total_orders",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "lifetime_value",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "avg_order_value",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "customer_tier",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "region_rank",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "top_category",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "category_revenue",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      },
+                      {
+                        "name": "final_classification",
+                        "upstream": [],
+                        "type": "VARCHAR"
+                      }
+                    ],
+                    "is_cte": true
+                  },
+                  "transformations": [
+                    {
+                      "type": "table_transformation",
+                      "source_table": "customer_metrics",
+                      "target_table": "combined_analysis",
+                      "filter_conditions": [],
+                      "group_by_columns": [],
+                      "joins": []
+                    }
+                  ]
+                }
+              ],
+              "metadata": {
+                "table_columns": [
+                  {
+                    "name": "customer_id",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "customer_name",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "region",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "total_orders",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "lifetime_value",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "avg_order_value",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "last_order_date",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "unique_categories",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "customer_tier",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "region_rank",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  }
+                ],
+                "is_cte": true
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "sales_data",
+                  "target_table": "customer_metrics",
+                  "filter_conditions": [
+                    {
+                      "type": "GROUP_BY",
+                      "columns": [
+                        "customer_id",
+                        "customer_name",
+                        "region"
+                      ]
+                    }
+                  ],
+                  "group_by_columns": [],
+                  "joins": []
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "customer_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_date",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_total",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "product_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "category_id",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "category_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "customer_name",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "region",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "order_sequence",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "running_customer_total",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "category_avg_order",
+                "upstream": [],
+                "type": "VARCHAR"
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "users",
+              "target_table": "sales_data",
+              "filter_conditions": [],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "category_performance": {
+      "entity": "category_performance",
+      "entity_type": "cte",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [],
+            "is_cte": false
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "category_performance",
+              "target_table": "QUERY_RESULT",
+              "filter_conditions": [],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [
+          {
+            "name": "category_id",
+            "upstream": [],
+            "type": "VARCHAR"
+          },
+          {
+            "name": "category_name",
+            "upstream": [],
+            "type": "VARCHAR"
+          },
+          {
+            "name": "unique_customers",
+            "upstream": [],
+            "type": "VARCHAR"
+          },
+          {
+            "name": "category_revenue",
+            "upstream": [],
+            "type": "VARCHAR"
+          },
+          {
+            "name": "avg_category_order",
+            "upstream": [],
+            "type": "VARCHAR"
+          },
+          {
+            "name": "total_category_orders",
+            "upstream": [],
+            "type": "VARCHAR"
+          }
+        ],
+        "is_cte": true
+      }
+    }
+  },
+  "summary": {
+    "total_tables": 9,
+    "total_columns": 0,
+    "has_transformations": true,
+    "has_metadata": true,
+    "chain_count": 5
+  },
+  "errors": [],
+  "warnings": []
+}

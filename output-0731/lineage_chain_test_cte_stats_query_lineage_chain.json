@@ -1,0 +1,601 @@
+{
+  "sql": "\n    WITH total_cols AS (\n        SELECT\n            TABNAME,\n            COUNT(*) as TOTAL_COLUMNS\n        FROM maximo_dev.SYSCAT.COLUMNS\n        WHERE TABSCHEMA = 'MAXIMO'\n        GROUP BY TABNAME\n    ),\n    syscat_stats AS (\n        SELECT\n            TABNAME,\n            COUNT(*) as SYSCAT_STATS_COLUMNS\n        FROM maximo_dev.SYSCAT.COLUMNS\n        WHERE TABSCHEMA = 'MAXIMO'\n          AND (COLCARD IS NOT NULL AND COLCARD >= 0)\n        GROUP BY TABNAME\n    ),\n    sysstat_stats AS (\n        SELECT\n            TABNAME,\n            COUNT(*) as SYSSTAT_STATS_COLUMNS\n        FROM maximo_dev.SYSSTAT.COLUMNS\n        WHERE TABSCHEMA = 'MAXIMO'\n          AND (COLCARD IS NOT NULL AND COLCARD >= 0)\n        GROUP BY TABNAME\n    ),\n    stats_summary AS (\n        SELECT\n            t.TABNAME,\n            t.TOTAL_COLUMNS,\n            COALESCE(sc.SYSCAT_STATS_COLUMNS, 0) as SYSCAT_STATS_COLUMNS,\n            COALESCE(ss.SYSSTAT_STATS_COLUMNS, 0) as SYSSTAT_STATS_COLUMNS,\n            ROUND((COALESCE(sc.SYSCAT_STATS_COLUMNS, 0) * 100.0 / t.TOTAL_COLUMNS), 2) as SYSCAT_COVERAGE_PCT,\n            ROUND((COALESCE(ss.SYSSTAT_STATS_COLUMNS, 0) * 100.0 / t.TOTAL_COLUMNS), 2) as SYSSTAT_COVERAGE_PCT\n        FROM total_cols t\n        LEFT JOIN syscat_stats sc ON t.TABNAME = sc.TABNAME\n        LEFT JOIN sysstat_stats ss ON t.TABNAME = ss.TABNAME\n    )\n    SELECT\n        COUNT(*) as TOTAL_TABLES,\n        SUM(TOTAL_COLUMNS) as TOTAL_COLUMNS_ALL_TABLES,\n        SUM(SYSCAT_STATS_COLUMNS) as TOTAL_SYSCAT_STATS,\n        SUM(SYSSTAT_STATS_COLUMNS) as TOTAL_SYSSTAT_STATS,\n        ROUND(AVG(SYSCAT_COVERAGE_PCT), 2) as AVG_SYSCAT_COVERAGE,\n        ROUND(AVG(SYSSTAT_COVERAGE_PCT), 2) as AVG_SYSSTAT_COVERAGE\n    FROM stats_summary\n    ",
+  "dialect": "trino",
+  "chain_type": "downstream",
+  "max_depth": "unlimited",
+  "actual_max_depth": 0,
+  "target_entity": null,
+  "chains": {
+    "COLUMNS": {
+      "entity": "COLUMNS",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "total_cols",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "stats_summary",
+              "entity_type": "cte",
+              "depth": 2,
+              "dependencies": [
+                {
+                  "entity": "QUERY_RESULT",
+                  "entity_type": "table",
+                  "depth": 3,
+                  "dependencies": [],
+                  "metadata": {
+                    "table_columns": [],
+                    "is_cte": false
+                  },
+                  "transformations": [
+                    {
+                      "type": "table_transformation",
+                      "source_table": "stats_summary",
+                      "target_table": "QUERY_RESULT",
+                      "filter_conditions": [],
+                      "group_by_columns": [],
+                      "joins": [
+                        {
+                          "join_type": "LEFT JOIN",
+                          "right_table": "syscat_stats",
+                          "conditions": [
+                            {
+                              "left_column": "t.TABNAME",
+                              "operator": "=",
+                              "right_column": "sc.TABNAME"
+                            }
+                          ]
+                        },
+                        {
+                          "join_type": "LEFT JOIN",
+                          "right_table": "sysstat_stats",
+                          "conditions": [
+                            {
+                              "left_column": "t.TABNAME",
+                              "operator": "=",
+                              "right_column": "ss.TABNAME"
+                            }
+                          ]
+                        }
+                      ],
+                      "aggregate_functions": [
+                        {
+                          "function": "COUNT",
+                          "column": "*",
+                          "distinct": false
+                        },
+                        {
+                          "function": "SUM",
+                          "column": "TOTAL_COLUMNS",
+                          "distinct": false
+                        },
+                        {
+                          "function": "SUM",
+                          "column": "SYSCAT_STATS_COLUMNS",
+                          "distinct": false
+                        },
+                        {
+                          "function": "SUM",
+                          "column": "SYSSTAT_STATS_COLUMNS",
+                          "distinct": false
+                        },
+                        {
+                          "function": "AVG",
+                          "column": "SYSCAT_COVERAGE_PCT",
+                          "distinct": false
+                        },
+                        {
+                          "function": "AVG",
+                          "column": "SYSSTAT_COVERAGE_PCT",
+                          "distinct": false
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "metadata": {
+                "table_columns": [
+                  {
+                    "name": "TABNAME",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "TOTAL_COLUMNS",
+                    "upstream": [],
+                    "type": "VARCHAR"
+                  },
+                  {
+                    "name": "SYSCAT_STATS_COLUMNS",
+                    "upstream": [],
+                    "type": "VARCHAR",
+                    "transformation": {
+                      "column_name": "SYSCAT_STATS_COLUMNS",
+                      "source_expression": "COALESCE(sc.SYSCAT_STATS_COLUMNS, 0)",
+                      "transformation_type": "COMPUTED",
+                      "function_type": "COALESCE",
+                      "full_expression": "COALESCE(sc.SYSCAT_STATS_COLUMNS, 0) AS SYSCAT_STATS_COLUMNS"
+                    }
+                  },
+                  {
+                    "name": "SYSSTAT_STATS_COLUMNS",
+                    "upstream": [],
+                    "type": "VARCHAR",
+                    "transformation": {
+                      "column_name": "SYSSTAT_STATS_COLUMNS",
+                      "source_expression": "COALESCE(ss.SYSSTAT_STATS_COLUMNS, 0)",
+                      "transformation_type": "COMPUTED",
+                      "function_type": "COALESCE",
+                      "full_expression": "COALESCE(ss.SYSSTAT_STATS_COLUMNS, 0) AS SYSSTAT_STATS_COLUMNS"
+                    }
+                  },
+                  {
+                    "name": "SYSCAT_COVERAGE_PCT",
+                    "upstream": [],
+                    "type": "VARCHAR",
+                    "transformation": {
+                      "column_name": "SYSCAT_COVERAGE_PCT",
+                      "source_expression": "ROUND((COALESCE(sc.SYSCAT_STATS_COLUMNS, 0) * 100.0 / t.TOTAL_COLUMNS), 2)",
+                      "transformation_type": "COMPUTED",
+                      "function_type": "ROUND",
+                      "full_expression": "ROUND((COALESCE(sc.SYSCAT_STATS_COLUMNS, 0) * 100.0 / t.TOTAL_COLUMNS), 2) AS SYSCAT_COVERAGE_PCT"
+                    }
+                  },
+                  {
+                    "name": "SYSSTAT_COVERAGE_PCT",
+                    "upstream": [],
+                    "type": "VARCHAR",
+                    "transformation": {
+                      "column_name": "SYSSTAT_COVERAGE_PCT",
+                      "source_expression": "ROUND((COALESCE(ss.SYSSTAT_STATS_COLUMNS, 0) * 100.0 / t.TOTAL_COLUMNS), 2)",
+                      "transformation_type": "COMPUTED",
+                      "function_type": "ROUND",
+                      "full_expression": "ROUND((COALESCE(ss.SYSSTAT_STATS_COLUMNS, 0) * 100.0 / t.TOTAL_COLUMNS), 2) AS SYSSTAT_COVERAGE_PCT"
+                    }
+                  }
+                ],
+                "is_cte": true
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "total_cols",
+                  "target_table": "stats_summary",
+                  "filter_conditions": [],
+                  "group_by_columns": [],
+                  "joins": []
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "TABNAME",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "TOTAL_COLUMNS",
+                "upstream": [],
+                "type": "VARCHAR",
+                "transformation": {
+                  "column_name": "TOTAL_COLUMNS",
+                  "source_expression": "COUNT(*)",
+                  "transformation_type": "COMPUTED",
+                  "function_type": "COUNT",
+                  "full_expression": "COUNT(*) AS TOTAL_COLUMNS"
+                }
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "COLUMNS",
+              "target_table": "total_cols",
+              "filter_conditions": [
+                {
+                  "type": "FILTER",
+                  "conditions": [
+                    {
+                      "column": "TABSCHEMA",
+                      "operator": "=",
+                      "value": "'MAXIMO'"
+                    }
+                  ]
+                },
+                {
+                  "type": "GROUP_BY",
+                  "columns": [
+                    "TABNAME"
+                  ]
+                }
+              ],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "maximo_dev.SYSSTAT.COLUMNS": {
+      "entity": "maximo_dev.SYSSTAT.COLUMNS",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [],
+            "is_cte": false
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "maximo_dev.SYSSTAT.COLUMNS",
+              "target_table": "QUERY_RESULT",
+              "filter_conditions": [],
+              "group_by_columns": [],
+              "joins": [
+                {
+                  "join_type": "LEFT JOIN",
+                  "right_table": "syscat_stats",
+                  "conditions": [
+                    {
+                      "left_column": "t.TABNAME",
+                      "operator": "=",
+                      "right_column": "sc.TABNAME"
+                    }
+                  ]
+                },
+                {
+                  "join_type": "LEFT JOIN",
+                  "right_table": "sysstat_stats",
+                  "conditions": [
+                    {
+                      "left_column": "t.TABNAME",
+                      "operator": "=",
+                      "right_column": "ss.TABNAME"
+                    }
+                  ]
+                }
+              ],
+              "aggregate_functions": [
+                {
+                  "function": "COUNT",
+                  "column": "*",
+                  "distinct": false
+                },
+                {
+                  "function": "SUM",
+                  "column": "TOTAL_COLUMNS",
+                  "distinct": false
+                },
+                {
+                  "function": "SUM",
+                  "column": "SYSCAT_STATS_COLUMNS",
+                  "distinct": false
+                },
+                {
+                  "function": "SUM",
+                  "column": "SYSSTAT_STATS_COLUMNS",
+                  "distinct": false
+                },
+                {
+                  "function": "AVG",
+                  "column": "SYSCAT_COVERAGE_PCT",
+                  "distinct": false
+                },
+                {
+                  "function": "AVG",
+                  "column": "SYSSTAT_COVERAGE_PCT",
+                  "distinct": false
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "maximo_dev.SYSCAT.COLUMNS": {
+      "entity": "maximo_dev.SYSCAT.COLUMNS",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [],
+            "is_cte": false
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "maximo_dev.SYSCAT.COLUMNS",
+              "target_table": "QUERY_RESULT",
+              "filter_conditions": [],
+              "group_by_columns": [],
+              "joins": [
+                {
+                  "join_type": "LEFT JOIN",
+                  "right_table": "syscat_stats",
+                  "conditions": [
+                    {
+                      "left_column": "t.TABNAME",
+                      "operator": "=",
+                      "right_column": "sc.TABNAME"
+                    }
+                  ]
+                },
+                {
+                  "join_type": "LEFT JOIN",
+                  "right_table": "sysstat_stats",
+                  "conditions": [
+                    {
+                      "left_column": "t.TABNAME",
+                      "operator": "=",
+                      "right_column": "ss.TABNAME"
+                    }
+                  ]
+                }
+              ],
+              "aggregate_functions": [
+                {
+                  "function": "COUNT",
+                  "column": "*",
+                  "distinct": false
+                },
+                {
+                  "function": "SUM",
+                  "column": "TOTAL_COLUMNS",
+                  "distinct": false
+                },
+                {
+                  "function": "SUM",
+                  "column": "SYSCAT_STATS_COLUMNS",
+                  "distinct": false
+                },
+                {
+                  "function": "SUM",
+                  "column": "SYSSTAT_STATS_COLUMNS",
+                  "distinct": false
+                },
+                {
+                  "function": "AVG",
+                  "column": "SYSCAT_COVERAGE_PCT",
+                  "distinct": false
+                },
+                {
+                  "function": "AVG",
+                  "column": "SYSSTAT_COVERAGE_PCT",
+                  "distinct": false
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [],
+        "is_cte": false
+      }
+    },
+    "syscat_stats": {
+      "entity": "syscat_stats",
+      "entity_type": "cte",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "stats_summary",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "QUERY_RESULT",
+              "entity_type": "table",
+              "depth": 2,
+              "dependencies": [],
+              "metadata": {
+                "table_columns": [],
+                "is_cte": false
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "stats_summary",
+                  "target_table": "QUERY_RESULT",
+                  "filter_conditions": [],
+                  "group_by_columns": [],
+                  "joins": []
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "TABNAME",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "TOTAL_COLUMNS",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "SYSCAT_STATS_COLUMNS",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "SYSSTAT_STATS_COLUMNS",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "SYSCAT_COVERAGE_PCT",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "SYSSTAT_COVERAGE_PCT",
+                "upstream": [],
+                "type": "VARCHAR"
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "syscat_stats",
+              "target_table": "stats_summary",
+              "filter_conditions": [],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [
+          {
+            "name": "TABNAME",
+            "upstream": [],
+            "type": "VARCHAR"
+          },
+          {
+            "name": "SYSCAT_STATS_COLUMNS",
+            "upstream": [],
+            "type": "VARCHAR"
+          }
+        ],
+        "is_cte": true
+      }
+    },
+    "sysstat_stats": {
+      "entity": "sysstat_stats",
+      "entity_type": "cte",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "stats_summary",
+          "entity_type": "cte",
+          "depth": 1,
+          "dependencies": [
+            {
+              "entity": "QUERY_RESULT",
+              "entity_type": "table",
+              "depth": 2,
+              "dependencies": [],
+              "metadata": {
+                "table_columns": [],
+                "is_cte": false
+              },
+              "transformations": [
+                {
+                  "type": "table_transformation",
+                  "source_table": "stats_summary",
+                  "target_table": "QUERY_RESULT",
+                  "filter_conditions": [],
+                  "group_by_columns": [],
+                  "joins": []
+                }
+              ]
+            }
+          ],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "TABNAME",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "TOTAL_COLUMNS",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "SYSCAT_STATS_COLUMNS",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "SYSSTAT_STATS_COLUMNS",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "SYSCAT_COVERAGE_PCT",
+                "upstream": [],
+                "type": "VARCHAR"
+              },
+              {
+                "name": "SYSSTAT_COVERAGE_PCT",
+                "upstream": [],
+                "type": "VARCHAR"
+              }
+            ],
+            "is_cte": true
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "sysstat_stats",
+              "target_table": "stats_summary",
+              "filter_conditions": [],
+              "group_by_columns": [],
+              "joins": []
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_columns": [
+          {
+            "name": "TABNAME",
+            "upstream": [],
+            "type": "VARCHAR"
+          },
+          {
+            "name": "SYSSTAT_STATS_COLUMNS",
+            "upstream": [],
+            "type": "VARCHAR"
+          }
+        ],
+        "is_cte": true
+      }
+    }
+  },
+  "summary": {
+    "total_tables": 7,
+    "total_columns": 0,
+    "has_transformations": true,
+    "has_metadata": false,
+    "chain_count": 5
+  },
+  "errors": [],
+  "warnings": []
+}

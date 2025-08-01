@@ -1,0 +1,151 @@
+{
+  "sql": "\n         SELECT 'user' as type, id, name as identifier FROM users WHERE age > 25\n         UNION ALL\n         SELECT 'product' as type, product_id as id, product_name as identifier FROM products WHERE price > 100\n         UNION ALL\n         SELECT 'category' as type, category_id as id, category_name as identifier FROM categories\n         ",
+  "dialect": "trino",
+  "chain_type": "downstream",
+  "max_depth": "unlimited",
+  "actual_max_depth": 1,
+  "target_entity": null,
+  "chains": {
+    "categories": {
+      "entity": "categories",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "type",
+                "upstream": [
+                  "users.type"
+                ],
+                "type": "DIRECT"
+              },
+              {
+                "name": "id",
+                "upstream": [
+                  "users.id"
+                ],
+                "type": "DIRECT"
+              },
+              {
+                "name": "identifier",
+                "upstream": [
+                  "users.identifier"
+                ],
+                "type": "DIRECT"
+              }
+            ]
+          }
+        }
+      ],
+      "metadata": {
+        "table_type": "TABLE",
+        "schema": "default",
+        "description": "Product categories",
+        "table_columns": []
+      }
+    },
+    "products": {
+      "entity": "products",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "type",
+                "upstream": [
+                  "users.type"
+                ],
+                "type": "DIRECT"
+              },
+              {
+                "name": "id",
+                "upstream": [
+                  "users.id"
+                ],
+                "type": "DIRECT"
+              },
+              {
+                "name": "identifier",
+                "upstream": [
+                  "users.identifier"
+                ],
+                "type": "DIRECT"
+              }
+            ]
+          }
+        }
+      ],
+      "metadata": {
+        "table_type": "TABLE",
+        "schema": "default",
+        "description": "Product catalog",
+        "table_columns": []
+      }
+    },
+    "users": {
+      "entity": "users",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "type",
+                "upstream": [
+                  "users.type"
+                ],
+                "type": "DIRECT"
+              },
+              {
+                "name": "id",
+                "upstream": [
+                  "users.id"
+                ],
+                "type": "DIRECT"
+              },
+              {
+                "name": "identifier",
+                "upstream": [
+                  "users.identifier"
+                ],
+                "type": "DIRECT"
+              }
+            ]
+          }
+        }
+      ],
+      "metadata": {
+        "table_type": "TABLE",
+        "schema": "default",
+        "description": "User profile information",
+        "table_columns": []
+      }
+    }
+  },
+  "summary": {
+    "total_tables": 4,
+    "total_columns": 0,
+    "has_transformations": false,
+    "has_metadata": true,
+    "chain_count": 3
+  },
+  "errors": [],
+  "warnings": []
+}

@@ -1,0 +1,193 @@
+{
+  "sql": "\n         SELECT \n             customer_id,\n             order_date,\n             order_total,\n             ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date) as order_sequence,\n             SUM(order_total) OVER (PARTITION BY customer_id ORDER BY order_date \n                                   ROWS UNBOUNDED PRECEDING) as running_total,\n             LAG(order_total) OVER (PARTITION BY customer_id ORDER BY order_date) as prev_order_total,\n             RANK() OVER (ORDER BY order_total DESC) as order_rank\n         FROM orders\n         WHERE order_date >= '2023-01-01'\n         ",
+  "dialect": "trino",
+  "chain_type": "downstream",
+  "max_depth": "unlimited",
+  "actual_max_depth": 1,
+  "target_entity": null,
+  "chains": {
+    "orders": {
+      "entity": "orders",
+      "entity_type": "table",
+      "depth": 0,
+      "dependencies": [
+        {
+          "entity": "QUERY_RESULT",
+          "entity_type": "table",
+          "depth": 1,
+          "dependencies": [],
+          "metadata": {
+            "table_columns": [
+              {
+                "name": "customer_id",
+                "upstream": [
+                  "QUERY_RESULT.customer_id",
+                  "QUERY_RESULT.running_total",
+                  "QUERY_RESULT.order_sequence",
+                  "QUERY_RESULT.prev_order_total"
+                ],
+                "type": "DIRECT"
+              },
+              {
+                "name": "order_date",
+                "upstream": [
+                  "QUERY_RESULT.running_total",
+                  "QUERY_RESULT.order_date",
+                  "QUERY_RESULT.order_sequence",
+                  "QUERY_RESULT.prev_order_total"
+                ],
+                "type": "DIRECT"
+              },
+              {
+                "name": "order_total",
+                "upstream": [
+                  "QUERY_RESULT.order_total",
+                  "QUERY_RESULT.running_total",
+                  "QUERY_RESULT.prev_order_total",
+                  "QUERY_RESULT.order_rank"
+                ],
+                "type": "DIRECT"
+              },
+              {
+                "name": "order_sequence",
+                "upstream": [
+                  "orders.order_sequence"
+                ],
+                "type": "DIRECT",
+                "transformation": {
+                  "source_expression": "ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date NULLS LAST)",
+                  "transformation_type": "WINDOW_FUNCTION",
+                  "function_type": "ROW_NUMBER"
+                }
+              },
+              {
+                "name": "running_total",
+                "upstream": [
+                  "orders.running_total"
+                ],
+                "type": "DIRECT",
+                "transformation": {
+                  "source_expression": "SUM(order_total) OVER (PARTITION BY customer_id ORDER BY order_date NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "SUM"
+                }
+              },
+              {
+                "name": "prev_order_total",
+                "upstream": [
+                  "orders.prev_order_total"
+                ],
+                "type": "DIRECT",
+                "transformation": {
+                  "source_expression": "LAG(order_total) OVER (PARTITION BY customer_id ORDER BY order_date NULLS LAST)",
+                  "transformation_type": "AGGREGATE",
+                  "function_type": "LAG"
+                }
+              },
+              {
+                "name": "order_rank",
+                "upstream": [
+                  "orders.order_rank"
+                ],
+                "type": "DIRECT",
+                "transformation": {
+                  "source_expression": "RANK() OVER (ORDER BY order_total DESC)",
+                  "transformation_type": "WINDOW_FUNCTION",
+                  "function_type": "RANK"
+                }
+              }
+            ]
+          },
+          "transformations": [
+            {
+              "type": "table_transformation",
+              "source_table": "orders",
+              "target_table": "QUERY_RESULT",
+              "filter_conditions": [
+                {
+                  "column": "order_date",
+                  "operator": ">=",
+                  "value": "'2023-01-01'"
+                }
+              ],
+              "order_by_columns": [
+                "order_date NULLS LAST"
+              ]
+            }
+          ]
+        }
+      ],
+      "metadata": {
+        "table_type": "TABLE",
+        "schema": "default",
+        "description": "Customer order transactions",
+        "table_columns": [
+          {
+            "name": "order_date",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "customer_id",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "order_total",
+            "upstream": [],
+            "type": "SOURCE"
+          },
+          {
+            "name": "order_sequence",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date NULLS LAST)",
+              "transformation_type": "WINDOW_FUNCTION",
+              "function_type": "ROW_NUMBER"
+            }
+          },
+          {
+            "name": "running_total",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "SUM(order_total) OVER (PARTITION BY customer_id ORDER BY order_date NULLS LAST ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "SUM"
+            }
+          },
+          {
+            "name": "prev_order_total",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "LAG(order_total) OVER (PARTITION BY customer_id ORDER BY order_date NULLS LAST)",
+              "transformation_type": "AGGREGATE",
+              "function_type": "LAG"
+            }
+          },
+          {
+            "name": "order_rank",
+            "upstream": [],
+            "type": "RESULT",
+            "transformation": {
+              "source_expression": "RANK() OVER (ORDER BY order_total DESC)",
+              "transformation_type": "WINDOW_FUNCTION",
+              "function_type": "RANK"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "summary": {
+    "total_tables": 2,
+    "total_columns": 4,
+    "has_transformations": true,
+    "has_metadata": true,
+    "chain_count": 1
+  },
+  "errors": [],
+  "warnings": []
+}
