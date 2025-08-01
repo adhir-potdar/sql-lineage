@@ -11,6 +11,11 @@ from .base_analyzer import BaseAnalyzer
 class LineageChainBuilder(BaseAnalyzer):
     """Analyzer for building lineage chains."""
     
+    def __init__(self, dialect: str = "trino", main_analyzer=None):
+        """Initialize lineage chain builder with optional reference to main analyzer."""
+        super().__init__(dialect)
+        self.main_analyzer = main_analyzer
+    
     def get_table_lineage_chain(self, sql: str, chain_type: str = "upstream", depth: int = 1, **kwargs) -> Dict[str, Any]:
         """
         Get the table lineage chain for a SQL query with specified direction and depth.
@@ -382,7 +387,7 @@ class LineageChainBuilder(BaseAnalyzer):
         """Build lineage chain for CTE queries with proper single-flow chains."""
         # Import and create CTE analyzer
         from .cte_analyzer import CTEAnalyzer
-        cte_analyzer = CTEAnalyzer(self.dialect)
+        cte_analyzer = CTEAnalyzer(self.dialect, main_analyzer=self.main_analyzer)
         return cte_analyzer.build_cte_lineage_chain(sql, chain_type, depth, target_entity, **kwargs)
 
     def _calculate_max_depth(self, chains: Dict[str, Any]) -> int:

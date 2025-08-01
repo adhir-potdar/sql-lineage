@@ -1,11 +1,17 @@
 """CTE (Common Table Expression) analyzer."""
 
 from typing import Dict, Any, List, Optional
+import sqlglot
 from .base_analyzer import BaseAnalyzer
 
 
 class CTEAnalyzer(BaseAnalyzer):
     """Analyzer for CTE statements."""
+    
+    def __init__(self, dialect: str = "trino", main_analyzer=None):
+        """Initialize CTE analyzer with optional reference to main analyzer."""
+        super().__init__(dialect)
+        self.main_analyzer = main_analyzer
     
     def analyze_cte(self, sql: str) -> Dict[str, Any]:
         """Analyze CTE statement."""
@@ -31,7 +37,7 @@ class CTEAnalyzer(BaseAnalyzer):
         execution_order = cte_lineage.get('execution_order', [])
         
         # Also get standard table/column lineage for base tables and final result
-        result = self.extractor.analyze(sql, **kwargs)
+        result = self.main_analyzer.analyze(sql, **kwargs)
         table_lineage_data = result.table_lineage.upstream if chain_type == "upstream" else result.table_lineage.downstream
         
         # Build chains dictionary

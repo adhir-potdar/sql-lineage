@@ -50,10 +50,10 @@ class SQLLineageAnalyzer:
         self.select_analyzer = SelectAnalyzer(dialect)
         self.insert_analyzer = InsertAnalyzer(dialect)
         self.update_analyzer = UpdateAnalyzer(dialect)
-        self.cte_analyzer = CTEAnalyzer(dialect)
+        self.cte_analyzer = CTEAnalyzer(dialect, main_analyzer=self)
         self.ctas_analyzer = CTASAnalyzer(dialect)
         self.transformation_analyzer = TransformationAnalyzer(dialect)
-        self.lineage_chain_builder = LineageChainBuilder(dialect)
+        self.lineage_chain_builder = LineageChainBuilder(dialect, main_analyzer=self)
     
     def analyze_comprehensive(self, sql: str) -> Dict[str, Any]:
         """
