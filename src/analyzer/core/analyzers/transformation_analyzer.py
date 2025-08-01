@@ -11,6 +11,53 @@ class TransformationAnalyzer(BaseAnalyzer):
         """Parse transformations using modular parser.""" 
         return self.transformation_parser.parse(sql)
     
+    def extract_filter_transformations(self, sql: str) -> List[Dict]:
+        """Extract filter transformations from WHERE clause."""
+        import re
+        
+        transformations = []
+        
+        # Simple extraction of WHERE conditions
+        where_match = re.search(r'WHERE\s+(.*?)(?:\s+GROUP\s+BY|\s+ORDER\s+BY|\s+LIMIT|\s*$)', sql, re.IGNORECASE | re.DOTALL)
+        if where_match:
+            where_clause = where_match.group(1).strip()
+            
+            # Simple pattern matching for common conditions
+            # Pattern: column operator value
+            condition_patterns = [
+                r'(\w+)\s*(>|<|>=|<=|=|!=)\s*([^\s]+)',
+                r'(\w+\.\w+)\s*(>|<|>=|<=|=|!=)\s*([^\s]+)'
+            ]
+            
+            filter_conditions = []
+            for pattern in condition_patterns:
+                matches = re.findall(pattern, where_clause, re.IGNORECASE)
+                for match in matches:
+                    column, operator, value = match
+                    # Clean up the value (remove quotes)
+                    clean_value = value.strip().strip("'").strip('"')
+                    
+                    filter_conditions.append({
+                        "column": column.split('.')[-1],  # Remove table prefix
+                        "operator": operator,
+                        "value": clean_value
+                    })
+            
+            if filter_conditions:
+                # Try to infer source and target tables from SQL
+                from_match = re.search(r'FROM\s+(\w+)', sql, re.IGNORECASE)
+                source_table = from_match.group(1) if from_match else "unknown"
+                
+                transformation = {
+                    "type": "table_transformation",
+                    "source_table": source_table,
+                    "target_table": "QUERY_RESULT",
+                    "filter_conditions": filter_conditions
+                }
+                transformations.append(transformation)
+        
+        return transformations
+    
     def _build_select_lineage(self, select_data: Dict[str, Any], transformation_data: Dict[str, Any]) -> Dict[str, Any]:
         """Build lineage chain for SELECT statement."""
         lineage = {

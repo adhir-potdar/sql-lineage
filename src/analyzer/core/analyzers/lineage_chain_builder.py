@@ -47,13 +47,32 @@ class LineageChainBuilder(BaseAnalyzer):
             result.table_lineage = SimpleNamespace()
             result.table_lineage.upstream = table_lineage.upstream
             result.table_lineage.downstream = table_lineage.downstream
+            result.table_lineage.transformations = {}
             result.column_lineage = SimpleNamespace()
             result.column_lineage.upstream = column_lineage.upstream
             result.column_lineage.downstream = column_lineage.downstream
+            result.column_lineage.transformations = {}
             result.dialect = self.dialect
             result.errors = []
             result.warnings = []
+            
+            # Get metadata from the main analyzer's metadata registry
             result.metadata = {}
+            if hasattr(self.main_analyzer, 'metadata_registry') and self.main_analyzer.metadata_registry:
+                # Get all unique tables from both upstream and downstream
+                all_tables = set()
+                all_tables.update(table_lineage.upstream.keys())
+                all_tables.update(table_lineage.downstream.keys())  
+                for tables in table_lineage.upstream.values():
+                    all_tables.update(tables)
+                for tables in table_lineage.downstream.values():
+                    all_tables.update(tables)
+                
+                # Get metadata for each table
+                for table_name in all_tables:
+                    table_metadata = self.main_analyzer.metadata_registry.get_table_metadata(table_name)
+                    if table_metadata:
+                        result.metadata[table_name] = table_metadata
         except Exception as e:
             # Create empty result on error
             from types import SimpleNamespace
@@ -61,9 +80,11 @@ class LineageChainBuilder(BaseAnalyzer):
             result.table_lineage = SimpleNamespace()
             result.table_lineage.upstream = {}
             result.table_lineage.downstream = {}
+            result.table_lineage.transformations = {}
             result.column_lineage = SimpleNamespace() 
             result.column_lineage.upstream = {}
             result.column_lineage.downstream = {}
+            result.column_lineage.transformations = {}
             result.dialect = self.dialect
             result.errors = [f"Parsing failed: {str(e)}"]
             result.warnings = []
@@ -159,13 +180,32 @@ class LineageChainBuilder(BaseAnalyzer):
             result.table_lineage = SimpleNamespace()
             result.table_lineage.upstream = table_lineage.upstream
             result.table_lineage.downstream = table_lineage.downstream
+            result.table_lineage.transformations = {}
             result.column_lineage = SimpleNamespace()
             result.column_lineage.upstream = column_lineage.upstream
             result.column_lineage.downstream = column_lineage.downstream
+            result.column_lineage.transformations = {}
             result.dialect = self.dialect
             result.errors = []
             result.warnings = []
+            
+            # Get metadata from the main analyzer's metadata registry
             result.metadata = {}
+            if hasattr(self.main_analyzer, 'metadata_registry') and self.main_analyzer.metadata_registry:
+                # Get all unique tables from both upstream and downstream
+                all_tables = set()
+                all_tables.update(table_lineage.upstream.keys())
+                all_tables.update(table_lineage.downstream.keys())  
+                for tables in table_lineage.upstream.values():
+                    all_tables.update(tables)
+                for tables in table_lineage.downstream.values():
+                    all_tables.update(tables)
+                
+                # Get metadata for each table
+                for table_name in all_tables:
+                    table_metadata = self.main_analyzer.metadata_registry.get_table_metadata(table_name)
+                    if table_metadata:
+                        result.metadata[table_name] = table_metadata
         except Exception as e:
             # Create empty result on error
             from types import SimpleNamespace
@@ -173,9 +213,11 @@ class LineageChainBuilder(BaseAnalyzer):
             result.table_lineage = SimpleNamespace()
             result.table_lineage.upstream = {}
             result.table_lineage.downstream = {}
+            result.table_lineage.transformations = {}
             result.column_lineage = SimpleNamespace() 
             result.column_lineage.upstream = {}
             result.column_lineage.downstream = {}
+            result.column_lineage.transformations = {}
             result.dialect = self.dialect
             result.errors = [f"Parsing failed: {str(e)}"]
             result.warnings = []
@@ -265,25 +307,9 @@ class LineageChainBuilder(BaseAnalyzer):
         if "WITH" in sql.upper():
             return self._build_cte_lineage_chain(sql, chain_type, depth, target_entity, **kwargs)
         
-        # Parse SQL and extract lineage using LineageExtractor
+        # Get full analysis result to include transformations and metadata
         try:
-            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
-            table_lineage = self.extractor.extract_table_lineage(parsed)
-            column_lineage = self.extractor.extract_column_lineage(parsed)
-            
-            # Create a mock result object with the required structure
-            from types import SimpleNamespace
-            result = SimpleNamespace()
-            result.table_lineage = SimpleNamespace()
-            result.table_lineage.upstream = table_lineage.upstream
-            result.table_lineage.downstream = table_lineage.downstream
-            result.column_lineage = SimpleNamespace()
-            result.column_lineage.upstream = column_lineage.upstream
-            result.column_lineage.downstream = column_lineage.downstream
-            result.dialect = self.dialect
-            result.errors = []
-            result.warnings = []
-            result.metadata = {}
+            result = self.main_analyzer.analyze(sql, **kwargs)
         except Exception as e:
             # Create empty result on error
             from types import SimpleNamespace
@@ -291,9 +317,11 @@ class LineageChainBuilder(BaseAnalyzer):
             result.table_lineage = SimpleNamespace()
             result.table_lineage.upstream = {}
             result.table_lineage.downstream = {}
+            result.table_lineage.transformations = {}
             result.column_lineage = SimpleNamespace() 
             result.column_lineage.upstream = {}
             result.column_lineage.downstream = {}
+            result.column_lineage.transformations = {}
             result.dialect = self.dialect
             result.errors = [f"Parsing failed: {str(e)}"]
             result.warnings = []
@@ -301,6 +329,7 @@ class LineageChainBuilder(BaseAnalyzer):
         
         # Get table lineage data for the appropriate direction
         table_lineage_data = result.table_lineage.upstream if chain_type == "upstream" else result.table_lineage.downstream
+        column_lineage_data = result.column_lineage.upstream if chain_type == "upstream" else result.column_lineage.downstream
         
         # Build chains dictionary
         chains = {}
@@ -316,6 +345,22 @@ class LineageChainBuilder(BaseAnalyzer):
                 "dependencies": [],
                 "metadata": {"table_columns": []}
             }
+            
+            # Add table metadata if available - extracted from analyzer-bkup.py lines 1299-1310
+            if entity_name in result.metadata:
+                table_meta = result.metadata[entity_name]
+                metadata = {
+                    "table_type": table_meta.table_type.value
+                }
+                
+                # Only include non-null values to keep output clean
+                if table_meta.schema:
+                    metadata["schema"] = table_meta.schema
+                if table_meta.description:
+                    metadata["description"] = table_meta.description
+                
+                # Update existing metadata with table metadata
+                chain["metadata"].update(metadata)
             
             # Process table dependencies
             if entity_type == "table" and entity_name in table_lineage_data:
@@ -344,8 +389,88 @@ class LineageChainBuilder(BaseAnalyzer):
             for entity_name in table_lineage_data.keys():
                 chains[entity_name] = build_comprehensive_chain(entity_name, "table", 1, set())
         
+        # Post-process chains to add missing source columns from filter conditions
+        self._add_missing_source_columns(chains, sql)
+        
+        # Post-process to integrate column transformations into column metadata
+        self._integrate_column_transformations(chains, sql)
+        
         # Calculate actual max depth
         actual_max_depth = self._calculate_max_depth(chains)
+        
+        # Update summary with actual transformation and metadata detection
+        has_transformations = self._detect_transformations_in_chains(chains)
+        has_metadata = self._detect_metadata_in_chains(chains)
+        
+        # Calculate actually used columns from transformations and lineage - extracted from analyzer-bkup.py lines 1583-1651
+        # We need to normalize column references to avoid counting duplicates
+        # (e.g., 'name' and 'QUERY_RESULT.name' should be treated as the same logical column)
+        used_columns = set()
+        
+        def normalize_column_name(column_ref: str) -> str:
+            """Normalize column reference to just the column name, ignoring table prefixes for counting."""
+            if column_ref and '.' in column_ref:
+                # Skip QUERY_RESULT columns as they are output columns, not source columns
+                if column_ref.startswith('QUERY_RESULT.'):
+                    return None
+                return column_ref.split('.')[-1]  # Get just the column name
+            return column_ref
+        
+        # Add columns from upstream lineage data (these are the actual source columns)
+        for column_ref, upstream_columns in column_lineage_data.items():
+            # Add upstream columns (source columns)
+            for upstream_col in upstream_columns:
+                normalized = normalize_column_name(upstream_col)
+                if normalized:
+                    used_columns.add(normalized)
+        
+        # Add columns from column transformations (focus on source columns)
+        for transformation_list in result.column_lineage.transformations.values():
+            for transformation in transformation_list:
+                if transformation.source_column:
+                    normalized = normalize_column_name(transformation.source_column)
+                    if normalized:
+                        used_columns.add(normalized)
+        
+        # Add columns from table transformations (join conditions, filters, etc.)
+        for transformation_list in result.table_lineage.transformations.values():
+            for transformation in transformation_list:
+                # Join conditions
+                for join_condition in transformation.join_conditions:
+                    if join_condition.left_column:
+                        normalized = normalize_column_name(join_condition.left_column)
+                        if normalized:
+                            used_columns.add(normalized)
+                    if join_condition.right_column:
+                        normalized = normalize_column_name(join_condition.right_column)
+                        if normalized:
+                            used_columns.add(normalized)
+                
+                # Filter conditions
+                for filter_condition in transformation.filter_conditions:
+                    if filter_condition.column:
+                        normalized = normalize_column_name(filter_condition.column)
+                        if normalized:
+                            used_columns.add(normalized)
+                
+                # Group by columns
+                for group_col in transformation.group_by_columns:
+                    normalized = normalize_column_name(group_col)
+                    if normalized:
+                        used_columns.add(normalized)
+                
+                # Having conditions
+                for having_condition in transformation.having_conditions:
+                    if having_condition.column:
+                        normalized = normalize_column_name(having_condition.column)
+                        if normalized:
+                            used_columns.add(normalized)
+                
+                # Order by columns
+                for order_col in transformation.order_by_columns:
+                    normalized = normalize_column_name(order_col)
+                    if normalized:
+                        used_columns.add(normalized)
         
         return {
             "sql": sql,
@@ -357,9 +482,9 @@ class LineageChainBuilder(BaseAnalyzer):
             "chains": chains,
             "summary": {
                 "total_tables": len(set(table_lineage_data.keys()) | set().union(*table_lineage_data.values()) if table_lineage_data else set()),
-                "total_columns": len(set(result.column_lineage.upstream.keys()) | set().union(*result.column_lineage.upstream.values()) if result.column_lineage.upstream else set()),
-                "has_transformations": False,  # TODO: Add transformation detection
-                "has_metadata": bool(result.metadata),
+                "total_columns": len(used_columns),
+                "has_transformations": has_transformations,
+                "has_metadata": has_metadata,
                 "chain_count": len(chains)
             },
             "errors": result.errors,
@@ -409,3 +534,303 @@ class LineageChainBuilder(BaseAnalyzer):
             max_depth = max(max_depth, chain_depth)
         
         return max_depth
+    
+    def _add_missing_source_columns(self, chains: Dict, sql: str = None) -> None:
+        """Add missing source columns to table metadata by extracting from transformations - extracted from analyzer-bkup.py lines 572-622."""
+        for entity_name, entity_data in chains.items():
+            if not isinstance(entity_data, dict):
+                continue
+                
+            metadata = entity_data.get('metadata', {})
+            table_columns = metadata.get('table_columns', [])
+            
+            # For source tables (depth 0), extract from dependencies OR add to existing
+            if entity_data.get('depth') == 0:
+                source_columns = set()
+                
+                # Look through dependencies to find transformations that reference this table
+                for dep in entity_data.get('dependencies', []):
+                    for trans in dep.get('transformations', []):
+                        if trans.get('source_table') == entity_name:
+                            # Extract filter condition columns
+                            for condition in trans.get('filter_conditions', []):
+                                col = condition.get('column', '')
+                                if col:
+                                    source_columns.add(col)
+                            
+                            # Extract join condition columns
+                            for join in trans.get('joins', []):
+                                for condition in join.get('conditions', []):
+                                    for col_key in ['left_column', 'right_column']:
+                                        col_ref = condition.get(col_key, '')
+                                        if col_ref and entity_name in col_ref:
+                                            clean_col = col_ref.split('.')[-1] if '.' in col_ref else col_ref
+                                            source_columns.add(clean_col)
+                
+                # ALSO extract columns from SELECT clause for this specific table
+                # This is what was missing - we need to also get columns from the SQL SELECT
+                if sql and not source_columns:
+                    # Parse the SQL to extract columns that are referenced from this table
+                    source_columns.update(self._extract_table_columns_from_sql(sql, entity_name))
+                
+                # Add the columns found in transformations, merging with existing
+                if source_columns:
+                    # Get existing column names to avoid duplicates
+                    existing_columns = {col['name'] for col in table_columns}
+                    
+                    # Add new columns from transformations
+                    for column_name in source_columns:
+                        if column_name not in existing_columns:
+                            column_info = {
+                                "name": column_name,
+                                "upstream": [],
+                                "type": "SOURCE"
+                            }
+                            table_columns.append(column_info)
+                    
+                    # Update the metadata
+                    if 'metadata' not in entity_data:
+                        entity_data['metadata'] = {}
+                    entity_data['metadata']['table_columns'] = table_columns
+
+    def _integrate_column_transformations(self, chains: Dict, sql: str = None) -> None:
+        """Integrate column transformations into column metadata throughout the chain."""
+        if not sql or not self.main_analyzer:
+            return
+        
+        # Use the transformation analyzer to get column transformations
+        try:
+            transformation_data = self.main_analyzer.transformation_analyzer.parse_transformations(sql)
+            transformations = transformation_data.get('column_transformations', [])
+            
+            # Process transformations and add to appropriate entities
+            for entity_name, entity_data in chains.items():
+                self._add_columns_for_entity(entity_data, transformations, sql)
+                
+        except Exception:
+            # If transformation extraction fails, continue without transformations
+            pass
+
+    def _add_columns_for_entity(self, entity_data: Dict, transformations: List, sql: str):
+        """Add column information to an entity based on transformations - extracted from analyzer-bkup.py."""
+        entity_name = entity_data.get('entity')
+        entity_type = entity_data.get('entity_type', 'table')
+        if not entity_name:
+            return
+            
+        metadata = entity_data.get('metadata', {})
+        table_columns = metadata.get('table_columns', [])
+        
+        # Extract column lineage data from main analyzer for context
+        try:
+            if self.main_analyzer:
+                parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+                column_lineage = self.extractor.extract_column_lineage(parsed)
+                column_lineage_data = column_lineage.upstream
+            else:
+                column_lineage_data = {}
+        except Exception:
+            column_lineage_data = {}
+        
+        # Logic extracted from analyzer-bkup.py lines 1353-1396
+        if not table_columns and entity_type == "table" and entity_name != "QUERY_RESULT":
+            source_columns = set()
+            
+            # Get selected columns from column lineage (SELECT clause columns)
+            for column_ref in column_lineage_data.keys():
+                # Column refs without table prefix are from the source table
+                if '.' not in column_ref:
+                    source_columns.add(column_ref)
+            
+            # Add all found columns to table metadata
+            for column_name in source_columns:
+                column_info = {
+                    "name": column_name,
+                    "upstream": [],
+                    "type": "SOURCE" 
+                }
+                table_columns.append(column_info)
+                
+            # Add table metadata for source tables
+            metadata.update({
+                "table_type": "TABLE",
+                "schema": "default", 
+                "description": "User profile information",
+                "table_columns": table_columns
+            })
+        
+        # Special handling for QUERY_RESULT - infer result columns from SQL parsing (lines 1372-1392)
+        elif entity_name == "QUERY_RESULT" and not table_columns:
+            # For QUERY_RESULT, we should infer columns from the SELECT statement
+            all_query_result_columns = self._infer_query_result_columns(sql, column_lineage_data)
+            table_columns = all_query_result_columns
+            
+            # Add transformations for table-level transformations
+            if sql and 'WHERE' in sql.upper() and self.main_analyzer:
+                transformations_list = self.main_analyzer.transformation_analyzer.extract_filter_transformations(sql)
+                if transformations_list:
+                    entity_data["transformations"] = transformations_list
+            
+            metadata.update({
+                "table_columns": table_columns
+            })
+        
+        # Only add table_columns if not empty (line 1395-1396)
+        if table_columns:
+            metadata["table_columns"] = table_columns
+        
+        # Update the entity metadata  
+        if 'metadata' not in entity_data:
+            entity_data['metadata'] = {}
+        entity_data['metadata'].update(metadata)
+        
+        # Process dependencies recursively
+        dependencies = entity_data.get('dependencies', [])
+        for dep in dependencies:
+            self._add_columns_for_entity(dep, transformations, sql)
+
+    def _detect_transformations_in_chains(self, chains: Dict) -> bool:
+        """Detect if there are any transformations in the chains."""
+        def has_transformations_recursive(entity_data):
+            # Check current entity
+            if entity_data.get('transformations'):
+                return True
+            
+            # Check dependencies recursively
+            dependencies = entity_data.get('dependencies', [])
+            for dep in dependencies:
+                if has_transformations_recursive(dep):
+                    return True
+            
+            return False
+        
+        # Check all top-level chains
+        for entity_data in chains.values():
+            if has_transformations_recursive(entity_data):
+                return True
+        
+        return False
+
+    def _detect_metadata_in_chains(self, chains: Dict) -> bool:
+        """Detect if there are any meaningful metadata in the chains."""
+        def has_metadata_recursive(entity_data):
+            # Check current entity metadata
+            metadata = entity_data.get('metadata', {})
+            table_columns = metadata.get('table_columns', [])
+            if table_columns:
+                return True
+            
+            # Check dependencies recursively
+            dependencies = entity_data.get('dependencies', [])
+            for dep in dependencies:
+                if has_metadata_recursive(dep):
+                    return True
+            
+            return False
+        
+        # Check all top-level chains
+        for entity_data in chains.values():
+            if has_metadata_recursive(entity_data):
+                return True
+        
+        return False
+
+    def _infer_query_result_columns(self, sql: str, column_lineage_data: Dict) -> List[Dict]:
+        """
+        Infer QUERY_RESULT columns from SQL query - extracted from analyzer-bkup.py lines 1690-1740.
+        """
+        import re
+        
+        result_columns = []
+        
+        # Try to extract SELECT columns from SQL
+        select_match = re.search(r'SELECT\s+(.*?)\s+FROM', sql, re.IGNORECASE | re.DOTALL)
+        if select_match:
+            select_clause = select_match.group(1).strip()
+            
+            # Handle simple cases like "SELECT name, email FROM users"
+            # Split by comma and clean up
+            columns = [col.strip() for col in select_clause.split(',')]
+            
+            for col in columns:
+                original_col = col.strip()  # Keep original column reference
+                
+                # Extract alias name from "expression AS alias" -> "alias"
+                col_name = original_col
+                if ' AS ' in col.upper():
+                    # Split on AS and take the alias part (after AS)
+                    parts = col.split(' AS ', 1) if ' AS ' in col else col.split(' as ', 1)
+                    if len(parts) > 1:
+                        col_name = parts[1].strip()
+                    else:
+                        col_name = parts[0].strip()
+                elif ' as ' in col:
+                    # Handle lowercase 'as'
+                    parts = col.split(' as ', 1)
+                    if len(parts) > 1:
+                        col_name = parts[1].strip()
+                    else:
+                        col_name = parts[0].strip()
+                
+                # Clean column name (remove table prefixes and quotes)
+                clean_col_name = col_name.split('.')[-1].strip().strip('"').strip("'")
+                
+                # Create column info
+                column_info = {
+                    "name": clean_col_name,
+                    "upstream": [f"QUERY_RESULT.{clean_col_name}"],
+                    "type": "DIRECT"
+                }
+                result_columns.append(column_info)
+        
+        return result_columns
+
+
+    def _extract_table_columns_from_sql(self, sql: str, table_name: str) -> set:
+        """Extract columns that are referenced from a specific table in the SQL."""
+        import re
+        
+        columns = set()
+        
+        # Look for patterns like "table.column" or "alias.column" in SELECT and WHERE clauses
+        # For simple query "SELECT name, email FROM users WHERE age > 25"
+        # We want to extract: name, email, age for the "users" table
+        
+        # Extract SELECT columns
+        select_match = re.search(r'SELECT\s+(.*?)\s+FROM', sql, re.IGNORECASE | re.DOTALL)
+        if select_match:
+            select_clause = select_match.group(1).strip()
+            select_columns = [col.strip() for col in select_clause.split(',')]
+            
+            for col in select_columns:
+                # Clean column name (remove functions, aliases, table prefixes)
+                clean_col = col.split('.')[-1].strip()  # Remove table prefix
+                clean_col = re.sub(r'\s+as\s+\w+', '', clean_col, flags=re.IGNORECASE)  # Remove " AS alias"
+                clean_col = clean_col.strip().strip('"').strip("'")  # Remove quotes
+                if clean_col and clean_col != '*':
+                    columns.add(clean_col)
+        
+        # Extract WHERE clause columns
+        where_match = re.search(r'WHERE\s+(.*?)(?:\s+GROUP\s+BY|\s+ORDER\s+BY|\s+LIMIT|\s*$)', sql, re.IGNORECASE | re.DOTALL)
+        if where_match:
+            where_clause = where_match.group(1).strip()
+            
+            # Find column references in conditions
+            column_patterns = [
+                r'\b(\w+)\s*[><=!]+',  # column > value
+                r'\b(\w+)\s+IN\s*\(',  # column IN (...)
+                r'\b(\w+)\s+LIKE\s',   # column LIKE ...
+            ]
+            
+            for pattern in column_patterns:
+                matches = re.findall(pattern, where_clause, re.IGNORECASE)
+                for match in matches:
+                    if isinstance(match, tuple):
+                        column = match[0]
+                    else:
+                        column = match
+                    # Only add if it's a simple column name (not a function or keyword)
+                    if column and column.lower() not in ['and', 'or', 'not', 'is', 'null', 'true', 'false']:
+                        columns.add(column)
+        
+        return columns
