@@ -375,6 +375,66 @@ class LineageChainBuilder(BaseAnalyzer):
                         dependent_table, "table", current_depth + 1, 
                         visited_in_path_new, entity_name
                     )
+                    
+                    # Add transformations to dependency - extracted from analyzer-bkup.py lines 1442-1447
+                    if hasattr(result, 'table_lineage') and hasattr(result.table_lineage, 'transformations'):
+                        transformations = []
+                        for transformation_list in result.table_lineage.transformations.values():
+                            for trans in transformation_list:
+                                # Create transformation data structure matching original format
+                                trans_data = {
+                                    "type": "table_transformation",
+                                    "source_table": trans.source_table,
+                                    "target_table": trans.target_table
+                                }
+                                
+                                # Add join information if present
+                                if hasattr(trans, 'join_conditions') and trans.join_conditions:
+                                    join_entry = {
+                                        "join_type": trans.join_type.value if hasattr(trans, 'join_type') and trans.join_type else "INNER",
+                                        "right_table": None,
+                                        "conditions": [
+                                            {
+                                                "left_column": jc.left_column,
+                                                "operator": jc.operator.value if hasattr(jc.operator, 'value') else str(jc.operator),
+                                                "right_column": jc.right_column
+                                            }
+                                            for jc in trans.join_conditions
+                                        ]
+                                    }
+                                    
+                                    # Extract right table from first condition
+                                    if trans.join_conditions:
+                                        first_condition = trans.join_conditions[0]
+                                        if hasattr(first_condition, 'right_column') and '.' in first_condition.right_column:
+                                            right_table = first_condition.right_column.split('.')[0]
+                                            join_entry["right_table"] = right_table
+                                    
+                                    trans_data["joins"] = [join_entry]
+                                
+                                # Add filter conditions if present
+                                if hasattr(trans, 'filter_conditions') and trans.filter_conditions:
+                                    filter_conditions = []
+                                    for fc in trans.filter_conditions:
+                                        filter_conditions.append({
+                                            "column": fc.column,
+                                            "operator": fc.operator.value if hasattr(fc.operator, 'value') else str(fc.operator),
+                                            "value": fc.value
+                                        })
+                                    trans_data["filter_conditions"] = filter_conditions
+                                
+                                transformations.append(trans_data)
+                        
+                        # Filter transformations to only include those relevant to this entity
+                        relevant_transformations = []
+                        for trans in transformations:
+                            if (trans.get("source_table") == entity_name and 
+                                trans.get("target_table") == dependent_table):
+                                relevant_transformations.append(trans)
+                        
+                        if relevant_transformations:
+                            dep_chain["transformations"] = relevant_transformations
+                    
                     chain["dependencies"].append(dep_chain)
             
             return chain
@@ -536,15 +596,93 @@ class LineageChainBuilder(BaseAnalyzer):
         return max_depth
     
     def _add_missing_source_columns(self, chains: Dict, sql: str = None) -> None:
-        """Add missing source columns to table metadata by extracting from transformations - extracted from analyzer-bkup.py lines 572-622."""
+        """Add missing source columns and handle QUERY_RESULT dependencies - extracted from analyzer-bkup.py."""
+        if not sql:
+            return
+            
+        try:
+            # Parse SQL to get select columns and alias mapping for QUERY_RESULT columns
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            
+            # Build alias to table mapping
+            alias_to_table = {}
+            tables = list(parsed.find_all(sqlglot.exp.Table))
+            for table in tables:
+                if table.alias:
+                    alias_to_table[table.alias] = table.name
+            
+            # Get select columns from parsing
+            select_columns = []
+            select_stmt = parsed if isinstance(parsed, sqlglot.exp.Select) else parsed.find(sqlglot.exp.Select)
+            if select_stmt:
+                for expr in select_stmt.expressions:
+                    if isinstance(expr, sqlglot.exp.Column):
+                        raw_expr = str(expr)
+                        table_part = str(expr.table) if expr.table else None
+                        column_name = str(expr.name) if expr.name else raw_expr
+                        select_columns.append({
+                            'raw_expression': raw_expr,
+                            'column_name': column_name,
+                            'source_table': table_part
+                        })
+        except:
+            select_columns = []
+            alias_to_table = {}
+        
         for entity_name, entity_data in chains.items():
             if not isinstance(entity_data, dict):
                 continue
+            
+            # Handle QUERY_RESULT dependencies specially
+            for dep in entity_data.get('dependencies', []):
+                if dep.get('entity') == 'QUERY_RESULT':
+                    # Add qualified column names to QUERY_RESULT metadata
+                    table_columns = []
+                    # Use same logic as original analyzer-bkup.py
+                    inferred_columns = self._infer_query_result_columns_simple(sql, select_columns)
+                    has_table_prefixes = any('.' in col.get('name', '') for col in inferred_columns)
+                    
+                    if has_table_prefixes:
+                        # JOIN query: Use qualified names from select columns
+                        for sel_col in select_columns:
+                            source_table = sel_col.get('source_table')
+                            if (source_table in alias_to_table and 
+                                alias_to_table[source_table] == entity_name):
+                                raw_expression = sel_col.get('raw_expression')
+                                column_name = sel_col.get('column_name')
+                                upstream_col = f"{entity_name}.{column_name}"
+                                
+                                column_info = {
+                                    "name": raw_expression,
+                                    "upstream": [upstream_col],
+                                    "type": "DIRECT"
+                                }
+                                table_columns.append(column_info)
+                    else:
+                        # Simple query: Add columns from select statement to QUERY_RESULT
+                        for sel_col in select_columns:
+                            if sel_col.get('source_table') is None:  # Unprefixed columns
+                                raw_expression = sel_col.get('raw_expression')
+                                column_name = sel_col.get('column_name')
+                                
+                                column_info = {
+                                    "name": raw_expression,
+                                    "upstream": [f"QUERY_RESULT.{column_name}"],
+                                    "type": "DIRECT"
+                                }
+                                table_columns.append(column_info)
+                    
+                    if table_columns:
+                        if 'metadata' not in dep:
+                            dep['metadata'] = {}
+                        dep['metadata']['table_columns'] = table_columns
                 
+            # Handle source table missing columns
             metadata = entity_data.get('metadata', {})
             table_columns = metadata.get('table_columns', [])
             
-            # For source tables (depth 0), extract from dependencies OR add to existing
+            # For source tables (depth 0), extract from dependencies
             if entity_data.get('depth') == 0:
                 source_columns = set()
                 
@@ -552,12 +690,6 @@ class LineageChainBuilder(BaseAnalyzer):
                 for dep in entity_data.get('dependencies', []):
                     for trans in dep.get('transformations', []):
                         if trans.get('source_table') == entity_name:
-                            # Extract filter condition columns
-                            for condition in trans.get('filter_conditions', []):
-                                col = condition.get('column', '')
-                                if col:
-                                    source_columns.add(col)
-                            
                             # Extract join condition columns
                             for join in trans.get('joins', []):
                                 for condition in join.get('conditions', []):
@@ -566,12 +698,6 @@ class LineageChainBuilder(BaseAnalyzer):
                                         if col_ref and entity_name in col_ref:
                                             clean_col = col_ref.split('.')[-1] if '.' in col_ref else col_ref
                                             source_columns.add(clean_col)
-                
-                # ALSO extract columns from SELECT clause for this specific table
-                # This is what was missing - we need to also get columns from the SQL SELECT
-                if sql and not source_columns:
-                    # Parse the SQL to extract columns that are referenced from this table
-                    source_columns.update(self._extract_table_columns_from_sql(sql, entity_name))
                 
                 # Add the columns found in transformations, merging with existing
                 if source_columns:
@@ -594,21 +720,138 @@ class LineageChainBuilder(BaseAnalyzer):
                     entity_data['metadata']['table_columns'] = table_columns
 
     def _integrate_column_transformations(self, chains: Dict, sql: str = None) -> None:
-        """Integrate column transformations into column metadata throughout the chain."""
+        """Integrate column transformations into column metadata throughout the chain - extracted from analyzer-bkup.py."""
         if not sql or not self.main_analyzer:
             return
         
-        # Use the transformation analyzer to get column transformations
         try:
-            transformation_data = self.main_analyzer.transformation_analyzer.parse_transformations(sql)
-            transformations = transformation_data.get('column_transformations', [])
+            # Get the analysis result to access column lineage
+            result = self.main_analyzer.analyze(sql)
+            column_lineage_data = result.column_lineage.downstream  # For downstream chains
             
-            # Process transformations and add to appropriate entities
+            # Helper functions extracted from analyzer-bkup.py
+            def extract_table_from_column(column_ref: str) -> str:
+                if '.' in column_ref:
+                    parts = column_ref.split('.')
+                    return '.'.join(parts[:-1])  # Everything except the last part (column name)
+                return "unknown_table"
+            
+            def extract_column_from_ref(column_ref: str) -> str:
+                if '.' in column_ref:
+                    return column_ref.split('.')[-1]
+                return column_ref
+            
+            # Parse SQL to get select columns and alias mapping
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            
+            # Build alias to table mapping from sqlglot parsing
+            alias_to_table = {}
+            tables = list(parsed.find_all(sqlglot.exp.Table))
+            for table in tables:
+                if table.alias:
+                    alias_to_table[table.alias] = table.name
+            
+            # Get select columns from parsing
+            select_columns = []
+            select_stmt = parsed if isinstance(parsed, sqlglot.exp.Select) else parsed.find(sqlglot.exp.Select)
+            if select_stmt:
+                for expr in select_stmt.expressions:
+                    if isinstance(expr, sqlglot.exp.Column):
+                        raw_expr = str(expr)
+                        table_part = str(expr.table) if expr.table else None
+                        column_name = str(expr.name) if expr.name else raw_expr
+                        select_columns.append({
+                            'raw_expression': raw_expr,
+                            'column_name': column_name,
+                            'source_table': table_part
+                        })
+                    else:
+                        # Handle other expressions
+                        raw_expr = str(expr)
+                        select_columns.append({
+                            'raw_expression': raw_expr,
+                            'column_name': raw_expr,
+                            'source_table': None
+                        })
+            
+            # Process each entity in chains
             for entity_name, entity_data in chains.items():
-                self._add_columns_for_entity(entity_data, transformations, sql)
+                if entity_data.get('entity_type') != 'table':
+                    continue
+                    
+                # Update table columns with proper qualified names and upstream relationships
+                metadata = entity_data.get('metadata', {})
+                table_columns = []
+                columns_added = set()
+                
+                # Infer query result columns to check if they have table prefixes (like original analyzer-bkup.py)
+                inferred_columns = self._infer_query_result_columns_simple(sql, select_columns)
+                has_table_prefixes = any('.' in col.get('name', '') for col in inferred_columns)
+                
+                if has_table_prefixes:
+                    # JOIN query logic: Add columns from select statement that belong to this entity
+                    for sel_col in select_columns:
+                        source_table = sel_col.get('source_table')
+                        if (source_table in alias_to_table and 
+                            alias_to_table[source_table] == entity_name):
+                            raw_expression = sel_col.get('raw_expression')
+                            column_name = sel_col.get('column_name')
+                            
+                            if raw_expression and raw_expression not in columns_added:
+                                column_info = {
+                                    "name": column_name,  # Use unqualified name for source table
+                                    "upstream": [f"QUERY_RESULT.{column_name}"],  # Point to QUERY_RESULT
+                                    "type": "DIRECT"
+                                }
+                                table_columns.append(column_info)
+                                columns_added.add(raw_expression)
+                    
+                    # Add JOIN columns with SOURCE type (extract from JOIN conditions)
+                    join_columns = self._extract_join_columns_from_sql(sql, entity_name)
+                    for join_col in join_columns:
+                        if join_col and join_col not in columns_added:
+                            column_info = {
+                                "name": join_col,
+                                "upstream": [],
+                                "type": "SOURCE"
+                            }
+                            table_columns.append(column_info)
+                            columns_added.add(join_col)
+                else:
+                    # Simple query logic: Add all referenced columns as SOURCE columns with empty upstream
+                    # This includes SELECT columns and WHERE clause columns
+                    referenced_columns = set()
+                    
+                    # Add SELECT columns
+                    for sel_col in select_columns:
+                        if sel_col.get('source_table') is None:  # Unprefixed columns
+                            column_name = sel_col.get('column_name')
+                            if column_name:
+                                referenced_columns.add(column_name)
+                    
+                    # Add columns from WHERE clause (extract from SQL)
+                    where_columns = self._extract_table_columns_from_sql(sql, entity_name)
+                    referenced_columns.update(where_columns)
+                    
+                    # Add all referenced columns as SOURCE type
+                    for column_name in referenced_columns:
+                        if column_name and column_name not in columns_added:
+                            column_info = {
+                                "name": column_name,
+                                "upstream": [],
+                                "type": "SOURCE"
+                            }
+                            table_columns.append(column_info)
+                            columns_added.add(column_name)
+                
+                # Update metadata
+                if table_columns:
+                    metadata['table_columns'] = table_columns
+                    entity_data['metadata'] = metadata
                 
         except Exception:
-            # If transformation extraction fails, continue without transformations
+            # If column integration fails, continue without column updates
             pass
 
     def _add_columns_for_entity(self, entity_data: Dict, transformations: List, sql: str):
@@ -834,3 +1077,48 @@ class LineageChainBuilder(BaseAnalyzer):
                         columns.add(column)
         
         return columns
+
+    def _extract_join_columns_from_sql(self, sql: str, table_name: str) -> set:
+        """Extract JOIN columns for a specific table from SQL query."""
+        import re
+        
+        join_columns = set()
+        
+        # Extract the ON clause
+        on_match = re.search(r'ON\s+(.+?)(?:\s*$|\s+WHERE|\s+GROUP|\s+ORDER|\s+LIMIT)', sql, re.IGNORECASE)
+        if on_match:
+            on_clause = on_match.group(1)
+            
+            # Extract column references from ON clause
+            # Look for patterns like "u.id = o.user_id"
+            column_refs = re.findall(r'(\w+)\.(\w+)', on_clause)
+            
+            for table_alias, column_name in column_refs:
+                # Check if this column belongs to our table
+                if table_alias == table_name.lower()[:1]:  # Simple heuristic: u -> users, o -> orders
+                    join_columns.add(column_name)
+                elif table_name.lower().startswith(table_alias):
+                    join_columns.add(column_name)
+        
+        return join_columns
+
+    def _infer_query_result_columns_simple(self, sql: str, select_columns: List[Dict]) -> List[Dict]:
+        """
+        Simple helper to infer query result columns similar to original analyzer-bkup.py approach.
+        Returns columns with their names to check for table prefixes.
+        """
+        result_columns = []
+        
+        for sel_col in select_columns:
+            raw_expression = sel_col.get('raw_expression', '')
+            column_name = sel_col.get('column_name', raw_expression)
+            
+            # Create column info with the raw expression as name (this will have dots for qualified names)
+            column_info = {
+                "name": raw_expression,  # This preserves table prefixes like "u.name"
+                "upstream": [],
+                "type": "DIRECT"
+            }
+            result_columns.append(column_info)
+        
+        return result_columns
