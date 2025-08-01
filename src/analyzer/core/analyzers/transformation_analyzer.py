@@ -11,6 +11,77 @@ class TransformationAnalyzer(BaseAnalyzer):
         """Parse transformations using modular parser.""" 
         return self.transformation_parser.parse(sql)
     
+    def _build_select_lineage(self, select_data: Dict[str, Any], transformation_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Build lineage chain for SELECT statement."""
+        lineage = {
+            'type': 'SELECT_LINEAGE',
+            'flow': []
+        }
+        
+        # Source tables
+        source_tables = select_data.get('from_tables', [])
+        for table in source_tables:
+            lineage['flow'].append({
+                'type': 'SOURCE',
+                'entity': table.get('table_name'),
+                'alias': table.get('alias'),
+                'columns_used': self._get_columns_used_from_table(table, select_data)
+            })
+        
+        # Transformations
+        transformations = []
+        
+        # Add filters
+        filters = transformation_data.get('filters', {})
+        if filters.get('conditions'):
+            transformations.append({
+                'type': 'FILTER',
+                'conditions': filters['conditions']
+            })
+        
+        # Add joins
+        joins = transformation_data.get('joins', [])
+        for join in joins:
+            transformations.append({
+                'type': 'JOIN',
+                'join_type': join.get('join_type'),
+                'table': join.get('table_name'),
+                'conditions': join.get('conditions', [])
+            })
+        
+        # Add aggregations
+        aggregations = transformation_data.get('aggregations', {})
+        if aggregations.get('group_by_columns'):
+            transformations.append({
+                'type': 'GROUP_BY',
+                'columns': aggregations['group_by_columns']
+            })
+        
+        # Add transformations to flow
+        for transform in transformations:
+            lineage['flow'].append(transform)
+        
+        return lineage
+    
+    def _get_columns_used_from_table(self, table: Dict[str, Any], select_data: Dict[str, Any]) -> List[str]:
+        """Get columns used from a specific table in the SELECT query."""
+        columns_used = []
+        
+        # This is a simplified implementation - could be enhanced
+        select_columns = select_data.get('select_columns', [])
+        table_name = table.get('table_name')
+        table_alias = table.get('alias')
+        
+        for col in select_columns:
+            col_name = col.get('column_name', '')
+            # Check if column references this table
+            if table_name and f"{table_name}." in col_name:
+                columns_used.append(col_name)
+            elif table_alias and f"{table_alias}." in col_name:
+                columns_used.append(col_name)
+        
+        return columns_used
+    
     def extract_column_transformations(self, sql: str, source_table: str, target_table: str) -> List[Dict]:
         """Extract column transformations generically for all query types."""
         if not sql:
@@ -293,10 +364,127 @@ class TransformationAnalyzer(BaseAnalyzer):
             return False
         
         source_expression = col_trans.get('source_expression', '')
+        if not source_expression:
+            return False
         
-        # Check if the source expression references the table name or its columns
-        if table_name.lower() in source_expression.lower():
+        # For aggregations and functions, check if they reference columns from this table
+        # Examples:
+        # - COUNT(*) -> could be relevant to any table in GROUP BY context
+        # - AVG(u.salary) -> only relevant to users table (u alias)
+        # - SUM(orders.total) -> only relevant to orders table
+        
+        # Remove function wrapper to get the inner expression
+        # e.g., "AVG(u.salary)" -> "u.salary"
+        inner_expr = self._extract_inner_expression(source_expression)
+        
+        if inner_expr:
+            # Check if the inner expression references this table
+            if self._expression_references_table(inner_expr, table_name, sql):
+                return True
+        
+        # For COUNT(*) and similar general aggregations, only include in the primary table
+        # In JOIN queries, the primary table is usually the one being grouped by
+        if source_expression.upper().strip() == 'COUNT(*)':
+            # Special handling for CTAS queries - COUNT(*) is always relevant to the source table
+            if sql and sql.strip().upper().startswith('CREATE TABLE'):
+                return True
+            
+            # For other queries, check if this table is involved in GROUP BY
+            return self._table_involved_in_group_by(table_name, sql)
+        
+        return False
+    
+    def _extract_inner_expression(self, source_expression: str) -> str:
+        """Extract the inner expression from a function call."""
+        import re
+        
+        # Match function patterns like AVG(u.salary), MAX(u.hire_date), etc.
+        match = re.match(r'^[A-Z_]+\s*\(\s*(.+?)\s*\)$', source_expression.strip(), re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        
+        return source_expression
+    
+    def _expression_references_table(self, expression: str, table_name: str, sql: str = None) -> bool:
+        """Check if an expression references a specific table."""
+        if not expression or not table_name:
+            return False
+        
+        expression_lower = expression.lower()
+        table_lower = table_name.lower()
+        
+        # Check for explicit table references
+        # e.g., "users.salary" or "u.salary" (where u is alias for users)
+        if f"{table_lower}." in expression_lower:
             return True
         
-        # For simple cases, assume relevance (can be enhanced with more logic)
+        # Check for table aliases (first letter of table name)
+        if table_lower.startswith('u') and 'u.' in expression_lower:
+            return True
+        elif table_lower.startswith('o') and 'o.' in expression_lower:
+            return True
+        
+        # For single-table contexts, unqualified column names belong to that table
+        if sql and self._is_single_table_context(sql):
+            # In single-table queries, assume unqualified columns belong to the main table
+            # Skip this check if the expression contains table qualifiers from other tables
+            if not ('.' in expression_lower and not f"{table_lower}." in expression_lower):
+                return True
+        
+        return False
+    
+    def _is_single_table_context(self, sql: str) -> bool:
+        """Check if this is a single-table query context."""
+        if not sql:
+            return False
+        
+        sql_upper = sql.upper()
+        
+        # Check if there are any JOINs
+        if 'JOIN' in sql_upper:
+            return False
+        
+        # Count number of table references in FROM clause
+        from_start = sql_upper.find('FROM')
+        if from_start == -1:
+            return True  # No FROM clause, likely a simple query
+        
+        # Look for multiple table names separated by commas (old-style joins)
+        from_section = sql_upper[from_start:sql_upper.find('WHERE', from_start) if 'WHERE' in sql_upper[from_start:] else len(sql_upper)]
+        if ',' in from_section:
+            return False
+        
         return True
+    
+    def _table_involved_in_group_by(self, table_name: str, sql: str) -> bool:
+        """Check if a table is involved in GROUP BY clause."""
+        if not sql or not table_name:
+            return False
+        
+        sql_upper = sql.upper()
+        
+        # Simple check - if GROUP BY contains references to this table
+        group_by_start = sql_upper.find('GROUP BY')
+        if group_by_start == -1:
+            return False
+        
+        # Extract GROUP BY clause (until ORDER BY, HAVING, or end)
+        group_by_clause = sql_upper[group_by_start:]
+        for terminator in ['ORDER BY', 'HAVING', 'LIMIT', ';']:
+            if terminator in group_by_clause:
+                group_by_clause = group_by_clause[:group_by_clause.find(terminator)]
+        
+        table_lower = table_name.lower()
+        group_by_lower = group_by_clause.lower()
+        
+        # Check if this table is referenced in GROUP BY
+        if f"{table_lower}." in group_by_lower:
+            return True
+        
+        # Check for aliases
+        if table_lower.startswith('u') and 'u.' in group_by_lower:
+            return True
+        elif table_lower.startswith('o') and 'o.' in group_by_lower:
+            return True
+        
+        return False
