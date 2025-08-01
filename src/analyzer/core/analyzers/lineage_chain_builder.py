@@ -391,7 +391,7 @@ class LineageChainBuilder(BaseAnalyzer):
                                 # Add join information if present
                                 if hasattr(trans, 'join_conditions') and trans.join_conditions:
                                     join_entry = {
-                                        "join_type": trans.join_type.value if hasattr(trans, 'join_type') and trans.join_type else "INNER",
+                                        "join_type": trans.join_type.value if hasattr(trans, 'join_type') and trans.join_type else "INNER JOIN",
                                         "right_table": None,
                                         "conditions": [
                                             {
@@ -412,16 +412,71 @@ class LineageChainBuilder(BaseAnalyzer):
                                     
                                     trans_data["joins"] = [join_entry]
                                 
-                                # Add filter conditions if present
+                                # Determine context for column filtering - used for all transformation types
+                                # Single-table context includes both QUERY_RESULT and CTAS scenarios
+                                is_single_table = (
+                                    trans.target_table == "QUERY_RESULT" or  # Regular SELECT
+                                    (trans.source_table != trans.target_table and  # CTAS/CTE
+                                     trans.target_table != "QUERY_RESULT")
+                                )
+                                
+                                context_info = {
+                                    'is_single_table_context': is_single_table,
+                                    'tables_in_context': [trans.source_table] if is_single_table else [],
+                                    'sql': sql
+                                }
+                                
+                                # Filter conditions to only include those relevant to the current entity
                                 if hasattr(trans, 'filter_conditions') and trans.filter_conditions:
-                                    filter_conditions = []
+                                    relevant_filters = []
+                                    
                                     for fc in trans.filter_conditions:
-                                        filter_conditions.append({
-                                            "column": fc.column,
-                                            "operator": fc.operator.value if hasattr(fc.operator, 'value') else str(fc.operator),
-                                            "value": fc.value
-                                        })
-                                    trans_data["filter_conditions"] = filter_conditions
+                                        # Only include filter conditions that reference columns from this entity
+                                        if self._is_column_from_table(fc.column, entity_name, context_info):
+                                            relevant_filters.append({
+                                                "column": fc.column,
+                                                "operator": fc.operator.value if hasattr(fc.operator, 'value') else str(fc.operator),
+                                                "value": fc.value
+                                            })
+                                    if relevant_filters:
+                                        trans_data["filter_conditions"] = relevant_filters
+                                
+                                # Group by columns - only include those from this entity
+                                if hasattr(trans, 'group_by_columns') and trans.group_by_columns:
+                                    relevant_group_by = []
+                                    for col in trans.group_by_columns:
+                                        if self._is_column_from_table(col, entity_name, context_info):
+                                            relevant_group_by.append(col)
+                                    if relevant_group_by:
+                                        trans_data["group_by_columns"] = relevant_group_by
+                                
+                                # Having conditions - only include those referencing columns from this entity
+                                if hasattr(trans, 'having_conditions') and trans.having_conditions:
+                                    relevant_having = []
+                                    for hc in trans.having_conditions:
+                                        # Having conditions often involve aggregations like COUNT(*) or AVG(u.salary)
+                                        # Check if they reference this entity or if they are general aggregations for this table
+                                        is_relevant = (self._is_column_from_table(hc.column, entity_name, context_info) or 
+                                                     self._is_aggregate_function_for_table(hc.column, entity_name, sql))
+                                        if is_relevant:
+                                            relevant_having.append({
+                                                "column": hc.column,
+                                                "operator": hc.operator.value if hasattr(hc.operator, 'value') else str(hc.operator),
+                                                "value": hc.value
+                                            })
+                                    if relevant_having:
+                                        trans_data["having_conditions"] = relevant_having
+                                
+                                # Order by columns - only include those from this entity
+                                if hasattr(trans, 'order_by_columns') and trans.order_by_columns:
+                                    relevant_order_by = []
+                                    for col in trans.order_by_columns:
+                                        # Extract just the column name part (before ASC/DESC)
+                                        col_name = col.split()[0] if ' ' in col else col
+                                        if self._is_column_from_table(col_name, entity_name, context_info):
+                                            relevant_order_by.append(col)
+                                    if relevant_order_by:
+                                        trans_data["order_by_columns"] = relevant_order_by
                                 
                                 transformations.append(trans_data)
                         
@@ -666,10 +721,12 @@ class LineageChainBuilder(BaseAnalyzer):
                             # JOIN query: Use qualified names from select columns
                             for sel_col in select_columns:
                                 source_table = sel_col.get('source_table')
+                                raw_expression = sel_col.get('raw_expression')
+                                column_name = sel_col.get('column_name')
+                                
                                 if (source_table in alias_to_table and 
                                     alias_to_table[source_table] == entity_name):
-                                    raw_expression = sel_col.get('raw_expression')
-                                    column_name = sel_col.get('column_name')
+                                    # Regular table-prefixed column
                                     upstream_col = f"{entity_name}.{column_name}"
                                     
                                     column_info = {
@@ -678,6 +735,23 @@ class LineageChainBuilder(BaseAnalyzer):
                                         "type": "DIRECT"
                                     }
                                     table_columns.append(column_info)
+                                elif source_table is None and self._is_aggregate_function(raw_expression):
+                                    # Aggregate function column - only add if relevant to this entity
+                                    if self._is_aggregate_function_for_table(raw_expression, entity_name, sql):
+                                        alias = self._extract_alias_from_expression(raw_expression)
+                                        func_type = self._extract_function_type(raw_expression)
+                                        
+                                        column_info = {
+                                            "name": alias or column_name,
+                                            "upstream": [f"{entity_name}.{alias or column_name}"],
+                                            "type": "DIRECT",
+                                            "transformation": {
+                                                "source_expression": raw_expression.replace(f" as {alias}", "").replace(f" AS {alias}", "") if alias else raw_expression,
+                                                "transformation_type": "AGGREGATE",
+                                                "function_type": func_type
+                                            }
+                                        }
+                                        table_columns.append(column_info)
                         else:
                             # Simple query: Add columns from select statement to QUERY_RESULT
                             for sel_col in select_columns:
@@ -709,6 +783,21 @@ class LineageChainBuilder(BaseAnalyzer):
                 for dep in entity_data.get('dependencies', []):
                     for trans in dep.get('transformations', []):
                         if trans.get('source_table') == entity_name:
+                            # Extract filter condition columns
+                            for condition in trans.get('filter_conditions', []):
+                                col = condition.get('column', '')
+                                if col:
+                                    # Clean column name by removing table prefix if present
+                                    clean_col = col.split('.')[-1] if '.' in col else col
+                                    source_columns.add(clean_col)
+                            
+                            # Extract group by columns
+                            for group_col in trans.get('group_by_columns', []):
+                                if group_col:
+                                    # Clean column name by removing table prefix if present
+                                    clean_col = group_col.split('.')[-1] if '.' in group_col else group_col
+                                    source_columns.add(clean_col)
+                            
                             # Extract join condition columns
                             for join in trans.get('joins', []):
                                 for condition in join.get('conditions', []):
@@ -796,93 +885,72 @@ class LineageChainBuilder(BaseAnalyzer):
             
             # Process each entity in chains
             for entity_name, entity_data in chains.items():
-                if entity_data.get('entity_type') != 'table':
-                    continue
+                if entity_data.get('entity_type') != 'table' or entity_data.get('depth', 0) != 0:
+                    continue  # Only process top-level table entities
                     
-                # Update table columns with proper qualified names and upstream relationships
+                # For source tables (depth 0), we only want to add actual source columns referenced in the SQL
+                # Don't add QUERY_RESULT columns, aggregate result columns, or upstream relationships
                 metadata = entity_data.get('metadata', {})
                 table_columns = []
                 columns_added = set()
                 
-                # Infer query result columns to check if they have table prefixes (like original analyzer-bkup.py)
-                inferred_columns = self._infer_query_result_columns_simple(sql, select_columns)
-                has_table_prefixes = any('.' in col.get('name', '') for col in inferred_columns)
+                # Only extract source columns that are actually referenced in the SQL
+                referenced_columns = self._extract_all_referenced_columns(sql, entity_name)
                 
-                if has_table_prefixes:
-                    # JOIN query logic: Add columns from select statement that belong to this entity
-                    for sel_col in select_columns:
-                        source_table = sel_col.get('source_table')
-                        if (source_table in alias_to_table and 
-                            alias_to_table[source_table] == entity_name):
-                            raw_expression = sel_col.get('raw_expression')
-                            column_name = sel_col.get('column_name')
-                            
-                            if raw_expression and raw_expression not in columns_added:
-                                column_info = {
-                                    "name": column_name,  # Use unqualified name for source table
-                                    "upstream": [f"QUERY_RESULT.{column_name}"],  # Point to QUERY_RESULT
-                                    "type": "DIRECT"
-                                }
-                                table_columns.append(column_info)
-                                columns_added.add(raw_expression)
-                    
-                    # Add JOIN columns with SOURCE type (extract from JOIN conditions)
-                    join_columns = self._extract_join_columns_from_sql(sql, entity_name)
-                    for join_col in join_columns:
-                        if join_col and join_col not in columns_added:
-                            column_info = {
-                                "name": join_col,
-                                "upstream": [],
-                                "type": "SOURCE"
-                            }
-                            table_columns.append(column_info)
-                            columns_added.add(join_col)
-                else:
-                    # Check if this is a CTAS query
-                    is_ctas = any(self._is_ctas_target_table(sql, dep.get('entity', '')) 
-                                for dep in entity_data.get('dependencies', []))
-                    
-                    if is_ctas:
-                        # CTAS query: Mirror the target table columns in source table
-                        table_columns = self._build_ctas_target_columns(sql, select_columns)
-                    else:
-                        # Simple query logic: Add all referenced columns as SOURCE columns with empty upstream
-                        # This includes SELECT columns and WHERE clause columns
-                        referenced_columns = set()
-                        
-                        # Add SELECT columns
-                        for sel_col in select_columns:
-                            if sel_col.get('source_table') is None:  # Unprefixed columns
-                                column_name = sel_col.get('column_name')
-                                if column_name:
-                                    referenced_columns.add(column_name)
-                        
-                        # Add columns from WHERE clause (extract from SQL)
-                        where_columns = self._extract_table_columns_from_sql(sql, entity_name)
-                        referenced_columns.update(where_columns)
-                        
-                        # Add all referenced columns as SOURCE type
-                        for column_name in referenced_columns:
-                            if column_name and column_name not in columns_added:
-                                column_info = {
-                                    "name": column_name,
-                                    "upstream": [],
-                                    "type": "SOURCE"
-                                }
-                                table_columns.append(column_info)
-                                columns_added.add(column_name)
+                # Add all referenced columns as SOURCE type with empty upstream arrays
+                for column_name in referenced_columns:
+                    if column_name and column_name not in columns_added:
+                        column_info = {
+                            "name": column_name,
+                            "upstream": [],
+                            "type": "SOURCE"
+                        }
+                        table_columns.append(column_info)
+                        columns_added.add(column_name)
                 
-                # Update metadata
+                # Update metadata with proper field ordering
                 if table_columns:
-                    metadata['table_columns'] = table_columns
-                
-                # Ensure all source tables have basic metadata fields
-                if entity_data.get('depth') == 0:
-                    metadata.setdefault("table_type", "TABLE")
-                    metadata.setdefault("schema", "default")
-                    metadata.setdefault("description", "User profile information")
+                    if entity_data.get('depth') == 0:
+                        # Maintain proper metadata field ordering for source tables
+                        ordered_metadata = {}
+                        ordered_metadata["table_type"] = metadata.get("table_type", "TABLE")
+                        ordered_metadata["schema"] = metadata.get("schema", "default")
+                        
+                        # Get description from metadata registry if available
+                        if self.main_analyzer and hasattr(self.main_analyzer, 'metadata_registry') and self.main_analyzer.metadata_registry:
+                            table_metadata = self.main_analyzer.metadata_registry.get_table_metadata(entity_name)
+                            if table_metadata and 'description' in table_metadata:
+                                ordered_metadata["description"] = table_metadata['description']
+                            else:
+                                ordered_metadata["description"] = metadata.get("description", "Table information")
+                        else:
+                            ordered_metadata["description"] = metadata.get("description", "Table information")
+                        
+                        ordered_metadata["table_columns"] = table_columns
+                        metadata = ordered_metadata
+                    else:
+                        metadata['table_columns'] = table_columns
+                else:
+                    # Ensure basic metadata fields for source tables even without columns
+                    if entity_data.get('depth') == 0:
+                        metadata.setdefault("table_type", "TABLE")
+                        metadata.setdefault("schema", "default")
+                        
+                        # Get description from metadata registry if available
+                        if self.main_analyzer and hasattr(self.main_analyzer, 'metadata_registry') and self.main_analyzer.metadata_registry:
+                            table_metadata = self.main_analyzer.metadata_registry.get_table_metadata(entity_name)
+                            if table_metadata and 'description' in table_metadata:
+                                metadata.setdefault("description", table_metadata['description'])
+                            else:
+                                metadata.setdefault("description", "Table information")
+                        else:
+                            metadata.setdefault("description", "Table information")
                 
                 entity_data['metadata'] = metadata
+                
+                # Ensure the updated table_columns are properly set in the entity metadata
+                if table_columns:
+                    entity_data['metadata']['table_columns'] = table_columns
                 
         except Exception:
             # If column integration fails, continue without column updates
@@ -929,12 +997,23 @@ class LineageChainBuilder(BaseAnalyzer):
                 table_columns.append(column_info)
                 
             # Add table metadata for source tables
-            metadata.update({
+            table_metadata_dict = {
                 "table_type": "TABLE",
-                "schema": "default", 
-                "description": "User profile information",
+                "schema": "default",
                 "table_columns": table_columns
-            })
+            }
+            
+            # Get description from metadata registry if available
+            if self.main_analyzer and hasattr(self.main_analyzer, 'metadata_registry') and self.main_analyzer.metadata_registry:
+                table_metadata = self.main_analyzer.metadata_registry.get_table_metadata(entity_name)
+                if table_metadata and 'description' in table_metadata:
+                    table_metadata_dict["description"] = table_metadata['description']
+                else:
+                    table_metadata_dict["description"] = "Table information"
+            else:
+                table_metadata_dict["description"] = "Table information"
+            
+            metadata.update(table_metadata_dict)
         
         # Special handling for QUERY_RESULT - infer result columns from SQL parsing (lines 1372-1392)
         elif entity_name == "QUERY_RESULT" and not table_columns:
@@ -956,11 +1035,28 @@ class LineageChainBuilder(BaseAnalyzer):
         if table_columns:
             metadata["table_columns"] = table_columns
         
-        # Ensure all source tables have basic metadata fields
+        # Ensure all source tables have basic metadata fields - maintain expected field order
         if entity_data.get('depth') == 0 and entity_type == 'table':
-            metadata.setdefault("table_type", "TABLE")
-            metadata.setdefault("schema", "default")
-            metadata.setdefault("description", "User profile information")
+            # Create ordered metadata structure matching expected output
+            ordered_metadata = {}
+            ordered_metadata["table_type"] = metadata.get("table_type", "TABLE")
+            ordered_metadata["schema"] = metadata.get("schema", "default")
+            
+            # Get description from metadata registry if available
+            if self.main_analyzer and hasattr(self.main_analyzer, 'metadata_registry') and self.main_analyzer.metadata_registry:
+                table_metadata = self.main_analyzer.metadata_registry.get_table_metadata(entity_name)
+                if table_metadata and 'description' in table_metadata:
+                    ordered_metadata["description"] = table_metadata['description']
+                else:
+                    ordered_metadata["description"] = metadata.get("description", "Table information")
+            else:
+                ordered_metadata["description"] = metadata.get("description", "Table information")
+            
+            # Add table_columns last to maintain proper ordering
+            if table_columns:
+                ordered_metadata["table_columns"] = table_columns
+            
+            metadata = ordered_metadata
         
         # Update the entity metadata  
         if 'metadata' not in entity_data:
@@ -1031,7 +1127,7 @@ class LineageChainBuilder(BaseAnalyzer):
         if select_match:
             select_clause = select_match.group(1).strip()
             
-            # Handle simple cases like "SELECT name, email FROM users"
+            # Handle simple cases like "SELECT name, email FROM table_name"
             # Split by comma and clean up
             columns = [col.strip() for col in select_clause.split(',')]
             
@@ -1076,8 +1172,8 @@ class LineageChainBuilder(BaseAnalyzer):
         columns = set()
         
         # Look for patterns like "table.column" or "alias.column" in SELECT and WHERE clauses
-        # For simple query "SELECT name, email FROM users WHERE age > 25"
-        # We want to extract: name, email, age for the "users" table
+        # For simple query "SELECT name, email FROM table_name WHERE age > 25"
+        # We want to extract: name, email, age for the specified table
         
         # Extract SELECT columns
         select_match = re.search(r'SELECT\s+(.*?)\s+FROM', sql, re.IGNORECASE | re.DOTALL)
@@ -1135,7 +1231,7 @@ class LineageChainBuilder(BaseAnalyzer):
             
             for table_alias, column_name in column_refs:
                 # Check if this column belongs to our table
-                if table_alias == table_name.lower()[:1]:  # Simple heuristic: u -> users, o -> orders
+                if table_alias == table_name.lower()[:1]:  # Simple heuristic: first letter match
                     join_columns.add(column_name)
                 elif table_name.lower().startswith(table_alias):
                     join_columns.add(column_name)
@@ -1184,6 +1280,338 @@ class LineageChainBuilder(BaseAnalyzer):
             table_columns.append(column_info)
         
         return table_columns
+
+    def _extract_all_referenced_columns(self, sql: str, table_name: str) -> set:
+        """Extract all columns referenced in SQL for a specific table."""
+        referenced_columns = set()
+        
+        try:
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            
+            # Build alias to table mapping
+            alias_to_table = {}
+            tables = list(parsed.find_all(sqlglot.exp.Table))
+            for table in tables:
+                if table.alias:
+                    alias_to_table[table.alias] = table.name
+                    
+            # Find table alias for this table_name
+            table_aliases = []
+            for alias, actual_table in alias_to_table.items():
+                if actual_table == table_name:
+                    table_aliases.append(alias)
+            
+            # If no alias found, use the table name itself
+            if not table_aliases:
+                table_aliases = [table_name]
+            
+            # Extract columns from various parts of the SQL
+            # 1. SELECT clause columns (including columns inside functions)
+            select_stmt = parsed if isinstance(parsed, sqlglot.exp.Select) else parsed.find(sqlglot.exp.Select)
+            if select_stmt:
+                for expr in select_stmt.expressions:
+                    # Find all column references in the expression (including inside functions)
+                    for column in expr.find_all(sqlglot.exp.Column):
+                        table_part = str(column.table) if column.table else None
+                        column_name = str(column.name) if column.name else None
+                        
+                        # Check if this column belongs to our table
+                        if table_part in table_aliases:
+                            referenced_columns.add(column_name)
+                        elif not table_part and len(table_aliases) == 1:
+                            # If no table prefix and this is a single-table context, assume it belongs to this table
+                            referenced_columns.add(column_name)
+            
+            # 2. WHERE clause columns
+            where_clause = select_stmt.find(sqlglot.exp.Where) if select_stmt else None
+            if where_clause:
+                for column in where_clause.find_all(sqlglot.exp.Column):
+                    table_part = str(column.table) if column.table else None
+                    column_name = str(column.name) if column.name else None
+                    
+                    if table_part in table_aliases:
+                        referenced_columns.add(column_name)
+                        
+            # 3. JOIN condition columns
+            joins = list(parsed.find_all(sqlglot.exp.Join)) if parsed else []
+            for join in joins:
+                if join.on:
+                    for column in join.on.find_all(sqlglot.exp.Column):
+                        table_part = str(column.table) if column.table else None
+                        column_name = str(column.name) if column.name else None
+                        
+                        if table_part in table_aliases:
+                            referenced_columns.add(column_name)
+            
+            # 4. GROUP BY columns
+            group_by = select_stmt.find(sqlglot.exp.Group) if select_stmt else None
+            if group_by:
+                for expr in group_by.expressions:
+                    if isinstance(expr, sqlglot.exp.Column):
+                        table_part = str(expr.table) if expr.table else None  
+                        column_name = str(expr.name) if expr.name else None
+                        
+                        if table_part in table_aliases:
+                            referenced_columns.add(column_name)
+            
+            # 5. ORDER BY columns  
+            order_by = select_stmt.find(sqlglot.exp.Order) if select_stmt else None
+            if order_by:
+                for ordered in order_by.expressions:
+                    if hasattr(ordered, 'this') and isinstance(ordered.this, sqlglot.exp.Column):
+                        column = ordered.this
+                        table_part = str(column.table) if column.table else None
+                        column_name = str(column.name) if column.name else None
+                        
+                        if table_part in table_aliases:
+                            referenced_columns.add(column_name)
+                            
+        except Exception:
+            # If parsing fails, return empty set
+            pass
+            
+        return referenced_columns
+
+    def _extract_aggregate_result_columns(self, sql: str, table_name: str) -> List[Dict]:
+        """Extract aggregate RESULT columns that belong to a specific table."""
+        result_columns = []
+        
+        try:
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            
+            # Only extract aggregate columns for tables that are being grouped by
+            # Determine if this table is the main aggregating table by checking GROUP BY columns
+            if not self._is_main_aggregating_table(sql, table_name):
+                return result_columns
+                
+            select_stmt = parsed if isinstance(parsed, sqlglot.exp.Select) else parsed.find(sqlglot.exp.Select)
+            if select_stmt:
+                for expr in select_stmt.expressions:
+                    if not isinstance(expr, sqlglot.exp.Column):
+                        # Check if this is an aggregate function
+                        raw_expr = str(expr)
+                        
+                        # Extract alias if present
+                        alias = None
+                        if hasattr(expr, 'alias') and expr.alias:
+                            alias = str(expr.alias)
+                        
+                        # Check for aggregate functions
+                        if any(agg_func in raw_expr.upper() for agg_func in ['COUNT', 'SUM', 'AVG', 'MAX', 'MIN']):
+                            column_name = alias if alias else raw_expr
+                            
+                            # Clean source expression to remove AS alias part
+                            clean_source_expr = raw_expr
+                            if ' AS ' in raw_expr.upper():
+                                clean_source_expr = raw_expr.split(' AS ')[0].strip()
+                            elif ' as ' in raw_expr:
+                                clean_source_expr = raw_expr.split(' as ')[0].strip()
+                            
+                            # Determine function type
+                            function_type = None
+                            if 'COUNT(' in raw_expr.upper():
+                                function_type = "COUNT"
+                            elif 'SUM(' in raw_expr.upper():
+                                function_type = "SUM"
+                            elif 'AVG(' in raw_expr.upper():
+                                function_type = "AVG"
+                            elif 'MAX(' in raw_expr.upper():
+                                function_type = "MAX"
+                            elif 'MIN(' in raw_expr.upper():
+                                function_type = "MIN"
+                            
+                            if function_type:
+                                result_col = {
+                                    "name": column_name,
+                                    "upstream": [],
+                                    "type": "RESULT",
+                                    "transformation": {
+                                        "source_expression": clean_source_expr,
+                                        "transformation_type": "AGGREGATE",
+                                        "function_type": function_type
+                                    }
+                                }
+                                result_columns.append(result_col)
+                                
+        except Exception:
+            # If parsing fails, return empty list
+            pass
+            
+        return result_columns
+
+    def _is_main_aggregating_table(self, sql: str, table_name: str) -> bool:
+        """Determine if a table is the main table being aggregated (appears in GROUP BY)."""
+        try:
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            
+            # Build alias to table mapping
+            alias_to_table = {}
+            tables = list(parsed.find_all(sqlglot.exp.Table))
+            for table in tables:
+                if table.alias:
+                    alias_to_table[table.alias] = table.name
+                    
+            # Find table aliases for this table_name
+            table_aliases = []
+            for alias, actual_table in alias_to_table.items():
+                if actual_table == table_name:
+                    table_aliases.append(alias)
+            
+            # If no alias found, use the table name itself
+            if not table_aliases:
+                table_aliases = [table_name]
+            
+            # Check GROUP BY clause
+            select_stmt = parsed if isinstance(parsed, sqlglot.exp.Select) else parsed.find(sqlglot.exp.Select)
+            if select_stmt:
+                group_by = select_stmt.find(sqlglot.exp.Group)
+                if group_by:
+                    for expr in group_by.expressions:
+                        if isinstance(expr, sqlglot.exp.Column):
+                            table_part = str(expr.table) if expr.table else None
+                            
+                            # If this column belongs to our table, it's the main aggregating table
+                            if table_part in table_aliases or (not table_part and len(table_aliases) == 1):
+                                return True
+                            elif not table_part:  # No table prefix, could be from our table
+                                return True
+            
+            return False
+            
+        except Exception:
+            # If parsing fails, default to False (don't add aggregate columns)
+            return False
+
+    def _extract_aggregate_source_columns(self, sql: str, table_name: str) -> List[Dict]:
+        """Extract columns that are used in aggregate functions and should have upstream relationships."""
+        result_columns = []
+        
+        try:
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            
+            # Build alias to table mapping
+            alias_to_table = {}
+            tables = list(parsed.find_all(sqlglot.exp.Table))
+            for table in tables:
+                if table.alias:
+                    alias_to_table[table.alias] = table.name
+                    
+            # Find table aliases for this table_name
+            table_aliases = []
+            for alias, actual_table in alias_to_table.items():
+                if actual_table == table_name:
+                    table_aliases.append(alias)
+            
+            if not table_aliases:
+                table_aliases = [table_name]
+            
+            # Track which columns are used in which aggregate functions
+            column_to_aggregates = {}
+            
+            select_stmt = parsed if isinstance(parsed, sqlglot.exp.Select) else parsed.find(sqlglot.exp.Select)
+            if select_stmt:
+                for expr in select_stmt.expressions:
+                    if not isinstance(expr, sqlglot.exp.Column):
+                        raw_expr = str(expr)
+                        
+                        # Extract alias if present
+                        alias = None
+                        if hasattr(expr, 'alias') and expr.alias:
+                            alias = str(expr.alias)
+                        
+                        # Find aggregate functions and extract the column they operate on
+                        for agg_func in ['SUM', 'AVG', 'MAX', 'MIN']:
+                            if f'{agg_func}(' in raw_expr.upper():
+                                # Extract the column inside the aggregate function
+                                import re
+                                pattern = f'{agg_func}\\s*\\(\\s*([^)]+)\\s*\\)'
+                                match = re.search(pattern, raw_expr, re.IGNORECASE)
+                                if match:
+                                    inner_expr = match.group(1).strip()
+                                    # Check if this is a column reference with table prefix
+                                    if '.' in inner_expr:
+                                        table_part, col_part = inner_expr.split('.', 1)
+                                        if table_part in table_aliases:
+                                            # This column is used in an aggregate function
+                                            if col_part not in column_to_aggregates:
+                                                column_to_aggregates[col_part] = []
+                                            
+                                            result_col_name = alias if alias else f"{agg_func.lower()}_{col_part}"
+                                            column_to_aggregates[col_part].append(f"QUERY_RESULT.{result_col_name}")
+            
+            # Create column info for each source column that has aggregate relationships
+            for col_name, upstream_list in column_to_aggregates.items():
+                if upstream_list:
+                    column_info = {
+                        "name": col_name,
+                        "upstream": upstream_list,
+                        "type": "DIRECT"
+                    }
+                    result_columns.append(column_info)
+                    
+        except Exception:
+            # If parsing fails, return empty list
+            pass
+            
+        return result_columns
+
+    def _extract_qualified_filter_columns(self, sql: str, table_name: str) -> List[Dict]:
+        """Extract qualified column names used in filter conditions."""
+        result_columns = []
+        
+        try:
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            
+            # Build alias to table mapping
+            alias_to_table = {}
+            tables = list(parsed.find_all(sqlglot.exp.Table))
+            for table in tables:
+                if table.alias:
+                    alias_to_table[table.alias] = table.name
+                    
+            # Find table aliases for this table_name
+            table_aliases = []
+            for alias, actual_table in alias_to_table.items():
+                if actual_table == table_name:
+                    table_aliases.append(alias)
+            
+            if not table_aliases:
+                table_aliases = [table_name]
+            
+            qualified_columns = set()
+            
+            # Extract from WHERE clause
+            select_stmt = parsed if isinstance(parsed, sqlglot.exp.Select) else parsed.find(sqlglot.exp.Select)
+            if select_stmt:
+                where_clause = select_stmt.find(sqlglot.exp.Where)
+                if where_clause:
+                    for column in where_clause.find_all(sqlglot.exp.Column):
+                        table_part = str(column.table) if column.table else None
+                        column_name = str(column.name) if column.name else None
+                        
+                        if table_part in table_aliases and column_name:
+                            qualified_name = f"{table_name}.{column_name}"
+                            qualified_columns.add(qualified_name)
+            
+            # Create column info for each qualified column
+            for qualified_col in qualified_columns:
+                column_info = {
+                    "name": qualified_col,
+                    "upstream": [],
+                    "type": "SOURCE"
+                }
+                result_columns.append(column_info)
+                
+        except Exception:
+            # If parsing fails, return empty list
+            pass
+            
+        return result_columns
 
     def _add_group_by_to_ctas_transformations(self, dep: Dict, sql: str) -> None:
         """Add GROUP BY information to CTAS transformations."""
@@ -1238,3 +1666,125 @@ class LineageChainBuilder(BaseAnalyzer):
             result_columns.append(column_info)
         
         return result_columns
+    
+    def _is_column_from_table(self, column_name: str, table_name: str, context_info: dict = None) -> bool:
+        """Check if a column belongs to a specific table using proper SQL parsing."""
+        if not column_name or not table_name:
+            return False
+        
+        # Handle qualified column names (e.g., "users.active", "u.salary")
+        if '.' in column_name:
+            column_parts = column_name.split('.')
+            if len(column_parts) >= 2:
+                table_part = column_parts[0].lower()
+                
+                # Direct table name match (e.g., "users.active" matches "users")
+                if table_part == table_name.lower():
+                    return True
+                
+                # Use SQL context to build proper alias mapping if available
+                if context_info and 'sql' in context_info:
+                    sql = context_info['sql']
+                    alias_to_table = self._build_alias_to_table_mapping(sql)
+                    
+                    # Check if table_part is an alias for table_name
+                    if table_part in alias_to_table and alias_to_table[table_part] == table_name:
+                        return True
+                
+                # Fallback: only exact match to avoid false positives
+                return False
+        else:
+            # Unqualified column - use context to determine if it belongs to this table
+            if context_info:
+                # If this is a single-table context (only one source table), assume unqualified columns belong to it
+                if context_info.get('is_single_table_context', False):
+                    return True
+                    
+                # If we have a list of tables in the context and this is the primary/source table
+                tables_in_context = context_info.get('tables_in_context', [])
+                if len(tables_in_context) == 1 and tables_in_context[0] == table_name:
+                    return True
+        
+        # If no table qualifier and no clear context, default to False for filtering
+        # This prevents unqualified columns from being assigned to every table in multi-table contexts
+        return False
+
+    def _build_alias_to_table_mapping(self, sql: str) -> dict:
+        """Build a mapping from table aliases to actual table names by parsing SQL."""
+        alias_to_table = {}
+        
+        try:
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            
+            # Find all table references with aliases
+            tables = list(parsed.find_all(sqlglot.exp.Table))
+            for table in tables:
+                table_name = table.name
+                if table.alias:
+                    alias = str(table.alias).lower()
+                    alias_to_table[alias] = table_name
+                    
+        except Exception:
+            # If parsing fails, return empty mapping to avoid incorrect assumptions
+            pass
+            
+        return alias_to_table
+
+    def _is_aggregate_function_for_table(self, column_expr: str, table_name: str, sql: str = None) -> bool:
+        """Check if an aggregate function expression is relevant to a specific table."""
+        if not column_expr or not table_name:
+            return False
+        
+        # Handle aggregate functions like COUNT(*), AVG(u.salary), SUM(users.amount)
+        column_expr_lower = column_expr.lower()
+        
+        # Check if the expression contains explicit table references first
+        if table_name.lower() in column_expr_lower:
+            return True
+        
+        # Check for table aliases dynamically by analyzing the SQL if SQL is provided
+        if sql and self._column_expression_belongs_to_table(column_expr, table_name, sql):
+            return True
+        
+        # COUNT(*) is only relevant to the main grouped table
+        # Only assign COUNT(*) to the table that appears in GROUP BY
+        if sql and 'count(*)' in column_expr_lower and self._is_main_aggregating_table(sql, table_name):
+            return True
+        
+        return False
+
+    def _column_expression_belongs_to_table(self, column_expr: str, table_name: str, sql: str) -> bool:
+        """Check if a column expression belongs to a specific table by analyzing aliases in SQL."""
+        try:
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            
+            # Build alias to table mapping
+            alias_to_table = {}
+            tables = list(parsed.find_all(sqlglot.exp.Table))
+            for table in tables:
+                if table.alias:
+                    alias_to_table[table.alias] = table.name
+                    
+            # Find aliases for this table_name
+            table_aliases = []
+            for alias, actual_table in alias_to_table.items():
+                if actual_table == table_name:
+                    table_aliases.append(alias)
+            
+            # Check if any of the table aliases appear in the column expression
+            column_expr_lower = column_expr.lower()
+            for alias in table_aliases:
+                if f'{alias}.' in column_expr_lower:
+                    return True
+                    
+            return False
+            
+        except Exception:
+            # If parsing fails, fallback to simple heuristics
+            # Check if table name starts with same letter as expression prefix
+            if '.' in column_expr:
+                prefix = column_expr.split('.')[0].lower()
+                return table_name.lower().startswith(prefix)
+            return False
