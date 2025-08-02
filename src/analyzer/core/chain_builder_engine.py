@@ -340,3 +340,282 @@ class ChainBuilderEngine:
             max_depth = max(max_depth, chain_depth)
         
         return max_depth
+    
+    def add_missing_source_columns(self, chains: Dict, sql: str = None, column_lineage_data: Dict = None, column_transformations_data: Dict = None) -> None:
+        """Add missing source columns to table metadata by extracting from transformations."""
+        for entity_name, entity_data in chains.items():
+            if not isinstance(entity_data, dict):
+                continue
+                
+            metadata = entity_data.get('metadata', {})
+            table_columns = metadata.get('table_columns', [])
+            
+            # For source tables (depth 0), extract from dependencies  
+            if entity_data.get('depth') == 0:
+                source_columns = set()
+                
+                # Look through dependencies to find transformations that reference this table
+                for dep in entity_data.get('dependencies', []):
+                    for trans in dep.get('transformations', []):
+                        if trans.get('source_table') == entity_name:
+                            # Extract filter condition columns
+                            for condition in trans.get('filter_conditions', []):
+                                col = condition.get('column', '')
+                                if col:
+                                    clean_col = col.split('.')[-1] if '.' in col else col
+                                    source_columns.add(clean_col)
+                            
+                            # Extract group by columns  
+                            for group_col in trans.get('group_by_columns', []):
+                                if group_col:
+                                    clean_col = group_col.split('.')[-1] if '.' in group_col else group_col
+                                    source_columns.add(clean_col)
+                            
+                            # Extract join condition columns
+                            for join in trans.get('joins', []):
+                                for condition in join.get('conditions', []):
+                                    for col_key in ['left_column', 'right_column']:
+                                        col_ref = condition.get(col_key, '')
+                                        if col_ref and entity_name in col_ref:
+                                            clean_col = col_ref.split('.')[-1] if '.' in col_ref else col_ref
+                                            source_columns.add(clean_col)
+                
+                # Add the columns found in transformations, merging with existing
+                if source_columns:
+                    # Get existing column names to avoid duplicates
+                    existing_columns = {col['name'] for col in table_columns}
+                    
+                    # Add new columns from transformations
+                    for column_name in source_columns:
+                        if column_name not in existing_columns:
+                            column_info = {
+                                "name": column_name,
+                                "upstream": [],
+                                "type": "SOURCE"
+                            }
+                            table_columns.append(column_info)
+                    
+                    # Update the metadata
+                    if 'metadata' not in entity_data:
+                        entity_data['metadata'] = {}
+                    entity_data['metadata']['table_columns'] = table_columns
+    
+    def add_missing_source_columns(self, chains: Dict, sql: str = None, column_lineage_data: Dict = None, column_transformations_data: Dict = None) -> None:
+        """Add missing source columns and handle QUERY_RESULT dependencies - moved from LineageChainBuilder."""
+        if not sql:
+            return
+            
+        try:
+            # Parse SQL to get select columns and alias mapping for QUERY_RESULT columns
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect='trino')
+            
+            # Build alias to table mapping
+            alias_to_table = {}
+            tables = list(parsed.find_all(sqlglot.exp.Table))
+            for table in tables:
+                if table.alias:
+                    alias_to_table[str(table.alias)] = str(table.name)
+            
+            # Get select columns from parsing
+            select_columns = []
+            select_stmt = parsed if isinstance(parsed, sqlglot.exp.Select) else parsed.find(sqlglot.exp.Select)
+            if select_stmt:
+                for expr in select_stmt.expressions:
+                    if isinstance(expr, sqlglot.exp.Column):
+                        raw_expr = str(expr)
+                        table_part = str(expr.table) if expr.table else None
+                        column_name = str(expr.name) if expr.name else raw_expr
+                        select_columns.append({
+                            'raw_expression': raw_expr,
+                            'column_name': column_name,
+                            'source_table': table_part
+                        })
+                    else:
+                        # Handle other expressions
+                        raw_expr = str(expr)
+                        select_columns.append({
+                            'raw_expression': raw_expr,
+                            'column_name': raw_expr,
+                            'source_table': None
+                        })
+        except:
+            select_columns = []
+            alias_to_table = {}
+        
+        # Import required utility functions
+        from analyzer.utils.sql_parsing_utils import extract_clean_column_name
+        from analyzer.utils.aggregate_utils import (
+            is_aggregate_function, extract_alias_from_expression, 
+            is_aggregate_function_for_table, query_has_aggregates
+        )
+        from analyzer.utils.sql_parsing_utils import extract_function_type, infer_query_result_columns_simple
+        from analyzer.core.analyzers.ctas_analyzer import (
+            is_ctas_target_table, build_ctas_target_columns, add_group_by_to_ctas_transformations
+        )
+        
+        for entity_name, entity_data in chains.items():
+            if not isinstance(entity_data, dict):
+                continue
+            
+            # Handle QUERY_RESULT and CTAS dependencies specially
+            for dep in entity_data.get('dependencies', []):
+                dep_entity = dep.get('entity')
+                if dep_entity == 'QUERY_RESULT' or is_ctas_target_table(sql, dep_entity):
+                    # Get existing columns to avoid duplication
+                    existing_metadata = dep.get('metadata', {})
+                    existing_columns = existing_metadata.get('table_columns', [])
+                    existing_column_names = {col.get('name') for col in existing_columns}
+                    
+                    # Add qualified column names to QUERY_RESULT metadata
+                    table_columns = list(existing_columns)  # Start with existing columns
+                    # Check if this is a CTAS query
+                    is_ctas = is_ctas_target_table(sql, dep_entity)
+                    
+                    if is_ctas:
+                        # CTAS query: Add target table columns with special handling for aggregates
+                        table_columns = build_ctas_target_columns(sql, select_columns)
+                        
+                        # Add GROUP BY information to transformations
+                        add_group_by_to_ctas_transformations(dep, sql)
+                    else:
+                        # Check if this is a JOIN or UNION query first
+                        is_join_query = any(sel_col.get('source_table') is not None for sel_col in select_columns)
+                        is_union_query = 'UNION' in sql.upper()
+                        
+                        # Run aggregate-aware processing if needed, or for JOIN/UNION queries
+                        needs_aggregate_processing = query_has_aggregates(sql)
+                        
+                        if needs_aggregate_processing or is_join_query or is_union_query:
+                            # Use same logic as original analyzer
+                            inferred_columns = infer_query_result_columns_simple(sql, select_columns)
+                            has_table_prefixes = any('.' in col.get('name', '') for col in inferred_columns)
+                            
+                            if has_table_prefixes or is_join_query:
+                                # JOIN query: Use qualified names from select columns
+                                for sel_col in select_columns:
+                                    source_table = sel_col.get('source_table')
+                                    raw_expression = sel_col.get('raw_expression')
+                                    column_name = sel_col.get('column_name')
+                                    
+                                    if (source_table in alias_to_table and 
+                                        alias_to_table[source_table] == entity_name):
+                                        # Regular table-prefixed column
+                                        upstream_col = f"{entity_name}.{column_name}"
+                                        
+                                        if raw_expression not in existing_column_names:
+                                            column_info = {
+                                                "name": raw_expression,
+                                                "upstream": [upstream_col],
+                                                "type": "DIRECT"
+                                            }
+                                            table_columns.append(column_info)
+                                    elif source_table is None and is_aggregate_function(raw_expression):
+                                        # Aggregate function column - only add if relevant to this entity
+                                        if is_aggregate_function_for_table(raw_expression, entity_name, sql):
+                                            alias = extract_alias_from_expression(raw_expression)
+                                            func_type = extract_function_type(raw_expression)
+                                            
+                                            column_name_to_use = alias or column_name
+                                            if column_name_to_use not in existing_column_names:
+                                                column_info = {
+                                                    "name": column_name_to_use,
+                                                    "upstream": [f"{entity_name}.{column_name_to_use}"],
+                                                    "type": "DIRECT",
+                                                    "transformation": {
+                                                        "source_expression": raw_expression.replace(f" as {alias}", "").replace(f" AS {alias}", "") if alias else raw_expression,
+                                                        "transformation_type": "AGGREGATE",
+                                                        "function_type": func_type
+                                                    }
+                                                }
+                                                table_columns.append(column_info)
+                            elif is_union_query:
+                                # UNION query: Only add columns that belong to this specific table
+                                from analyzer.utils.sql_parsing_utils import get_union_columns_for_table
+                                union_columns = get_union_columns_for_table(sql, entity_name)
+                                for column_name in union_columns:
+                                    if column_name not in existing_column_names:
+                                        column_info = {
+                                            "name": column_name,
+                                            "upstream": [f"{entity_name}.{column_name}"],
+                                            "type": "DIRECT"
+                                        }
+                                        table_columns.append(column_info)
+                        else:
+                            # Simple query: Add columns from select statement to QUERY_RESULT
+                            for sel_col in select_columns:
+                                if sel_col.get('source_table') is None:  # Unprefixed columns
+                                    raw_expression = sel_col.get('raw_expression')
+                                    column_name = sel_col.get('column_name')
+                                    
+                                    # Extract clean name (prefer alias over raw column name)
+                                    clean_name = extract_clean_column_name(raw_expression, column_name)
+                                    
+                                    if clean_name not in existing_column_names:
+                                        column_info = {
+                                            "name": clean_name,
+                                            "upstream": [f"QUERY_RESULT.{clean_name}"],
+                                            "type": "DIRECT"
+                                        }
+                                        table_columns.append(column_info)
+                    
+                    if table_columns:
+                        if 'metadata' not in dep:
+                            dep['metadata'] = {}
+                        dep['metadata']['table_columns'] = table_columns
+                
+            # Handle source table missing columns
+            metadata = entity_data.get('metadata', {})
+            table_columns = metadata.get('table_columns', [])
+            
+            # For source tables (depth 0), extract from dependencies
+            if entity_data.get('depth') == 0:
+                source_columns = set()
+                
+                # Look through dependencies to find transformations that reference this table
+                for dep in entity_data.get('dependencies', []):
+                    for trans in dep.get('transformations', []):
+                        if trans.get('source_table') == entity_name:
+                            # Extract filter condition columns
+                            for condition in trans.get('filter_conditions', []):
+                                col = condition.get('column', '')
+                                if col:
+                                    # Clean column name by removing table prefix if present
+                                    clean_col = col.split('.')[-1] if '.' in col else col
+                                    source_columns.add(clean_col)
+                            
+                            # Extract group by columns
+                            for group_col in trans.get('group_by_columns', []):
+                                if group_col:
+                                    # Clean column name by removing table prefix if present
+                                    clean_col = group_col.split('.')[-1] if '.' in group_col else group_col
+                                    source_columns.add(clean_col)
+                            
+                            # Extract join condition columns
+                            for join in trans.get('joins', []):
+                                for condition in join.get('conditions', []):
+                                    for col_key in ['left_column', 'right_column']:
+                                        col_ref = condition.get(col_key, '')
+                                        if col_ref and entity_name in col_ref:
+                                            clean_col = col_ref.split('.')[-1] if '.' in col_ref else col_ref
+                                            source_columns.add(clean_col)
+                
+                # Add the columns found in transformations, merging with existing
+                if source_columns:
+                    # Get existing column names to avoid duplicates
+                    existing_columns = {col['name'] for col in table_columns}
+                    
+                    # Add new columns from transformations
+                    for column_name in source_columns:
+                        if column_name not in existing_columns:
+                            column_info = {
+                                "name": column_name,
+                                "upstream": [],
+                                "type": "SOURCE"
+                            }
+                            table_columns.append(column_info)
+                    
+                    # Update the metadata
+                    if 'metadata' not in entity_data:
+                        entity_data['metadata'] = {}
+                    entity_data['metadata']['table_columns'] = table_columns

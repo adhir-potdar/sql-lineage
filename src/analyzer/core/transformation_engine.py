@@ -84,8 +84,10 @@ class TransformationEngine:
         # For source tables (depth 0), we only want to add actual source columns referenced in the SQL
         # Don't add QUERY_RESULT columns, aggregate result columns, or upstream relationships
         metadata = entity_data.get('metadata', {})
-        table_columns = []
-        columns_added = set()
+        # Start with existing columns and merge with referenced columns
+        existing_columns = metadata.get('table_columns', [])
+        table_columns = list(existing_columns)  # Copy existing columns
+        columns_added = {col['name'] for col in existing_columns}  # Track existing column names
         
         # Only extract source columns that are actually referenced in the SQL
         referenced_columns = extract_all_referenced_columns(sql, entity_name, self.dialect)

@@ -301,3 +301,70 @@ class CTASAnalyzer(BaseAnalyzer):
                     chain["dependencies"].append(dep_chain)
         
         return chain
+
+
+def is_ctas_target_table(sql: str, table_name: str) -> bool:
+    """Check if this table is a CTAS target table."""
+    if not is_ctas_query(sql):
+        return False
+    # Simple check if table name appears after CREATE TABLE
+    return table_name.lower() in sql.lower() and 'CREATE TABLE' in sql.upper()
+
+
+def build_ctas_target_columns(sql: str, select_columns: List[Dict]) -> List[Dict]:
+    """Build target table columns for CTAS queries with aggregate handling."""
+    table_columns = []
+    
+    for sel_col in select_columns:
+        raw_expression = sel_col.get('raw_expression', '')
+        column_name = sel_col.get('column_name', raw_expression)
+        
+        # Extract clean name (prefer alias over raw column name)
+        from ...utils.sql_parsing_utils import extract_clean_column_name
+        clean_name = extract_clean_column_name(raw_expression, column_name)
+        
+        # Check if this is an aggregate function
+        from ...utils.aggregate_utils import is_aggregate_function
+        from ...utils.sql_parsing_utils import extract_function_type
+        if is_aggregate_function(raw_expression):
+            # Aggregate column with transformation details
+            from ...utils.aggregate_utils import extract_alias_from_expression
+            func_type = extract_function_type(raw_expression)
+            alias = extract_alias_from_expression(raw_expression)
+            
+            column_info = {
+                "name": alias or clean_name,
+                "upstream": [],
+                "type": "RESULT",
+                "transformation": {
+                    "source_expression": raw_expression.replace(f" as {alias}", "").replace(f" AS {alias}", "") if alias else raw_expression,
+                    "transformation_type": "AGGREGATE",
+                    "function_type": func_type
+                }
+            }
+        else:
+            # Regular column (pass-through)
+            column_info = {
+                "name": clean_name,
+                "upstream": [],
+                "type": "SOURCE"
+            }
+        
+        table_columns.append(column_info)
+    
+    return table_columns
+
+
+def add_group_by_to_ctas_transformations(dep: Dict, sql: str) -> None:
+    """Add GROUP BY information to CTAS transformations."""
+    import re
+    
+    # Extract GROUP BY columns from SQL
+    group_by_match = re.search(r'GROUP\s+BY\s+([^)]+?)(?:\s+(?:HAVING|ORDER|LIMIT)|$)', sql, re.IGNORECASE)
+    if group_by_match:
+        group_by_clause = group_by_match.group(1).strip()
+        group_by_columns = [col.strip() for col in group_by_clause.split(',')]
+        
+        # Add to transformations
+        for transformation in dep.get('transformations', []):
+            transformation['group_by_columns'] = group_by_columns

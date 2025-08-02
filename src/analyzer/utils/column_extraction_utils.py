@@ -342,3 +342,104 @@ def _is_main_aggregating_table(sql: str, table_name: str, table_aliases: List[st
         pass
         
     return False
+
+
+def choose_best_column(columns: List[Dict]) -> Dict:
+    """Choose the best column representation from duplicates using scoring system."""
+    if not columns:
+        return {}
+    
+    if len(columns) == 1:
+        return columns[0]
+    
+    # Scoring criteria (higher score = better column)
+    def score_column(col):
+        score = 0
+        
+        # Prefer columns that don't have SQL expressions as names
+        name = col.get('name', '')
+        has_sql_expression = any(keyword in name.upper() for keyword in ['AS ', 'COUNT', 'AVG'])
+        if not has_sql_expression:
+            score += 20
+            
+        # Prefer columns with transformation details
+        if 'transformation' in col:
+            score += 20
+            
+        # Prefer DIRECT type over SOURCE
+        if col.get('type') == 'DIRECT':
+            score += 10
+        elif col.get('type') == 'SOURCE':
+            score += 5
+            
+        # Prefer shorter names (likely cleaner)
+        if len(name) < 20:
+            score += 5
+            
+        return score
+    
+    # Find the column with the highest score
+    best_column = max(columns, key=score_column)
+    return best_column
+
+
+def process_select_expression(expr, sql: str, dialect: str = "trino") -> Dict:
+    """Process a SELECT expression and extract column information."""
+    result = {
+        "name": "",
+        "upstream": [],
+        "type": "SOURCE"
+    }
+    
+    try:
+        expr_str = str(expr)
+        
+        # Handle different expression types
+        if isinstance(expr, sqlglot.exp.Column):
+            # Simple column reference
+            result["name"] = str(expr.name) if expr.name else expr_str
+            result["upstream"] = [f"QUERY_RESULT.{result['name']}"]
+            
+        elif hasattr(expr, 'alias') and expr.alias:
+            # Expression with alias
+            result["name"] = str(expr.alias)
+            result["upstream"] = [f"QUERY_RESULT.{result['name']}"]
+            
+            # Check if it's an aggregate function
+            from .aggregate_utils import is_aggregate_function, extract_function_type
+            if is_aggregate_function(expr_str):
+                source_expr = str(expr.this) if hasattr(expr, 'this') else expr_str
+                func_type = extract_function_type(expr_str)
+                
+                result["type"] = "DIRECT"
+                result["transformation"] = {
+                    "source_expression": source_expr,
+                    "transformation_type": "AGGREGATE", 
+                    "function_type": func_type
+                }
+        else:
+            # Other expressions (literals, functions, etc.)
+            result["name"] = expr_str
+            result["upstream"] = [f"QUERY_RESULT.{expr_str}"]
+            
+    except Exception:
+        # Fallback
+        result["name"] = str(expr)
+        result["upstream"] = [f"QUERY_RESULT.{result['name']}"]
+    
+    return result
+
+
+def is_column_from_table(column_name: str, table_name: str, context_info: dict = None) -> bool:
+    """Check if a column belongs to a specific table."""
+    if not column_name or not table_name:
+        return False
+        
+    # Handle qualified column names (e.g., "users.active", "u.salary")
+    if '.' in column_name:
+        table_part = column_name.split('.')[0]
+        return table_part == table_name or (context_info and context_info.get('aliases', {}).get(table_part) == table_name)
+    
+    # For unqualified columns, we need more context to determine ownership
+    # This is a simplified implementation
+    return context_info is None or context_info.get('single_table', False)
