@@ -11,6 +11,7 @@ from ...utils.sqlglot_helpers import (
 from ...utils.column_extraction_utils import extract_all_referenced_columns
 from ...utils.metadata_utils import create_cte_metadata, merge_metadata_entries
 from ...utils.sql_parsing_utils import extract_function_type, extract_alias_from_expression
+from ...utils.regex_patterns import is_aggregate_function
 from ..chain_builder_engine import ChainBuilderEngine
 
 
@@ -763,7 +764,7 @@ class CTEAnalyzer(BaseAnalyzer):
     
     def _get_cte_transformation_type(self, col_info: Dict, expression: str) -> str:
         """Determine the transformation type for CTE columns."""
-        if col_info.get('is_aggregate', False):
+        if col_info.get('is_aggregate', False) or is_aggregate_function(expression):
             return 'AGGREGATE'
         elif 'CASE' in expression.upper():
             return 'CASE'
@@ -822,7 +823,7 @@ class CTEAnalyzer(BaseAnalyzer):
     
     def _get_transformation_type(self, col_info: Dict, expression: str) -> str:
         """Determine the transformation type generically."""
-        if col_info.get('is_aggregate'):
+        if col_info.get('is_aggregate') or is_aggregate_function(expression):
             return 'AGGREGATE'
         elif col_info.get('is_window_function'):
             return 'WINDOW_FUNCTION'

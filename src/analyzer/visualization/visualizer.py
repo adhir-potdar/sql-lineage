@@ -1054,6 +1054,9 @@ class SQLLineageVisualizer:
             elif column_transformations.get('has_case'):
                 # If there are CASE statements in columns
                 trans_type = "CASE TRANSFORMATION"
+            elif column_transformations.get('has_aggregation'):
+                # If there are aggregate functions like MAX, MIN, COUNT, SUM, AVG
+                trans_type = "AGGREGATE TRANSFORMATION"
             elif column_transformations.get('has_computed'):
                 # If there are computed/aggregate columns
                 trans_type = "COMPUTED TRANSFORMATION"
@@ -1153,7 +1156,7 @@ class SQLLineageVisualizer:
             
             # Add column transformation details if available
             if column_transformations.get('details'):
-                for detail in column_transformations['details'][:3]:  # Limit to 3 details
+                for detail in column_transformations['details']:  # Show all transformation details
                     label_parts.append(f"  {detail}")
             
             # Add group by information (we already determined trans_type above)
@@ -2566,30 +2569,48 @@ class SQLLineageVisualizer:
         target_entity_data = None
         
         def find_entity_recursive(entity_name, entity_data):
+            matches = []
+            
             if entity_name == target_table:
-                return entity_data
+                matches.append(entity_data)
             
             dependencies = entity_data.get('dependencies', [])
             for dep in dependencies:
                 dep_name = dep.get('entity', '')
                 if dep_name == target_table:
-                    return dep
+                    matches.append(dep)
                 
                 # Recursively search deeper
                 found = find_entity_recursive(dep_name, dep)
                 if found:
-                    return found
-            return None
+                    if isinstance(found, list):
+                        matches.extend(found)
+                    else:
+                        matches.append(found)
+            
+            return matches if matches else None
         
-        # Search for the target entity
+        # Search for all instances of the target entity and find the best one
+        all_target_entities = []
         for entity_name, entity_data in chains.items():
             if entity_name == target_table:
-                target_entity_data = entity_data
-                break
+                all_target_entities.append(entity_data)
             else:
-                target_entity_data = find_entity_recursive(entity_name, entity_data)
-                if target_entity_data:
-                    break
+                found_entities = find_entity_recursive(entity_name, entity_data)
+                if found_entities:
+                    all_target_entities.extend(found_entities)
+        
+        # Select the target entity with the most complete metadata (non-empty table_columns)
+        target_entity_data = None
+        for entity in all_target_entities:
+            table_columns = entity.get('metadata', {}).get('table_columns', [])
+            if table_columns:  # Prioritize entities with actual column data
+                target_entity_data = entity
+                break
+        
+        # If no entity with column data found, use the first one as fallback
+        if not target_entity_data and all_target_entities:
+            target_entity_data = all_target_entities[0]
         
         if not target_entity_data:
             return result

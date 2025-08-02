@@ -2,6 +2,7 @@
 
 from typing import Dict, List, Any, Optional, Set
 from .sql_parsing_utils import extract_alias_from_expression, extract_function_type, clean_source_expression
+from .regex_patterns import is_aggregate_function
 
 
 def build_column_metadata(column_name: str, column_type: str = "VARCHAR", 
@@ -112,11 +113,22 @@ def create_source_column_metadata(column_name: str, upstream: List[str] = None) 
 
 
 def create_result_column_metadata(column_name: str, source_expression: str,
-                                transformation_type: str = "COMPUTED", 
+                                transformation_type: str = None, 
                                 function_type: str = None) -> Dict[str, Any]:
     """Create metadata for a RESULT type column with transformation info."""
     if function_type is None:
         function_type = extract_function_type(source_expression)
+    
+    # Auto-detect transformation type if not provided
+    if transformation_type is None:
+        if is_aggregate_function(source_expression):
+            transformation_type = "AGGREGATE"
+        elif function_type in ["CASE", "IF", "COALESCE", "NULLIF"]:
+            transformation_type = "CASE"
+        elif function_type in ["ROW_NUMBER", "RANK", "DENSE_RANK", "LEAD", "LAG", "FIRST_VALUE", "LAST_VALUE"]:
+            transformation_type = "WINDOW_FUNCTION"
+        else:
+            transformation_type = "COMPUTED"
         
     transformation = {
         "column_name": column_name,

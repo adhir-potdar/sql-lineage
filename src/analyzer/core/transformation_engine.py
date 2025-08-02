@@ -5,6 +5,7 @@ from typing import Dict, List, Any, Optional, Set
 import sqlglot
 from ..utils.sql_parsing_utils import build_alias_to_table_mapping, extract_function_type, clean_source_expression
 from ..utils.column_extraction_utils import extract_all_referenced_columns, extract_aggregate_columns
+from ..utils.regex_patterns import is_aggregate_function
 from ..utils.metadata_utils import (
     create_source_column_metadata, create_result_column_metadata, 
     merge_metadata_entries, add_missing_source_columns
@@ -290,11 +291,23 @@ class TransformationEngine:
                         raw_expr = str(expr)
                         alias = str(expr.alias) if hasattr(expr, 'alias') and expr.alias else raw_expr
                         
+                        function_type = extract_function_type(raw_expr)
+                        
+                        # Determine transformation type based on function type
+                        if is_aggregate_function(raw_expr):
+                            transformation_type = "AGGREGATE"
+                        elif function_type in ["CASE", "IF", "COALESCE", "NULLIF"]:
+                            transformation_type = "CASE"
+                        elif function_type in ["ROW_NUMBER", "RANK", "DENSE_RANK", "LEAD", "LAG", "FIRST_VALUE", "LAST_VALUE"]:
+                            transformation_type = "WINDOW_FUNCTION"
+                        else:
+                            transformation_type = "COMPUTED"
+                        
                         transformation = {
                             "source_expression": raw_expr,
                             "target_column": f"{target_table}.{alias}",
-                            "transformation_type": "COMPUTED",
-                            "function_type": extract_function_type(raw_expr)
+                            "transformation_type": transformation_type,
+                            "function_type": function_type
                         }
                         column_transformations.append(transformation)
                         
