@@ -3,9 +3,20 @@
 from typing import Dict, Any, List, Set
 from .base_analyzer import BaseAnalyzer
 
+# Import new utility modules
+from ...utils.regex_patterns import is_ctas_query
+from ...utils.column_extraction_utils import extract_all_referenced_columns
+from ...utils.metadata_utils import create_table_metadata
+from ..transformation_engine import TransformationEngine
+
 
 class CTASAnalyzer(BaseAnalyzer):
     """Analyzer for CTAS statements."""
+    
+    def __init__(self, dialect: str = "trino"):
+        """Initialize CTAS analyzer with transformation engine."""
+        super().__init__(dialect)
+        self.transformation_engine = TransformationEngine(dialect)
     
     def analyze_ctas(self, sql: str) -> Dict[str, Any]:
         """Analyze CREATE TABLE AS SELECT statement."""
@@ -28,15 +39,7 @@ class CTASAnalyzer(BaseAnalyzer):
     
     def extract_ctas_column_transformations(self, sql: str, source_table: str, target_table: str) -> List[Dict]:
         """Extract column transformations from CTAS queries."""
-        column_transformations = []
-        
-        # CTAS query - extract from CTAS parser
-        ctas_lineage = self.ctas_parser.get_ctas_lineage(sql)
-        column_lineage = ctas_lineage.get('column_lineage', {})
-        ctas_column_transforms = column_lineage.get('column_transformations', [])
-        column_transformations.extend(ctas_column_transforms)
-        
-        return column_transformations
+        return self.transformation_engine.extract_ctas_column_transformations(sql, source_table, target_table)
     
     def add_ctas_result_columns(self, entity_data: Dict[str, Any], entity_name: str, sql: str = None) -> None:
         """Add result columns for CTAS target tables by extracting from SELECT clause."""
@@ -240,9 +243,7 @@ class CTASAnalyzer(BaseAnalyzer):
     
     def is_ctas_query(self, sql: str) -> bool:
         """Check if the SQL is a CTAS query."""
-        if not sql:
-            return False
-        return sql.strip().upper().startswith('CREATE TABLE') and 'AS SELECT' in sql.upper()
+        return is_ctas_query(sql)
     
     def get_ctas_lineage_metadata(self, sql: str) -> Dict[str, Any]:
         """Get comprehensive CTAS lineage metadata."""

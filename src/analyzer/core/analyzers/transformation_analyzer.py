@@ -3,9 +3,21 @@
 from typing import Dict, Any, List
 from .base_analyzer import BaseAnalyzer
 
+# Import new utility modules
+from ...utils.regex_patterns import extract_where_clause, extract_filter_conditions, extract_from_table
+from ...utils.sqlglot_helpers import parse_sql_safely, get_where_conditions
+from ...utils.metadata_utils import create_result_column_metadata
+from ...utils.sql_parsing_utils import extract_function_type, extract_alias_from_expression
+from ..transformation_engine import TransformationEngine
+
 
 class TransformationAnalyzer(BaseAnalyzer):
     """Analyzer for table and column transformations."""
+    
+    def __init__(self, dialect: str = "trino"):
+        """Initialize transformation analyzer with transformation engine."""
+        super().__init__(dialect)
+        self.transformation_engine = TransformationEngine(dialect)
     
     def parse_transformations(self, sql: str) -> Dict[str, Any]:
         """Parse transformations using modular parser.""" 
@@ -13,50 +25,7 @@ class TransformationAnalyzer(BaseAnalyzer):
     
     def extract_filter_transformations(self, sql: str) -> List[Dict]:
         """Extract filter transformations from WHERE clause."""
-        import re
-        
-        transformations = []
-        
-        # Simple extraction of WHERE conditions
-        where_match = re.search(r'WHERE\s+(.*?)(?:\s+GROUP\s+BY|\s+ORDER\s+BY|\s+LIMIT|\s*$)', sql, re.IGNORECASE | re.DOTALL)
-        if where_match:
-            where_clause = where_match.group(1).strip()
-            
-            # Simple pattern matching for common conditions
-            # Pattern: column operator value
-            condition_patterns = [
-                r'(\w+)\s*(>|<|>=|<=|=|!=)\s*([^\s]+)',
-                r'(\w+\.\w+)\s*(>|<|>=|<=|=|!=)\s*([^\s]+)'
-            ]
-            
-            filter_conditions = []
-            for pattern in condition_patterns:
-                matches = re.findall(pattern, where_clause, re.IGNORECASE)
-                for match in matches:
-                    column, operator, value = match
-                    # Clean up the value (remove quotes)
-                    clean_value = value.strip().strip("'").strip('"')
-                    
-                    filter_conditions.append({
-                        "column": column.split('.')[-1],  # Remove table prefix
-                        "operator": operator,
-                        "value": clean_value
-                    })
-            
-            if filter_conditions:
-                # Try to infer source and target tables from SQL
-                from_match = re.search(r'FROM\s+(\w+)', sql, re.IGNORECASE)
-                source_table = from_match.group(1) if from_match else "unknown"
-                
-                transformation = {
-                    "type": "table_transformation",
-                    "source_table": source_table,
-                    "target_table": "QUERY_RESULT",
-                    "filter_conditions": filter_conditions
-                }
-                transformations.append(transformation)
-        
-        return transformations
+        return self.transformation_engine.extract_filter_transformations(sql)
     
     def _build_select_lineage(self, select_data: Dict[str, Any], transformation_data: Dict[str, Any]) -> Dict[str, Any]:
         """Build lineage chain for SELECT statement."""
@@ -291,41 +260,29 @@ class TransformationAnalyzer(BaseAnalyzer):
     
     def _extract_function_type_generic(self, expression: str) -> str:
         """Extract function type from expression generically."""
-        if not expression:
-            return 'UNKNOWN'
-        
-        # Convert to uppercase for matching
-        expr_upper = expression.upper().strip()
-        
-        # Extract function name from expressions like "COUNT(*)", "SUM(amount)", etc.
-        # Match pattern: FUNCTION_NAME(...)
-        import re
-        function_match = re.match(r'^([A-Z_]+)\s*\(', expr_upper)
-        if function_match:
-            return function_match.group(1)
+        function_type = extract_function_type(expression)
         
         # Check for CASE expressions
-        if expr_upper.startswith('CASE'):
+        if expression and expression.upper().strip().startswith('CASE'):
             return 'CASE'
         
-        return 'EXPRESSION'
+        return function_type if function_type != "UNKNOWN" else 'EXPRESSION'
     
     def _extract_source_from_expression(self, expression: str, target_name: str) -> str:
         """Extract the source part from transformation expression."""
         if not expression:
             return 'UNKNOWN'
         
-        # Remove the alias part if present (e.g., "SUM(amount) AS total" -> "SUM(amount)")
-        expr = expression.strip()
-        
-        # Split by " AS " (case insensitive) and take the first part
-        import re
-        as_split = re.split(r'\s+AS\s+', expr, flags=re.IGNORECASE)
-        if len(as_split) > 1:
-            return as_split[0].strip()
+        # Use utility function to extract alias and get the source part
+        alias = extract_alias_from_expression(expression)
+        if alias:
+            # If alias found, remove the " AS alias" part
+            alias_index = expression.upper().rfind(' AS ')
+            if alias_index != -1:
+                return expression[:alias_index].strip()
         
         # If no AS clause, return the expression as is
-        return expr
+        return expression.strip()
     
     def integrate_column_transformations(self, chains: Dict, sql: str = None) -> None:
         """Integrate column transformations into column metadata throughout the chain."""
@@ -443,10 +400,10 @@ class TransformationAnalyzer(BaseAnalyzer):
     
     def _extract_inner_expression(self, source_expression: str) -> str:
         """Extract the inner expression from a function call."""
-        import re
+        from ...utils.regex_patterns import SQLPatterns
         
         # Match function patterns like AVG(u.salary), MAX(u.hire_date), etc.
-        match = re.match(r'^[A-Z_]+\s*\(\s*(.+?)\s*\)$', source_expression.strip(), re.IGNORECASE)
+        match = SQLPatterns.FUNCTION_WITH_ARGS.match(source_expression.strip())
         if match:
             return match.group(1).strip()
         

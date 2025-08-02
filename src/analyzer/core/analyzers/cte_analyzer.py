@@ -4,14 +4,24 @@ from typing import Dict, Any, List, Optional
 import sqlglot
 from .base_analyzer import BaseAnalyzer
 
+# Import new utility modules
+from ...utils.sqlglot_helpers import (
+    parse_sql_safely, get_cte_definitions, traverse_ast_nodes
+)
+from ...utils.column_extraction_utils import extract_all_referenced_columns
+from ...utils.metadata_utils import create_cte_metadata, merge_metadata_entries
+from ...utils.sql_parsing_utils import extract_function_type, extract_alias_from_expression
+from ..chain_builder_engine import ChainBuilderEngine
+
 
 class CTEAnalyzer(BaseAnalyzer):
     """Analyzer for CTE statements."""
     
     def __init__(self, dialect: str = "trino", main_analyzer=None):
-        """Initialize CTE analyzer with optional reference to main analyzer."""
+        """Initialize CTE analyzer with chain builder engine."""
         super().__init__(dialect)
         self.main_analyzer = main_analyzer
+        self.chain_builder_engine = ChainBuilderEngine(dialect)
     
     def analyze_cte(self, sql: str) -> Dict[str, Any]:
         """Analyze CTE statement."""
@@ -789,38 +799,26 @@ class CTEAnalyzer(BaseAnalyzer):
         if not expression:
             return 'UNKNOWN'
         
-        # Remove the alias part if present (e.g., "SUM(amount) AS total" -> "SUM(amount)")
-        expr = expression.strip()
-        
-        # Split by " AS " (case insensitive) and take the first part
-        import re
-        as_split = re.split(r'\s+AS\s+', expr, flags=re.IGNORECASE)
-        if len(as_split) > 1:
-            return as_split[0].strip()
+        # Use utility function to extract alias and get the source part
+        alias = extract_alias_from_expression(expression)
+        if alias:
+            # If alias found, remove the " AS alias" part
+            alias_index = expression.upper().rfind(' AS ')
+            if alias_index != -1:
+                return expression[:alias_index].strip()
         
         # If no AS clause, return the expression as is
-        return expr
+        return expression.strip()
     
     def _extract_function_type_generic(self, expression: str) -> str:
         """Extract function type from expression generically."""
-        if not expression:
-            return 'UNKNOWN'
-        
-        # Convert to uppercase for matching
-        expr_upper = expression.upper().strip()
-        
-        # Extract function name from expressions like "COUNT(*)", "SUM(amount)", etc.
-        # Match pattern: FUNCTION_NAME(...)
-        import re
-        function_match = re.match(r'^([A-Z_]+)\s*\(', expr_upper)
-        if function_match:
-            return function_match.group(1)
+        function_type = extract_function_type(expression)
         
         # Check for CASE expressions
-        if expr_upper.startswith('CASE'):
+        if expression and expression.upper().strip().startswith('CASE'):
             return 'CASE'
         
-        return 'EXPRESSION'
+        return function_type if function_type != "UNKNOWN" else 'EXPRESSION'
     
     def _get_transformation_type(self, col_info: Dict, expression: str) -> str:
         """Determine the transformation type generically."""
