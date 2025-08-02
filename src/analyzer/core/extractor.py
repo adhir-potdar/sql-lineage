@@ -10,7 +10,7 @@ from sqlglot import Expression, exp
 from .models import (
     TableLineage, ColumnLineage, TableTransformation, ColumnTransformation,
     JoinCondition, FilterCondition, AggregateFunction, WindowFunction, CaseExpression,
-    JoinType, AggregateType, OperatorType
+    JoinType, AggregateType, OperatorType, TransformationType
 )
 
 
@@ -101,6 +101,12 @@ class LineageExtractor:
             target_name = "QUERY_RESULT"
             source_tables = self._get_source_tables_from_node(expression, alias_mappings, cte_mapping)
             
+            # Determine UNION type (UNION or UNION ALL)
+            # In SQLGlot, distinct=False means UNION ALL, distinct=True means UNION
+            distinct_flag = expression.args.get('distinct', True)
+            union_type = "UNION ALL" if distinct_flag is False else "UNION"
+            
+            # Add dependencies
             for source in source_tables:
                 # If this source is a skipped CTE, replace it with its dependencies
                 if source in ctes_to_skip and source in skipped_cte_dependencies:
@@ -109,6 +115,9 @@ class LineageExtractor:
                         lineage.add_dependency(target_name, skipped_cte_dependency)
                 else:
                     lineage.add_dependency(target_name, source)
+            
+            # Extract transformations from each SELECT in the UNION
+            self._extract_union_transformations(expression, target_name, union_type, alias_mappings, ctes_to_skip, lineage)
         
         # Handle CREATE TABLE AS SELECT
         elif isinstance(expression, exp.Create):
@@ -164,6 +173,11 @@ class LineageExtractor:
         # Process main query
         if isinstance(expression, exp.Select):
             self._process_select_for_column_lineage(
+                expression, lineage, alias_mappings, target_prefix="QUERY_RESULT"
+            )
+        elif isinstance(expression, exp.Union):
+            # Handle UNION queries
+            self._process_union_for_column_lineage(
                 expression, lineage, alias_mappings, target_prefix="QUERY_RESULT"
             )
         elif isinstance(expression, exp.Create):
@@ -332,6 +346,112 @@ class LineageExtractor:
                         expression=str(projection)
                     )
                     lineage.add_transformation(target_column, transformation)
+    
+    def _process_union_for_column_lineage(
+        self,
+        union_node: Expression,
+        lineage: ColumnLineage,
+        alias_mappings: Dict[str, str],
+        target_prefix: str
+    ) -> None:
+        """Process a UNION node for column lineage."""
+        try:
+            # Collect all SELECT statements in the UNION
+            select_statements = []
+            self._collect_union_selects(union_node, select_statements)
+            
+            # Process each SELECT statement and extract column mappings
+            # For UNION, we need to map columns by position since they may have different names
+            column_positions = {}  # position -> target_column_name
+            
+            for i, select_stmt in enumerate(select_statements):
+                # Process each projection in this SELECT
+                for pos, projection in enumerate(select_stmt.expressions):
+                    if isinstance(projection, exp.Alias):
+                        # For the first SELECT, establish the target column names
+                        if i == 0:
+                            target_column = f"{target_prefix}.{projection.alias}"
+                            target_column = self._clean_column_reference(target_column)
+                            column_positions[pos] = target_column
+                        else:
+                            # For subsequent SELECTs, use the column name established by the first SELECT
+                            target_column = column_positions.get(pos)
+                            if not target_column:
+                                continue
+                        
+                        # Check if this is a literal alias (like 'user' as type)
+                        if isinstance(projection.this, exp.Literal):
+                            # Handle literal aliases
+                            transformation = ColumnTransformation(
+                                source_column="LITERAL",
+                                target_column=target_column,
+                                expression=str(projection)
+                            )
+                            lineage.add_transformation(target_column, transformation)
+                        else:
+                            # Find source columns for this projection (non-literal)
+                            source_columns = self._extract_source_columns(projection, alias_mappings)
+                            
+                            for source in source_columns:
+                                lineage.add_dependency(target_column, source)
+                                
+                                # Extract column transformation details
+                                transformation = self._extract_column_transformation(
+                                    projection, source, target_column, alias_mappings
+                                )
+                                if transformation:
+                                    lineage.add_transformation(target_column, transformation)
+                    
+                    elif isinstance(projection, exp.Column):
+                        # For the first SELECT, establish the target column names
+                        if i == 0:
+                            target_column = f"{target_prefix}.{projection.name}"
+                            target_column = self._clean_column_reference(target_column)
+                            column_positions[pos] = target_column
+                        else:
+                            # For subsequent SELECTs, use the column name established by the first SELECT
+                            target_column = column_positions.get(pos)
+                            if not target_column:
+                                continue
+                        
+                        source_column = str(projection)
+                        resolved_source = self._resolve_column_reference(source_column, alias_mappings)
+                        resolved_source = self._clean_column_reference(resolved_source)
+                        
+                        lineage.add_dependency(target_column, resolved_source)
+                        
+                        # Create simple transformation for direct column reference
+                        transformation = ColumnTransformation(
+                            source_column=resolved_source,
+                            target_column=target_column,
+                            expression=str(projection)
+                        )
+                        lineage.add_transformation(target_column, transformation)
+                    
+                    elif isinstance(projection, exp.Literal):
+                        # Handle literal values (like 'user', 'product', 'category')
+                        if i == 0:
+                            # For literal, we need to infer the column name from the context
+                            # Use a generic name based on position if no alias
+                            target_column = f"{target_prefix}._literal_{pos}"
+                            target_column = self._clean_column_reference(target_column)
+                            column_positions[pos] = target_column
+                        else:
+                            target_column = column_positions.get(pos)
+                            if not target_column:
+                                continue
+                        
+                        # For literals, create a computed transformation
+                        transformation = ColumnTransformation(
+                            source_column="LITERAL",
+                            target_column=target_column,
+                            expression=str(projection)
+                        )
+                        lineage.add_transformation(target_column, transformation)
+        
+        except Exception:
+            # If UNION column processing fails, fall back to basic processing
+            pass
     
     def _extract_source_columns(
         self, 
@@ -818,3 +938,89 @@ class LineageExtractor:
             return AggregateType.APPROX_DISTINCT
         else:
             return AggregateType.OTHER
+    
+    def _create_union_transformation(self, source_table: str, target_table: str, 
+                                   all_sources: List[str], union_type: str, 
+                                   filter_conditions: List = None) -> Optional[TableTransformation]:
+        """Create a UNION transformation."""
+        try:
+            transformation_type = TransformationType.UNION_ALL if union_type == "UNION ALL" else TransformationType.UNION
+            
+            return TableTransformation(
+                source_table=source_table,
+                target_table=target_table,
+                transformation_type=transformation_type,
+                union_sources=[source_table],  # Only include the specific source table
+                union_type=union_type,
+                filter_conditions=filter_conditions or []
+            )
+        except Exception:
+            return None
+    
+    def _extract_union_transformations(self, union_expr: Expression, target_name: str, 
+                                     union_type: str, alias_mappings: Dict[str, str], 
+                                     ctes_to_skip: Set[str], lineage) -> None:
+        """Extract transformations from each SELECT statement in a UNION."""
+        try:
+            # Get all source tables in the entire UNION for context
+            all_union_sources = list(self._get_source_tables_from_node(union_expr, alias_mappings, {}))
+            
+            # Collect all SELECT statements in the UNION
+            select_statements = []
+            self._collect_union_selects(union_expr, select_statements)
+            
+            # Extract transformation from each SELECT
+            for select_stmt in select_statements:
+                # Get source tables for this SELECT
+                source_tables = self._get_source_tables_from_node(select_stmt, alias_mappings, {})
+                
+                for source in source_tables:
+                    if source not in ctes_to_skip:
+                        # Extract full transformation details including filter conditions
+                        transformation = self._extract_table_transformation(
+                            select_stmt, source, target_name, alias_mappings
+                        )
+                        
+                        if transformation:
+                            # Convert to UNION transformation by updating type and adding union info
+                            union_transformation = TableTransformation(
+                                source_table=transformation.source_table,
+                                target_table=transformation.target_table,
+                                transformation_type=TransformationType.UNION_ALL if union_type == "UNION ALL" else TransformationType.UNION,
+                                filter_conditions=transformation.filter_conditions,
+                                group_by_columns=transformation.group_by_columns,
+                                join_type=transformation.join_type,
+                                join_conditions=transformation.join_conditions,
+                                having_conditions=transformation.having_conditions,
+                                order_by_columns=transformation.order_by_columns,
+                                union_sources=[transformation.source_table],
+                                union_type=union_type
+                            )
+                            lineage.add_transformation(target_name, union_transformation)
+        except Exception as e:
+            # If extraction fails, fall back to basic UNION transformations
+            source_tables = self._get_source_tables_from_node(union_expr, alias_mappings, {})
+            for source in source_tables:
+                if source not in ctes_to_skip:
+                    union_transformation = self._create_union_transformation(
+                        source, target_name, source_tables, union_type
+                    )
+                    if union_transformation:
+                        lineage.add_transformation(target_name, union_transformation)
+    
+    def _collect_union_selects(self, union_expr: Expression, select_statements: List) -> None:
+        """Recursively collect all SELECT statements from a UNION expression."""
+        try:
+            if hasattr(union_expr, 'left') and union_expr.left:
+                if isinstance(union_expr.left, exp.Union):
+                    self._collect_union_selects(union_expr.left, select_statements)
+                elif isinstance(union_expr.left, exp.Select):
+                    select_statements.append(union_expr.left)
+            
+            if hasattr(union_expr, 'right') and union_expr.right:
+                if isinstance(union_expr.right, exp.Union):
+                    self._collect_union_selects(union_expr.right, select_statements)
+                elif isinstance(union_expr.right, exp.Select):
+                    select_statements.append(union_expr.right)
+        except Exception:
+            pass

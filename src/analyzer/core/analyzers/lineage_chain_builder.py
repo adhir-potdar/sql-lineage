@@ -355,6 +355,7 @@ class LineageChainBuilder(BaseAnalyzer):
         # Get table lineage data for the appropriate direction
         table_lineage_data = result.table_lineage.upstream if chain_type == "upstream" else result.table_lineage.downstream
         column_lineage_data = result.column_lineage.upstream if chain_type == "upstream" else result.column_lineage.downstream
+        column_transformations_data = result.column_lineage.transformations if hasattr(result.column_lineage, 'transformations') else {}
         
         # Build chains dictionary
         chains = {}
@@ -503,13 +504,30 @@ class LineageChainBuilder(BaseAnalyzer):
                                     if relevant_order_by:
                                         trans_data["order_by_columns"] = relevant_order_by
                                 
+                                # Add UNION information if present
+                                if hasattr(trans, 'union_type') and trans.union_type:
+                                    union_entry = {
+                                        "union_type": trans.union_type,
+                                        "union_source": trans.source_table  # Only the specific source table
+                                    }
+                                    trans_data["unions"] = [union_entry]
+                                
                                 transformations.append(trans_data)
                         
                         # Filter transformations to only include those relevant to this entity
                         relevant_transformations = []
                         for trans in transformations:
-                            if (trans.get("source_table") == entity_name and 
-                                trans.get("target_table") == dependent_table):
+                            # Standard case: source_table matches entity, target_table matches dependent
+                            standard_match = (trans.get("source_table") == entity_name and 
+                                            trans.get("target_table") == dependent_table)
+                            
+                            # UNION case: source_table matches dependent, target_table matches entity
+                            # This handles UNION operations where multiple sources combine into one target
+                            union_match = (trans.get("source_table") == dependent_table and 
+                                         trans.get("target_table") == entity_name and
+                                         trans.get("union_type") is not None)
+                            
+                            if standard_match or union_match:
                                 relevant_transformations.append(trans)
                         
                         if relevant_transformations:
@@ -530,7 +548,7 @@ class LineageChainBuilder(BaseAnalyzer):
                 chains[entity_name] = build_comprehensive_chain(entity_name, "table", 1, set())
         
         # Post-process chains to add missing source columns from filter conditions
-        self._add_missing_source_columns(chains, sql)
+        self._add_missing_source_columns(chains, sql, column_lineage_data, column_transformations_data)
         
         # Post-process to integrate column transformations into column metadata
         self._integrate_column_transformations(chains, sql)
@@ -675,7 +693,7 @@ class LineageChainBuilder(BaseAnalyzer):
         
         return max_depth
     
-    def _add_missing_source_columns(self, chains: Dict, sql: str = None) -> None:
+    def _add_missing_source_columns(self, chains: Dict, sql: str = None, column_lineage_data: Dict = None, column_transformations_data: Dict = None) -> None:
         """Add missing source columns and handle QUERY_RESULT dependencies - extracted from analyzer-bkup.py."""
         if not sql:
             return
@@ -726,8 +744,13 @@ class LineageChainBuilder(BaseAnalyzer):
             for dep in entity_data.get('dependencies', []):
                 dep_entity = dep.get('entity')
                 if dep_entity == 'QUERY_RESULT' or self._is_ctas_target_table(sql, dep_entity):
+                    # Get existing columns to avoid duplication
+                    existing_metadata = dep.get('metadata', {})
+                    existing_columns = existing_metadata.get('table_columns', [])
+                    existing_column_names = {col.get('name') for col in existing_columns}
+                    
                     # Add qualified column names to QUERY_RESULT metadata
-                    table_columns = []
+                    table_columns = list(existing_columns)  # Start with existing columns
                     # Check if this is a CTAS query
                     is_ctas = self._is_ctas_target_table(sql, dep_entity)
                     
@@ -738,45 +761,104 @@ class LineageChainBuilder(BaseAnalyzer):
                         # Add GROUP BY information to transformations
                         self._add_group_by_to_ctas_transformations(dep, sql)
                     else:
-                        # Use same logic as original analyzer-bkup.py
-                        inferred_columns = self._infer_query_result_columns_simple(sql, select_columns)
-                        has_table_prefixes = any('.' in col.get('name', '') for col in inferred_columns)
+                        # Check if this is a JOIN or UNION query first
+                        is_join_query = any(sel_col.get('source_table') is not None for sel_col in select_columns)
+                        is_union_query = 'UNION' in sql.upper()
                         
-                        if has_table_prefixes:
-                            # JOIN query: Use qualified names from select columns
-                            for sel_col in select_columns:
-                                source_table = sel_col.get('source_table')
-                                raw_expression = sel_col.get('raw_expression')
-                                column_name = sel_col.get('column_name')
+                        # First try to use column lineage data if available (but skip for JOIN/UNION queries to avoid duplicates)
+                        if not (is_join_query or is_union_query) and (column_lineage_data and column_transformations_data) and (column_lineage_data or column_transformations_data):
+                            # Collect all QUERY_RESULT columns from both upstream and transformations
+                            query_result_columns = set()
+                            
+                            # Add columns from upstream dependencies
+                            for target_column in column_lineage_data.keys():
+                                if target_column.startswith('QUERY_RESULT.'):
+                                    column_name = target_column.replace('QUERY_RESULT.', '')
+                                    query_result_columns.add(column_name)
+                            
+                            # Add columns from transformations (includes literal columns)
+                            for target_column in column_transformations_data.keys():
+                                if target_column.startswith('QUERY_RESULT.'):
+                                    column_name = target_column.replace('QUERY_RESULT.', '')
+                                    query_result_columns.add(column_name)
+                            
+                            # Build QUERY_RESULT columns
+                            for column_name in sorted(query_result_columns):
+                                # Build upstream list from source columns or mark as computed
+                                target_col_key = f"QUERY_RESULT.{column_name}"
+                                source_columns = column_lineage_data.get(target_col_key, set())
                                 
-                                if (source_table in alias_to_table and 
-                                    alias_to_table[source_table] == entity_name):
-                                    # Regular table-prefixed column
-                                    upstream_col = f"{entity_name}.{column_name}"
-                                    
+                                if source_columns:
+                                    # Has upstream dependencies
+                                    upstream_list = [f"QUERY_RESULT.{column_name}"]
+                                    column_type = "DIRECT"
+                                else:
+                                    # No upstream dependencies (likely computed/literal)
+                                    upstream_list = [f"QUERY_RESULT.{column_name}"]
+                                    column_type = "SOURCE"
+                                
+                                # Only add if not already present
+                                if column_name not in existing_column_names:
                                     column_info = {
-                                        "name": raw_expression,
-                                        "upstream": [upstream_col],
+                                        "name": column_name,
+                                        "upstream": upstream_list,
+                                        "type": column_type
+                                    }
+                                    table_columns.append(column_info)
+                        
+                        # Run aggregate-aware processing if needed, or for JOIN/UNION queries
+                        needs_aggregate_processing = self._query_has_aggregates(sql)
+                        
+                        if needs_aggregate_processing or is_join_query or is_union_query:
+                            # Use same logic as original analyzer-bkup.py
+                            inferred_columns = self._infer_query_result_columns_simple(sql, select_columns)
+                            has_table_prefixes = any('.' in col.get('name', '') for col in inferred_columns)
+                            
+                            if has_table_prefixes or is_join_query:
+                                # JOIN query: Use qualified names from select columns
+                                for sel_col in select_columns:
+                                    source_table = sel_col.get('source_table')
+                                    raw_expression = sel_col.get('raw_expression')
+                                    column_name = sel_col.get('column_name')
+                                    
+                                    if (source_table in alias_to_table and 
+                                        alias_to_table[source_table] == entity_name):
+                                        # Regular table-prefixed column
+                                        upstream_col = f"{entity_name}.{column_name}"
+                                        
+                                        column_info = {
+                                            "name": raw_expression,
+                                            "upstream": [upstream_col],
+                                            "type": "DIRECT"
+                                        }
+                                        table_columns.append(column_info)
+                                    elif source_table is None and self._is_aggregate_function(raw_expression):
+                                        # Aggregate function column - only add if relevant to this entity
+                                        if self._is_aggregate_function_for_table(raw_expression, entity_name, sql):
+                                            alias = self._extract_alias_from_expression(raw_expression)
+                                            func_type = self._extract_function_type(raw_expression)
+                                            
+                                            column_info = {
+                                                "name": alias or column_name,
+                                                "upstream": [f"{entity_name}.{alias or column_name}"],
+                                                "type": "DIRECT",
+                                                "transformation": {
+                                                    "source_expression": raw_expression.replace(f" as {alias}", "").replace(f" AS {alias}", "") if alias else raw_expression,
+                                                    "transformation_type": "AGGREGATE",
+                                                    "function_type": func_type
+                                                }
+                                            }
+                                            table_columns.append(column_info)
+                            elif is_union_query:
+                                # UNION query: Only add columns that belong to this specific table
+                                union_columns = self._get_union_columns_for_table(sql, entity_name)
+                                for column_name in union_columns:
+                                    column_info = {
+                                        "name": column_name,
+                                        "upstream": [f"{entity_name}.{column_name}"],
                                         "type": "DIRECT"
                                     }
                                     table_columns.append(column_info)
-                                elif source_table is None and self._is_aggregate_function(raw_expression):
-                                    # Aggregate function column - only add if relevant to this entity
-                                    if self._is_aggregate_function_for_table(raw_expression, entity_name, sql):
-                                        alias = self._extract_alias_from_expression(raw_expression)
-                                        func_type = self._extract_function_type(raw_expression)
-                                        
-                                        column_info = {
-                                            "name": alias or column_name,
-                                            "upstream": [f"{entity_name}.{alias or column_name}"],
-                                            "type": "DIRECT",
-                                            "transformation": {
-                                                "source_expression": raw_expression.replace(f" as {alias}", "").replace(f" AS {alias}", "") if alias else raw_expression,
-                                                "transformation_type": "AGGREGATE",
-                                                "function_type": func_type
-                                            }
-                                        }
-                                        table_columns.append(column_info)
                         else:
                             # Simple query: Add columns from select statement to QUERY_RESULT
                             for sel_col in select_columns:
@@ -784,17 +866,42 @@ class LineageChainBuilder(BaseAnalyzer):
                                     raw_expression = sel_col.get('raw_expression')
                                     column_name = sel_col.get('column_name')
                                     
+                                    # Extract clean name (prefer alias over raw column name)
+                                    clean_name = self._extract_clean_column_name(raw_expression, column_name)
+                                    
                                     column_info = {
-                                        "name": raw_expression,
-                                        "upstream": [f"QUERY_RESULT.{column_name}"],
+                                        "name": clean_name,
+                                        "upstream": [f"QUERY_RESULT.{clean_name}"],
                                         "type": "DIRECT"
                                     }
                                     table_columns.append(column_info)
                     
                     if table_columns:
+                        # Deduplicate columns before assigning (by name only)
+                        # Prefer columns with more detailed information (transformations, proper names)
+                        deduplicated_columns = []
+                        seen_column_names = set()
+                        column_map = {}
+                        
+                        # First pass: group columns by name
+                        for col in table_columns:
+                            col_name = col.get('name')
+                            if col_name not in column_map:
+                                column_map[col_name] = []
+                            column_map[col_name].append(col)
+                        
+                        # Second pass: choose the best column for each name
+                        for col_name, columns in column_map.items():
+                            if len(columns) == 1:
+                                deduplicated_columns.append(columns[0])
+                            else:
+                                # Multiple columns with same name - choose the best one
+                                best_col = self._choose_best_column(columns)
+                                deduplicated_columns.append(best_col)
+                        
                         if 'metadata' not in dep:
                             dep['metadata'] = {}
-                        dep['metadata']['table_columns'] = table_columns
+                        dep['metadata']['table_columns'] = deduplicated_columns
                 
             # Handle source table missing columns
             metadata = entity_data.get('metadata', {})
@@ -856,36 +963,28 @@ class LineageChainBuilder(BaseAnalyzer):
         """Integrate column transformations into column metadata throughout the chain."""
         self.transformation_engine.integrate_column_transformations(chains, sql, self.main_analyzer)
 
-    def _add_columns_for_entity(self, entity_data: Dict, transformations: List, sql: str):
+    def _add_columns_for_entity(self, entity_data: Dict, transformations: List, sql: str, column_lineage_data: Dict = None, column_transformations_data: Dict = None):
         """Add column information to an entity based on transformations - extracted from analyzer-bkup.py."""
         entity_name = entity_data.get('entity')
         entity_type = entity_data.get('entity_type', 'table')
         if not entity_name:
             return
+        
             
         metadata = entity_data.get('metadata', {})
         table_columns = metadata.get('table_columns', [])
         
-        # Extract column lineage data from main analyzer for context
-        try:
-            if self.main_analyzer:
-                parsed = sqlglot.parse_one(sql, dialect=self.dialect)
-                column_lineage = self.extractor.extract_column_lineage(parsed)
-                column_lineage_data = column_lineage.upstream
-            else:
-                column_lineage_data = {}
-        except Exception:
-            column_lineage_data = {}
         
         # Logic extracted from analyzer-bkup.py lines 1353-1396
         if not table_columns and entity_type == "table" and entity_name != "QUERY_RESULT":
             source_columns = set()
             
             # Get selected columns from column lineage (SELECT clause columns)
-            for column_ref in column_lineage_data.keys():
-                # Column refs without table prefix are from the source table
-                if '.' not in column_ref:
-                    source_columns.add(column_ref)
+            if column_lineage_data:
+                for column_ref in column_lineage_data.keys():
+                    # Column refs without table prefix are from the source table
+                    if '.' not in column_ref:
+                        source_columns.add(column_ref)
             
             # Add all found columns to table metadata
             for column_name in source_columns:
@@ -916,9 +1015,9 @@ class LineageChainBuilder(BaseAnalyzer):
             metadata.update(table_metadata_dict)
         
         # Special handling for QUERY_RESULT - infer result columns from SQL parsing (lines 1372-1392)
-        elif entity_name == "QUERY_RESULT" and not table_columns:
+        elif entity_name == "QUERY_RESULT":
             # For QUERY_RESULT, we should infer columns from the SELECT statement
-            all_query_result_columns = self._infer_query_result_columns(sql, column_lineage_data)
+            all_query_result_columns = self._infer_query_result_columns(sql, column_lineage_data or {})
             table_columns = all_query_result_columns
             
             # Add transformations for table-level transformations
@@ -966,7 +1065,7 @@ class LineageChainBuilder(BaseAnalyzer):
         # Process dependencies recursively
         dependencies = entity_data.get('dependencies', [])
         for dep in dependencies:
-            self._add_columns_for_entity(dep, transformations, sql)
+            self._add_columns_for_entity(dep, transformations, sql, column_lineage_data, column_transformations_data)
 
     def _detect_transformations_in_chains(self, chains: Dict) -> bool:
         """Detect if there are any transformations in the chains."""
@@ -1016,8 +1115,118 @@ class LineageChainBuilder(BaseAnalyzer):
 
     def _infer_query_result_columns(self, sql: str, column_lineage_data: Dict) -> List[Dict]:
         """
-        Infer QUERY_RESULT columns from SQL query - extracted from analyzer-bkup.py lines 1690-1740.
+        Infer QUERY_RESULT columns from SQL query with proper aggregate function handling.
         """
+        import sqlglot
+        
+        result_columns = []
+        
+        try:
+            # Parse SQL with SQLGlot for proper expression handling
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            select_stmt = parsed if isinstance(parsed, sqlglot.exp.Select) else parsed.find(sqlglot.exp.Select)
+            
+            if select_stmt and select_stmt.expressions:
+                for expr in select_stmt.expressions:
+                    column_info = self._process_select_expression(expr, sql)
+                    if column_info:
+                        result_columns.append(column_info)
+            
+        except Exception:
+            # Fallback to simple regex parsing if SQLGlot fails
+            result_columns = self._infer_query_result_columns_simple_fallback(sql)
+        
+        return result_columns
+    
+    def _process_select_expression(self, expr, sql: str) -> Dict:
+        """Process a SELECT expression to create proper column info with transformation details."""
+        import sqlglot
+        
+        # Get the raw expression string
+        raw_expr = str(expr)
+        
+        # Extract alias if present
+        alias = None
+        if hasattr(expr, 'alias') and expr.alias:
+            alias = str(expr.alias)
+        
+        # Determine column name (use alias if available, otherwise expression)
+        if alias:
+            column_name = alias
+        elif isinstance(expr, sqlglot.exp.Column):
+            column_name = str(expr.name) if expr.name else raw_expr
+        else:
+            column_name = raw_expr
+        
+        # Check if this is an aggregate function
+        if self._is_aggregate_function(raw_expr):
+            # Handle aggregate function with transformation details
+            func_type = self._extract_function_type(raw_expr)
+            source_expr = raw_expr.replace(f" AS {alias}", "").replace(f" as {alias}", "") if alias else raw_expr
+            
+            # Extract source columns from the aggregate function
+            upstream_columns = self._extract_upstream_from_aggregate(raw_expr, sql)
+            
+            return {
+                "name": column_name,
+                "upstream": upstream_columns,
+                "type": "DIRECT",
+                "transformation": {
+                    "source_expression": source_expr,
+                    "transformation_type": "AGGREGATE",
+                    "function_type": func_type
+                }
+            }
+        else:
+            # Handle regular column or expression
+            if isinstance(expr, sqlglot.exp.Column):
+                # Simple column reference
+                table_part = str(expr.table) if expr.table else None
+                if table_part:
+                    upstream = [f"{table_part}.{column_name}"]
+                else:
+                    upstream = [column_name]
+                return {
+                    "name": column_name,
+                    "upstream": upstream,
+                    "type": "DIRECT"
+                }
+            else:
+                # Other expression
+                return {
+                    "name": column_name,
+                    "upstream": [f"QUERY_RESULT.{column_name}"],
+                    "type": "DIRECT"
+                }
+    
+    def _extract_upstream_from_aggregate(self, aggregate_expr: str, sql: str) -> List[str]:
+        """Extract upstream column references from aggregate function."""
+        import re
+        
+        # Extract column references from inside aggregate functions
+        upstream = []
+        
+        # Pattern to match columns inside aggregate functions: FUNC(table.column) or FUNC(column)
+        func_pattern = r'\b(?:COUNT|SUM|AVG|MIN|MAX)\s*\(\s*([^)]+)\s*\)'
+        matches = re.findall(func_pattern, aggregate_expr, re.IGNORECASE)
+        
+        for match in matches:
+            col_ref = match.strip()
+            if col_ref == '*':
+                # COUNT(*) - doesn't reference specific columns
+                continue
+            elif '.' in col_ref:
+                # Qualified column reference (table.column)
+                upstream.append(col_ref)
+            else:
+                # Unqualified column - try to infer table from SQL context
+                # For now, just use the column name
+                upstream.append(col_ref)
+        
+        return upstream if upstream else [f"QUERY_RESULT.{aggregate_expr}"]
+    
+    def _infer_query_result_columns_simple_fallback(self, sql: str) -> List[Dict]:
+        """Simple fallback method using regex parsing."""
         import re
         
         result_columns = []
@@ -1435,6 +1644,63 @@ class LineageChainBuilder(BaseAnalyzer):
     def _extract_function_type(self, expression: str) -> str:
         """Extract function type from aggregate expression."""
         return extract_function_type(expression)
+    
+    def _get_union_columns_for_table(self, sql: str, table_name: str) -> List[str]:
+        """Get the columns that a specific table contributes to a UNION query."""
+        try:
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            
+            # Find the UNION expression
+            union_expr = parsed.find(sqlglot.exp.Union)
+            if not union_expr:
+                return []
+            
+            # Find the SELECT statement that references this table
+            select_stmts = []
+            self._collect_union_selects_helper(union_expr, select_stmts)
+            
+            for select_stmt in select_stmts:
+                # Check if this SELECT uses the table
+                tables = list(select_stmt.find_all(sqlglot.exp.Table))
+                for table in tables:
+                    if table.name == table_name:
+                        # Extract column names from this SELECT
+                        columns = []
+                        for expr in select_stmt.expressions:
+                            if hasattr(expr, 'alias') and expr.alias:
+                                # Use the full expression with alias for clarity
+                                columns.append(f"{str(expr.this)} as {str(expr.alias)}")
+                            elif isinstance(expr, sqlglot.exp.Column):
+                                # Use just the column name
+                                columns.append(str(expr.name) if expr.name else str(expr))
+                            else:
+                                # Handle literals and expressions
+                                expr_str = str(expr)
+                                columns.append(expr_str)
+                        return columns
+            
+            return []
+        except Exception:
+            # Fallback: return standard UNION column names
+            return ['type', 'id', 'identifier']
+    
+    def _collect_union_selects_helper(self, union_expr, select_stmts: List) -> None:
+        """Helper to collect all SELECT statements from a UNION."""
+        try:
+            if hasattr(union_expr, 'left') and union_expr.left:
+                if isinstance(union_expr.left, sqlglot.exp.Union):
+                    self._collect_union_selects_helper(union_expr.left, select_stmts)
+                elif isinstance(union_expr.left, sqlglot.exp.Select):
+                    select_stmts.append(union_expr.left)
+            
+            if hasattr(union_expr, 'right') and union_expr.right:
+                if isinstance(union_expr.right, sqlglot.exp.Union):
+                    self._collect_union_selects_helper(union_expr.right, select_stmts)
+                elif isinstance(union_expr.right, sqlglot.exp.Select):
+                    select_stmts.append(union_expr.right)
+        except Exception:
+            pass
 
     def _infer_query_result_columns_simple(self, sql: str, select_columns: List[Dict]) -> List[Dict]:
         """
@@ -1457,6 +1723,95 @@ class LineageChainBuilder(BaseAnalyzer):
         
         return result_columns
     
+    def _choose_best_column(self, columns: List[Dict]) -> Dict:
+        """Choose the best column from duplicates, preferring ones with transformation details."""
+        if len(columns) == 1:
+            return columns[0]
+        
+        # Scoring criteria (higher score = better column)
+        def score_column(col):
+            score = 0
+            
+            # Prefer columns that don't have SQL expressions as names (clean aliases)
+            name = col.get('name', '')
+            has_sql_expression = any(keyword in name.upper() for keyword in ['AS ', 'COUNT', 'AVG', 'SUM', 'MAX', 'MIN', '(', ')'])
+            if not has_sql_expression:
+                score += 20  # Higher score for clean names
+            else:
+                # But if it has transformation details, that's even better
+                if 'transformation' in col:
+                    score += 25  # Override the penalty if it has proper transformation info
+            
+            # Prefer columns with transformation details
+            if 'transformation' in col:
+                score += 20
+                transformation = col['transformation']
+                if transformation.get('transformation_type') == 'AGGREGATE':
+                    score += 15
+                if transformation.get('function_type'):
+                    score += 5
+            
+            # Prefer columns with proper upstream references (not self-referential)
+            upstream = col.get('upstream', [])
+            if upstream and not any('QUERY_RESULT.' in ref for ref in upstream):
+                score += 5
+                
+            # Prefer DIRECT type for computed columns, SOURCE for base columns
+            col_type = col.get('type')
+            if col_type == 'DIRECT' and 'transformation' in col:
+                score += 8
+            elif col_type == 'SOURCE' and 'transformation' not in col:
+                score += 3
+                
+            return score
+        
+        # Choose column with highest score
+        best_column = max(columns, key=score_column)
+        return best_column
+
+    def _extract_clean_column_name(self, raw_expression: str, fallback_name: str) -> str:
+        """Extract clean column name from expression, preferring alias over raw expression."""
+        if not raw_expression:
+            return fallback_name or 'unknown'
+        
+        # Check for AS alias pattern
+        if ' AS ' in raw_expression.upper():
+            parts = raw_expression.split(' AS ', 1) if ' AS ' in raw_expression else raw_expression.split(' as ', 1)
+            if len(parts) > 1:
+                return parts[1].strip()
+        elif ' as ' in raw_expression:
+            parts = raw_expression.split(' as ', 1)
+            if len(parts) > 1:
+                return parts[1].strip()
+        
+        # If no alias, try to extract a meaningful name from the expression
+        # For simple column references, use the column name
+        if '(' not in raw_expression and '.' in raw_expression:
+            # Qualified column reference like "u.salary" -> "salary"
+            return raw_expression.split('.')[-1].strip()
+        elif '(' not in raw_expression:
+            # Simple column reference
+            return raw_expression.strip()
+        
+        # For complex expressions without aliases, use fallback
+        return fallback_name or raw_expression.strip()
+
+    def _query_has_aggregates(self, sql: str) -> bool:
+        """Check if the SQL query contains aggregate functions."""
+        if not sql:
+            return False
+        
+        sql_upper = sql.upper()
+        
+        # Check for aggregate functions
+        aggregate_functions = ['COUNT(', 'SUM(', 'AVG(', 'MIN(', 'MAX(', 'GROUP_CONCAT(']
+        has_aggregates = any(func in sql_upper for func in aggregate_functions)
+        
+        # Check for GROUP BY clause (strong indicator of aggregation)
+        has_group_by = 'GROUP BY' in sql_upper
+        
+        return has_aggregates or has_group_by
+
     def _is_column_from_table(self, column_name: str, table_name: str, context_info: dict = None) -> bool:
         """Check if a column belongs to a specific table using proper SQL parsing."""
         sql = context_info.get('sql') if context_info else None

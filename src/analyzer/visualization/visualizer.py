@@ -51,7 +51,9 @@ TRANSFORMATION_TYPES = {
     'GROUP_BY': 'GROUP_BY',
     'CASE': 'CASE',
     'COMPUTED': 'COMPUTED',
-    'AGGREGATE': 'AGGREGATE'
+    'AGGREGATE': 'AGGREGATE',
+    'UNION': 'UNION',
+    'UNION_ALL': 'UNION_ALL'
 }
 
 
@@ -1060,6 +1062,14 @@ class SQLLineageVisualizer:
             elif column_transformations.get('has_computed'):
                 # If there are computed/aggregate columns
                 trans_type = "COMPUTED TRANSFORMATION"
+            elif transformation.get('unions'):
+                # This is a UNION transformation
+                unions = transformation.get('unions', [])
+                if unions:
+                    union_type = unions[0].get('union_type', 'UNION')
+                    trans_type = union_type
+                else:
+                    trans_type = 'UNION'
             elif filter_conditions:
                 # This is primarily a filter transformation
                 trans_type = TRANSFORMATION_TYPES['TABLE_TRANSFORMATION']
@@ -1674,6 +1684,17 @@ class SQLLineageVisualizer:
         having = transformation.get('having_conditions', [])
         if having:
             label_parts.append(f"HAVING ({len(having)} conditions)")
+        
+        # Add UNION info if present
+        unions = transformation.get('unions', [])
+        if unions:
+            union_info = unions[0]  # Take the first union info
+            union_type = union_info.get('union_type', 'UNION')
+            union_source = union_info.get('union_source', '')
+            if union_source:
+                label_parts.append(f"{union_type} (from {union_source})")
+            else:
+                label_parts.append(union_type)
         
         return "\\n".join(label_parts)
     

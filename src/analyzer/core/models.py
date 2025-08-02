@@ -48,6 +48,18 @@ class OperatorType(str, Enum):
     BETWEEN = "BETWEEN"
     NOT_BETWEEN = "NOT BETWEEN"
     IS_NULL = "IS NULL"
+
+class TransformationType(str, Enum):
+    """Transformation type enumeration."""
+    SELECT = "SELECT"
+    JOIN = "JOIN"
+    FILTER = "FILTER"
+    GROUP_BY = "GROUP_BY"
+    UNION = "UNION"
+    UNION_ALL = "UNION_ALL"
+    CTE = "CTE"
+    AGGREGATE = "AGGREGATE"
+    CASE = "CASE"
     IS_NOT_NULL = "IS NOT NULL"
     AND = "AND"
     OR = "OR"
@@ -93,12 +105,15 @@ class TableTransformation:
     """Transformation information at table level."""
     source_table: str
     target_table: str
+    transformation_type: Optional[TransformationType] = None
     join_type: Optional[JoinType] = None
     join_conditions: List[JoinCondition] = field(default_factory=list)
     filter_conditions: List[FilterCondition] = field(default_factory=list)
     group_by_columns: List[str] = field(default_factory=list)
     having_conditions: List[FilterCondition] = field(default_factory=list)
     order_by_columns: List[str] = field(default_factory=list)
+    union_sources: List[str] = field(default_factory=list)  # For UNION operations
+    union_type: Optional[str] = None  # "UNION" or "UNION ALL"
     
 @dataclass
 class ColumnTransformation:
