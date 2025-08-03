@@ -4,6 +4,7 @@ from typing import Dict, List, Any, Optional
 import sqlglot
 from sqlglot import exp
 from .base_parser import BaseParser
+from ...utils.condition_utils import GenericConditionHandler
 
 
 class TransformationParser(BaseParser):
@@ -71,56 +72,13 @@ class TransformationParser(BaseParser):
     
     def _extract_filter_conditions(self, condition_expr) -> List[Dict[str, Any]]:
         """Extract individual filter conditions."""
-        conditions = []
-        
-        # Handle different condition types
-        condition_types = [
-            (exp.EQ, '='),
-            (exp.GT, '>'),
-            (exp.LT, '<'),
-            (exp.GTE, '>='),
-            (exp.LTE, '<='),
-            (exp.NEQ, '!='),
-            (exp.Like, 'LIKE'),
-            (exp.In, 'IN'),
-            (exp.Is, 'IS')
-        ]
-        
-        for condition_type, operator in condition_types:
-            for node in condition_expr.find_all(condition_type):
-                condition = self._create_condition(node, operator)
-                if condition:
-                    conditions.append(condition)
-        
-        return conditions
+        # Use generic condition handler with dict output format
+        return GenericConditionHandler.extract_all_conditions(
+            condition_expr, 
+            column_resolver=None, 
+            output_format="dict"
+        )
     
-    def _create_condition(self, node, operator: str) -> Optional[Dict[str, Any]]:
-        """Create condition dictionary from AST node."""
-        try:
-            if operator == 'IS NULL':
-                return {
-                    'column': str(node.this).strip(),
-                    'operator': operator,
-                    'value': None
-                }
-            elif operator == 'NOT':
-                # Handle NOT conditions
-                if isinstance(node.this, exp.Like):
-                    return {
-                        'column': str(node.this.left).strip(),
-                        'operator': 'NOT LIKE',
-                        'value': str(node.this.right).strip()
-                    }
-            elif hasattr(node, 'left') and hasattr(node, 'right'):
-                return {
-                    'column': str(node.left).strip(),
-                    'operator': operator,
-                    'value': str(node.right).strip()
-                }
-        except Exception:
-            pass
-        
-        return None
     
     def parse_transformation_joins(self, select_stmt: exp.Select) -> List[Dict[str, Any]]:
         """Parse JOIN transformations."""
@@ -191,14 +149,11 @@ class TransformationParser(BaseParser):
         if not condition_expr or not hasattr(condition_expr, 'find_all'):
             return conditions
         
-        for eq in condition_expr.find_all(exp.EQ):
-            conditions.append({
-                'left_column': str(eq.left).strip(),
-                'operator': '=',
-                'right_column': str(eq.right).strip()
-            })
-        
-        return conditions
+        # Use generic condition handler for join conditions (supports all operators)
+        return GenericConditionHandler.extract_join_conditions(
+            condition_expr, 
+            output_format="dict"
+        )
     
     def parse_transformation_aggregations(self, select_stmt: exp.Select) -> Dict[str, Any]:
         """Parse GROUP BY and aggregate function transformations."""

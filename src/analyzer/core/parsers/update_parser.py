@@ -5,6 +5,7 @@ import sqlglot
 from sqlglot import exp
 from .base_parser import BaseParser
 from .select_parser import SelectParser
+from ...utils.condition_utils import GenericConditionHandler
 
 
 class UpdateParser(BaseParser):
@@ -193,16 +194,11 @@ class UpdateParser(BaseParser):
     
     def _parse_join_conditions(self, condition_expr) -> List[Dict[str, Any]]:
         """Parse JOIN conditions."""
-        conditions = []
-        
-        for eq in condition_expr.find_all(exp.EQ):
-            conditions.append({
-                'left_column': str(eq.left).strip(),
-                'operator': '=',
-                'right_column': str(eq.right).strip()
-            })
-        
-        return conditions
+        # Use generic condition handler for join conditions (supports all operators)
+        return GenericConditionHandler.extract_join_conditions(
+            condition_expr, 
+            output_format="dict"
+        )
     
     def parse_where_conditions(self, update_stmt: exp.Update) -> List[Dict[str, Any]]:
         """Parse WHERE clause conditions."""
@@ -213,48 +209,13 @@ class UpdateParser(BaseParser):
     
     def _parse_conditions(self, condition_expr) -> List[Dict[str, Any]]:
         """Parse filter conditions from WHERE clause."""
-        conditions = []
-        
-        # Handle different condition types
-        condition_types = [
-            (exp.EQ, '='),
-            (exp.GT, '>'),
-            (exp.LT, '<'),
-            (exp.GTE, '>='),
-            (exp.LTE, '<='),
-            (exp.NEQ, '!='),
-            (exp.Like, 'LIKE'),
-            (exp.In, 'IN'),
-            (exp.IsNull, 'IS NULL')
-        ]
-        
-        for condition_type, operator in condition_types:
-            for node in condition_expr.find_all(condition_type):
-                condition = self._create_condition(node, operator)
-                if condition:
-                    conditions.append(condition)
-        
-        return conditions
+        # Use generic condition handler with dict output format
+        return GenericConditionHandler.extract_all_conditions(
+            condition_expr, 
+            column_resolver=None, 
+            output_format="dict"
+        )
     
-    def _create_condition(self, node, operator: str) -> Optional[Dict[str, Any]]:
-        """Create condition dictionary from AST node."""
-        try:
-            if operator == 'IS NULL':
-                return {
-                    'column': str(node.this).strip(),
-                    'operator': operator,
-                    'value': None
-                }
-            elif hasattr(node, 'left') and hasattr(node, 'right'):
-                return {
-                    'column': str(node.left).strip(),
-                    'operator': operator,
-                    'value': str(node.right).strip()
-                }
-        except Exception:
-            pass
-        
-        return None
     
     def parse_returning_clause(self, update_stmt: exp.Update) -> Optional[List[Dict[str, Any]]]:
         """Parse RETURNING clause if present."""

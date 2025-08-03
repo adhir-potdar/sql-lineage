@@ -4,6 +4,7 @@ from typing import Dict, List, Any, Optional
 import sqlglot
 from sqlglot import exp
 from .base_parser import BaseParser
+from ...utils.condition_utils import GenericConditionHandler
 
 
 class SelectParser(BaseParser):
@@ -208,18 +209,11 @@ class SelectParser(BaseParser):
         if not condition_expr or callable(condition_expr):
             return conditions
         
-        # Handle equality conditions (most common)
-        for eq in condition_expr.find_all(exp.EQ):
-            left = str(eq.left).strip()
-            right = str(eq.right).strip()
-            
-            conditions.append({
-                'left_column': left,
-                'operator': '=',
-                'right_column': right
-            })
-        
-        return conditions
+        # Use generic condition handler for join conditions (supports all operators)
+        return GenericConditionHandler.extract_join_conditions(
+            condition_expr, 
+            output_format="dict"
+        )
     
     def parse_where_clause(self, select_stmt: exp.Select) -> List[Dict[str, Any]]:
         """Parse WHERE clause conditions."""
@@ -239,37 +233,12 @@ class SelectParser(BaseParser):
     
     def _parse_conditions(self, condition_expr) -> List[Dict[str, Any]]:
         """Parse filter conditions from WHERE/HAVING clauses."""
-        conditions = []
-        
-        # Handle different condition types
-        for node in condition_expr.find_all((exp.EQ, exp.GT, exp.LT, exp.GTE, exp.LTE, exp.NEQ, exp.Like)):
-            condition = {
-                'column': str(node.left).strip(),
-                'operator': self._get_operator_symbol(node),
-                'value': str(node.right).strip()
-            }
-            conditions.append(condition)
-        
-        return conditions
-    
-    def _get_operator_symbol(self, node) -> str:
-        """Get operator symbol from expression node."""
-        if isinstance(node, exp.EQ):
-            return '='
-        elif isinstance(node, exp.GT):
-            return '>'
-        elif isinstance(node, exp.LT):
-            return '<'
-        elif isinstance(node, exp.GTE):
-            return '>='
-        elif isinstance(node, exp.LTE):
-            return '<='
-        elif isinstance(node, exp.NEQ):
-            return '!='
-        elif isinstance(node, exp.Like):
-            return 'LIKE'
-        else:
-            return '='
+        # Use generic condition handler with dict output format
+        return GenericConditionHandler.extract_all_conditions(
+            condition_expr, 
+            column_resolver=None, 
+            output_format="dict"
+        )
     
     def parse_group_by(self, select_stmt: exp.Select) -> List[str]:
         """Parse GROUP BY clause."""

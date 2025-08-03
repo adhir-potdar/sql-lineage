@@ -12,6 +12,7 @@ from .models import (
     JoinCondition, FilterCondition, AggregateFunction, WindowFunction, CaseExpression,
     JoinType, AggregateType, OperatorType, TransformationType
 )
+from ..utils.condition_utils import GenericConditionHandler
 
 
 class LineageExtractor:
@@ -859,70 +860,64 @@ class LineageExtractor:
         
         on_condition = join.args.get('on')
         if on_condition:
-            # Extract equality conditions from JOIN ON clause
-            for eq in on_condition.find_all(exp.EQ):
-                left_col = self._resolve_column_reference(str(eq.this), alias_mappings)
-                right_col = self._resolve_column_reference(str(eq.expression), alias_mappings)
-                
-                conditions.append(JoinCondition(
-                    left_column=left_col,
-                    operator=OperatorType.EQ,
-                    right_column=right_col
-                ))
+            # Extract all join conditions using generic handler (not just EQ) in uniform dict format
+            join_condition_dicts = GenericConditionHandler.extract_join_conditions(
+                on_condition, 
+                output_format="dict"
+            )
+            
+            # Convert to JoinCondition objects for this caller
+            for cond_dict in join_condition_dicts:
+                # Convert string operator back to OperatorType enum
+                op_enum = next((op for op in OperatorType if op.value == cond_dict["operator"]), OperatorType.EQ)
+                condition = JoinCondition(
+                    left_column=self._resolve_column_reference(cond_dict["left_column"], alias_mappings),
+                    operator=op_enum,
+                    right_column=self._resolve_column_reference(cond_dict["right_column"], alias_mappings)
+                )
+                conditions.append(condition)
         
         return conditions
     
     def _extract_filter_conditions(self, filter_node: Expression, alias_mappings: Dict[str, str]) -> List[FilterCondition]:
         """Extract filter conditions from WHERE or HAVING clause."""
         print(f"DEBUG: Extracting filter conditions from: {str(filter_node)[:100]}...")
-        conditions = []
         
         try:
-            # Extract various comparison operators
-            comparison_types = [
-                (exp.EQ, OperatorType.EQ),
-                (exp.NEQ, OperatorType.NEQ),
-                (exp.GT, OperatorType.GT),
-                (exp.GTE, OperatorType.GTE),
-                (exp.LT, OperatorType.LT),
-                (exp.LTE, OperatorType.LTE),
-                (exp.In, OperatorType.IN),
-                (exp.Like, OperatorType.LIKE),
-                (exp.Between, OperatorType.BETWEEN)
-            ]
+            # Use generic condition handler with column resolver
+            def column_resolver(column: str) -> str:
+                return self._resolve_column_reference(column, alias_mappings)
             
-            for exp_type, op_type in comparison_types:
-                for comp in filter_node.find_all(exp_type):
-                    if exp_type == exp.Between:
-                        # Handle BETWEEN specially
-                        column = self._resolve_column_reference(str(comp.this), alias_mappings)
-                        value = [str(comp.low), str(comp.high)]
-                    elif exp_type == exp.In:
-                        # Handle IN specially
-                        column = self._resolve_column_reference(str(comp.this), alias_mappings)
-                        value = [str(expr) for expr in comp.expressions]
-                        
-                        # Recursively extract conditions from subqueries in IN clause
-                        for expr in comp.expressions:
-                            if isinstance(expr, exp.Select):
-                                # Found a subquery - recursively extract its WHERE conditions
-                                subquery_where = expr.find(exp.Where)
-                                if subquery_where:
-                                    subquery_conditions = self._extract_filter_conditions(subquery_where, alias_mappings)
-                                    conditions.extend(subquery_conditions)
-                    else:
-                        # Handle regular binary comparisons
-                        column = self._resolve_column_reference(str(comp.this), alias_mappings)
-                        value = str(comp.expression)
-                    
-                    conditions.append(FilterCondition(
-                        column=column,
-                        operator=op_type,
-                        value=value
-                    ))
+            # Extract conditions using generic handler in uniform dict format
+            condition_dicts = GenericConditionHandler.extract_all_conditions(
+                filter_node, 
+                column_resolver=column_resolver, 
+                output_format="dict"
+            )
+            
+            # Convert to FilterCondition objects for this caller
+            conditions = []
+            for cond_dict in condition_dicts:
+                # Convert string operator back to OperatorType enum
+                op_enum = next((op for op in OperatorType if op.value == cond_dict["operator"]), OperatorType.EQ)
+                conditions.append(FilterCondition(
+                    column=cond_dict["column"],
+                    operator=op_enum,
+                    value=cond_dict["value"]
+                ))
+            
+            # Handle recursive subquery extraction for IN clauses
+            for in_expr in filter_node.find_all(exp.In):
+                for expr in in_expr.expressions:
+                    if isinstance(expr, exp.Select):
+                        # Found a subquery - recursively extract its WHERE conditions
+                        subquery_where = expr.find(exp.Where)
+                        if subquery_where:
+                            subquery_conditions = self._extract_filter_conditions(subquery_where, alias_mappings)
+                            conditions.extend(subquery_conditions)
         
         except Exception:
-            pass
+            conditions = []
         
         print(f"DEBUG: Found {len(conditions)} filter conditions: {[(c.column, c.operator, c.value) for c in conditions]}")
         return conditions
