@@ -142,9 +142,46 @@ def is_column_from_table(column_name: str, table_name: str, sql: str = None, dia
             if actual_table and actual_table == table_name:
                 return True
     
-    # For unqualified column names, we can't definitively say without schema info
-    # Default to True for backward compatibility
-    return not ('.' in column_name)
+    # For unqualified column names, we need to check if they're in subqueries
+    if not ('.' in column_name) and sql:
+        # Use the same logic as column extraction utility to exclude subquery columns  
+        try:
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect=dialect)
+            
+            # Find all column nodes with this name
+            for column_node in parsed.find_all(sqlglot.exp.Column):
+                if str(column_node.name) == column_name:
+                    # Check if this column is inside a subquery
+                    parent_node = column_node.parent
+                    subquery_node = None
+                    while parent_node:
+                        if isinstance(parent_node, sqlglot.exp.Subquery):
+                            subquery_node = parent_node
+                            break
+                        parent_node = parent_node.parent
+                    
+                    if subquery_node:
+                        # This column is inside a subquery - check if the subquery references our target table
+                        subquery_select = subquery_node.this
+                        if isinstance(subquery_select, sqlglot.exp.Select):
+                            from_clause = subquery_select.find(sqlglot.exp.From)
+                            if from_clause and hasattr(from_clause.this, 'name'):
+                                subquery_table = str(from_clause.this.name)
+                                # If subquery references the target table, the column belongs to that table
+                                if subquery_table == table_name:
+                                    return True
+                        # Column is in subquery but doesn't reference our target table
+                        return False
+            
+            # If no unqualified columns of this name are in subqueries, assume it belongs to this table
+            return True
+            
+        except Exception:
+            # Fallback to original behavior for backward compatibility
+            return True
+    
+    return False
 
 
 def clean_source_expression(expression: str) -> str:
@@ -159,6 +196,28 @@ def clean_source_expression(expression: str) -> str:
         clean_expr = expression.split(' as ')[0].strip()
         
     return clean_expr
+
+
+def is_subquery_expression(expression: str, dialect: str = "trino") -> bool:
+    """Check if expression contains a subquery (SELECT statement)."""
+    if not expression:
+        return False
+    
+    try:
+        import sqlglot
+        from sqlglot import exp
+        
+        # Try to parse as an expression
+        parsed = sqlglot.parse_one(expression, dialect=dialect)
+        
+        # Check if there are any Subquery nodes
+        return bool(list(parsed.find_all(exp.Subquery)))
+        
+    except Exception:
+        # Fallback to regex-based detection
+        import re
+        pattern = r"\(\s*SELECT\s+.*?\s+FROM\s+.*?\)"
+        return bool(re.search(pattern, expression, re.IGNORECASE | re.DOTALL))
 
 
 def extract_table_references_from_sql(sql: str, dialect: str = "trino") -> List[Dict[str, str]]:
@@ -474,3 +533,107 @@ def extract_qualified_filter_columns(sql: str, table_name: str, dialect: str = "
         pass
         
     return result_columns
+
+
+def extract_tables_from_subquery(subquery_expr: str, dialect: str = "trino") -> List[str]:
+    """Extract table names from a subquery expression."""
+    if not subquery_expr:
+        return []
+    
+    try:
+        import sqlglot
+        import re
+        
+        # Extract just the subquery part (without outer alias)
+        subquery_pattern = r'\(SELECT.*?\)'
+        subquery_match = re.search(subquery_pattern, subquery_expr, re.IGNORECASE | re.DOTALL)
+        if not subquery_match:
+            return []
+            
+        subquery_sql = subquery_match.group(0)
+        
+        # Parse the subquery
+        parsed_subquery = sqlglot.parse_one(subquery_sql, dialect=dialect)
+        if not isinstance(parsed_subquery, sqlglot.exp.Select):
+            return []
+        
+        # Get the FROM clause of the subquery
+        from_clause = parsed_subquery.find(sqlglot.exp.From)
+        if not from_clause:
+            return []
+        
+        # Get tables from the subquery's FROM clause
+        tables = []
+        subquery_tables = list(from_clause.find_all(sqlglot.exp.Table))
+        for table in subquery_tables:
+            table_name = str(table.name)
+            if table_name not in tables:
+                tables.append(table_name)
+                
+        return tables
+        
+    except Exception:
+        # Fallback: use regex to extract table names from FROM clause
+        import re
+        from_match = re.search(r'FROM\s+([^)\s]+)', subquery_expr, re.IGNORECASE)
+        if from_match:
+            return [from_match.group(1).strip()]
+        return []
+
+
+def is_subquery_relevant_to_table(subquery_expr: str, table_name: str, dialect: str = "trino") -> bool:
+    """Check if a subquery expression is relevant to a specific table."""
+    if not subquery_expr or not table_name:
+        return False
+    
+    # Extract tables from the subquery
+    subquery_tables = extract_tables_from_subquery(subquery_expr, dialect)
+    return table_name in subquery_tables
+
+
+def extract_columns_referenced_by_table_in_union(sql: str, table_name: str, dialect: str = "trino") -> List[str]:
+    """Extract all columns referenced by a specific table in a UNION query (SELECT + WHERE clauses)."""
+    columns = []
+    
+    try:
+        import re
+        
+        # Split the SQL into individual SELECT statements
+        union_statements = re.split(r'\bUNION(?:\s+ALL)?\b', sql, flags=re.IGNORECASE)
+        
+        for statement in union_statements:
+            statement = statement.strip()
+            # Check if this statement contains our table
+            if f'FROM {table_name.upper()}' in statement.upper():
+                # Extract columns from SELECT clause (only actual column references, not literals)
+                select_match = re.search(r'SELECT\s+(.*?)\s+FROM', statement, re.IGNORECASE | re.DOTALL)
+                if select_match:
+                    select_clause = select_match.group(1)
+                    # Find column references (skip string literals like 'user')
+                    for item in select_clause.split(','):
+                        item = item.strip()
+                        # Skip string literals
+                        if not item.startswith("'"):
+                            # Extract column name (before 'as' if present)
+                            col_match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)', item)
+                            if col_match:
+                                col_name = col_match.group(1)
+                                if col_name not in columns:
+                                    columns.append(col_name)
+                
+                # Extract columns from WHERE clause
+                where_match = re.search(r'WHERE\s+(.*?)(?:\s*$)', statement, re.IGNORECASE | re.DOTALL)
+                if where_match:
+                    where_clause = where_match.group(1).strip()
+                    # Extract column references from WHERE conditions (column names before operators)
+                    col_matches = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*[><=!]', where_clause)
+                    for col in col_matches:
+                        if col not in columns and col.lower() not in ['and', 'or', 'where']:
+                            columns.append(col)
+                
+                break  # Found the statement for this table
+        
+        return columns
+        
+    except Exception:
+        return []

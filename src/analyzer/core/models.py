@@ -239,6 +239,21 @@ class LineageResult:
     
     def _serialize_metadata(self, metadata: TableMetadata) -> Dict[str, Any]:
         """Serialize table metadata for JSON."""
+        if metadata is None:
+            # Return basic metadata structure when no external metadata is available
+            return {
+                "catalog": None,
+                "schema": "default",
+                "table": None,
+                "table_type": "TABLE",
+                "description": "Table information",
+                "owner": None,
+                "created_date": None,
+                "row_count": None,
+                "storage_format": None,
+                "columns": []
+            }
+        
         return {
             "catalog": metadata.catalog,
             "schema": metadata.schema,

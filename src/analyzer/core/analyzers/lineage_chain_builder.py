@@ -17,8 +17,7 @@ from ...utils.sql_parsing_utils import (
     extract_qualified_filter_columns
 )
 from ...utils.column_extraction_utils import (
-    extract_aggregate_columns, choose_best_column, process_select_expression,
-    is_column_from_table as column_belongs_to_table
+    extract_aggregate_columns, choose_best_column, process_select_expression
 )
 from ...utils.aggregate_utils import (
     is_aggregate_function, query_has_aggregates, extract_alias_from_expression,
@@ -97,23 +96,8 @@ class LineageChainBuilder(BaseAnalyzer):
             result.errors = []
             result.warnings = []
             
-            # Get metadata from the main analyzer's metadata registry
+            # No external metadata - analyze tables purely from SQL context
             result.metadata = {}
-            if hasattr(self.main_analyzer, 'metadata_registry') and self.main_analyzer.metadata_registry:
-                # Get all unique tables from both upstream and downstream
-                all_tables = set()
-                all_tables.update(table_lineage.upstream.keys())
-                all_tables.update(table_lineage.downstream.keys())  
-                for tables in table_lineage.upstream.values():
-                    all_tables.update(tables)
-                for tables in table_lineage.downstream.values():
-                    all_tables.update(tables)
-                
-                # Get metadata for each table
-                for table_name in all_tables:
-                    table_metadata = self.main_analyzer.metadata_registry.get_table_metadata(table_name)
-                    if table_metadata:
-                        result.metadata[table_name] = table_metadata
         except Exception as e:
             # Create empty result on error
             from types import SimpleNamespace
@@ -230,23 +214,8 @@ class LineageChainBuilder(BaseAnalyzer):
             result.errors = []
             result.warnings = []
             
-            # Get metadata from the main analyzer's metadata registry
+            # No external metadata - analyze tables purely from SQL context
             result.metadata = {}
-            if hasattr(self.main_analyzer, 'metadata_registry') and self.main_analyzer.metadata_registry:
-                # Get all unique tables from both upstream and downstream
-                all_tables = set()
-                all_tables.update(table_lineage.upstream.keys())
-                all_tables.update(table_lineage.downstream.keys())  
-                for tables in table_lineage.upstream.values():
-                    all_tables.update(tables)
-                for tables in table_lineage.downstream.values():
-                    all_tables.update(tables)
-                
-                # Get metadata for each table
-                for table_name in all_tables:
-                    table_metadata = self.main_analyzer.metadata_registry.get_table_metadata(table_name)
-                    if table_metadata:
-                        result.metadata[table_name] = table_metadata
         except Exception as e:
             # Create empty result on error
             from types import SimpleNamespace
@@ -388,7 +357,7 @@ class LineageChainBuilder(BaseAnalyzer):
                 "metadata": {"table_columns": []}
             }
             
-            if entity_name in result.metadata:
+            if entity_name in result.metadata and result.metadata[entity_name] is not None:
                 table_meta = result.metadata[entity_name]
                 metadata = {
                     "table_type": table_meta.table_type.value
@@ -399,6 +368,13 @@ class LineageChainBuilder(BaseAnalyzer):
                     metadata["schema"] = table_meta.schema
                 if table_meta.description:
                     metadata["description"] = table_meta.description
+            else:
+                # No external metadata - use basic defaults
+                metadata = {
+                    "table_type": "TABLE",
+                    "schema": "default", 
+                    "description": "Table information"
+                }
                 
                 # Update existing metadata with table metadata
                 chain["metadata"].update(metadata)
@@ -472,8 +448,8 @@ class LineageChainBuilder(BaseAnalyzer):
                                     relevant_filters = []
                                     
                                     for fc in trans.filter_conditions:
-                                        # Only include filter conditions that reference columns from this entity
-                                        if column_belongs_to_table(fc.column, entity_name, context_info):
+                                        # Include filter conditions that reference columns from this entity (including subquery context)
+                                        if is_column_from_table(fc.column, entity_name, sql):
                                             relevant_filters.append({
                                                 "column": fc.column,
                                                 "operator": fc.operator.value if hasattr(fc.operator, 'value') else str(fc.operator),
@@ -486,7 +462,7 @@ class LineageChainBuilder(BaseAnalyzer):
                                 if hasattr(trans, 'group_by_columns') and trans.group_by_columns:
                                     relevant_group_by = []
                                     for col in trans.group_by_columns:
-                                        if column_belongs_to_table(col, entity_name, context_info):
+                                        if is_column_from_table(col, entity_name, sql):
                                             relevant_group_by.append(col)
                                     if relevant_group_by:
                                         trans_data["group_by_columns"] = relevant_group_by
@@ -497,7 +473,7 @@ class LineageChainBuilder(BaseAnalyzer):
                                     for hc in trans.having_conditions:
                                         # Having conditions often involve aggregations like COUNT(*) or AVG(u.salary)
                                         # Check if they reference this entity or if they are general aggregations for this table
-                                        is_relevant = (column_belongs_to_table(hc.column, entity_name, context_info) or 
+                                        is_relevant = (is_column_from_table(hc.column, entity_name, sql) or 
                                                      is_aggregate_function_for_table(hc.column, entity_name, sql))
                                         if is_relevant:
                                             relevant_having.append({
@@ -514,7 +490,7 @@ class LineageChainBuilder(BaseAnalyzer):
                                     for col in trans.order_by_columns:
                                         # Extract just the column name part (before ASC/DESC)
                                         col_name = col.split()[0] if ' ' in col else col
-                                        if column_belongs_to_table(col_name, entity_name, context_info):
+                                        if is_column_from_table(col_name, entity_name, sql):
                                             relevant_order_by.append(col)
                                     if relevant_order_by:
                                         trans_data["order_by_columns"] = relevant_order_by
@@ -685,6 +661,8 @@ class LineageChainBuilder(BaseAnalyzer):
         """
         chain_data = self.get_lineage_chain(sql, chain_type, depth, target_entity, **kwargs)
         return json.dumps(chain_data, indent=2)
+
+
 
     def _build_cte_lineage_chain(self, sql: str, chain_type: str, depth: int, target_entity: Optional[str], **kwargs) -> Dict[str, Any]:
         """Build lineage chain for CTE queries with proper single-flow chains."""

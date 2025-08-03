@@ -7,7 +7,6 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from analyzer import SQLLineageAnalyzer
-from analyzer.metadata import SampleMetadataRegistry
 from analyzer.visualization import SQLLineageVisualizer
 from test_formatter import print_quick_result, print_section_header, print_test_summary, print_lineage_analysis
 
@@ -101,7 +100,6 @@ def test_cte_stats_query():
     
     # Initialize analyzer with sample metadata
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     # The complex CTE query provided by the user
     sql = """
@@ -284,7 +282,6 @@ def test_chain_details():
     print_section_header("Chain Details Analysis", 50)
     
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     sql = """
     WITH total_cols AS (
@@ -387,7 +384,6 @@ def performance_test():
     
     import time
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     sql = """
     WITH total_cols AS (

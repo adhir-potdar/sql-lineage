@@ -9,7 +9,6 @@ import os
 import traceback
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from analyzer import SQLLineageAnalyzer
-from analyzer.metadata import SampleMetadataRegistry
 from analyzer.formatters import ConsoleFormatter, JSONFormatter
 from analyzer.visualization import SQLLineageVisualizer
 from test_formatter import print_lineage_analysis, print_test_summary, print_section_header
@@ -210,7 +209,6 @@ class SimpleTestRunner:
 def test_simple_select():
     """Test basic SELECT query."""
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     sql = "SELECT id, name, email FROM users WHERE age > 25"
     
     result = analyzer.analyze(sql)
@@ -225,7 +223,6 @@ def test_simple_select():
 def test_simple_join():
     """Test basic JOIN query."""
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     sql = """
     SELECT u.name, o.total, o.order_date
     FROM users u
@@ -247,7 +244,6 @@ def test_simple_join():
 def test_simple_cte():
     """Test basic CTE query."""
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     sql = """
     WITH active_users AS (
         SELECT id, name, email
@@ -271,7 +267,6 @@ def test_simple_cte():
 def test_create_table_as_select():
     """Test CREATE TABLE AS SELECT."""
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     sql = """
     CREATE TABLE user_summary AS
     SELECT id, name, age, COUNT(*) as login_count
@@ -298,7 +293,6 @@ def test_create_table_as_select():
 def test_complex_multi_cte():
     """Test complex query with multiple CTEs."""
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     sql = """
     WITH order_stats AS (
         SELECT 
@@ -365,7 +359,6 @@ def test_complex_multi_cte():
 def test_complex_joins_with_aggregation():
     """Test complex query with multiple joins and aggregation."""
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     sql = """
     SELECT 
         c.category_name,
@@ -407,7 +400,6 @@ def test_complex_joins_with_aggregation():
 def test_window_functions():
     """Test query with window functions."""
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     sql = """
     SELECT 
         customer_id,
@@ -437,7 +429,6 @@ def test_window_functions():
 def test_subquery():
     """Test query with subquery."""
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     sql = """
     SELECT 
         u.name,
@@ -467,7 +458,6 @@ def test_subquery():
 def test_union_query():
     """Test UNION query."""
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     sql = """
     SELECT 'user' as type, id, name as identifier FROM users WHERE age > 25
     UNION ALL
@@ -493,7 +483,6 @@ def test_union_query():
 def test_error_handling():
     """Test error handling with invalid SQL."""
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     # Test empty SQL
     result1 = analyzer.analyze("")
@@ -518,8 +507,7 @@ def test_different_dialects():
     
     for dialect in dialects:
         analyzer = SQLLineageAnalyzer(dialect=dialect)
-        analyzer.set_metadata_registry(SampleMetadataRegistry())
-        result = analyzer.analyze(sql)
+            result = analyzer.analyze(sql)
         
         runner.assert_true(not result.has_errors(), f"Query should work with {dialect} dialect")
         runner.assert_true(result.dialect == dialect, f"Result should have {dialect} dialect")
@@ -531,7 +519,6 @@ def test_different_dialects():
 def test_json_output():
     """Test JSON output formatting."""
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     sql = "SELECT u.name, COUNT(o.id) FROM users u JOIN orders o ON u.id = o.user_id GROUP BY u.name"
     
     result = analyzer.analyze(sql)
@@ -553,7 +540,6 @@ def test_json_output():
 def test_metadata_integration():
     """Test metadata integration."""
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     sql = "SELECT u.name, u.email, o.total FROM users u JOIN orders o ON u.id = o.user_id"
     
     result = analyzer.analyze(sql)
@@ -575,7 +561,6 @@ def test_metadata_integration():
 def test_chain_building():
     """Test table and column lineage chain building functionality."""
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     # Complex multi-level CTE query for thorough chain testing
     sql = """
@@ -723,7 +708,6 @@ def main():
     
     # Collect JSON outputs for key test queries
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     json_outputs = []
     chain_outputs = []

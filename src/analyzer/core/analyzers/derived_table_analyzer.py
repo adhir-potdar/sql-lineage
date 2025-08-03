@@ -289,23 +289,23 @@ class DerivedTableAnalyzer:
         return transformations
     
     def _extract_filter_conditions(self, where_clause, alias: str) -> List[Dict]:
-        """Extract filter conditions from WHERE clause."""
-        conditions = []
+        """Extract filter conditions from WHERE clause that reference this derived table alias."""
+        # Use the existing transformation parser's comprehensive filter extraction logic
+        from ..parsers.transformation_parser import TransformationParser
         
-        # Simple implementation - can be enhanced
-        where_str = str(where_clause.this)
+        # Create a temporary parser instance to leverage existing logic
+        temp_parser = TransformationParser()
         
-        # Look for conditions referencing the derived table alias
-        if f"{alias}." in where_str:
-            # Parse basic comparison conditions
-            # This is a simplified implementation
-            conditions.append({
-                "column": where_str.split()[0],
-                "operator": ">",  # Simplified - would need proper parsing
-                "value": "50000"  # Simplified - would need proper parsing
-            })
+        # Extract all filter conditions using the existing comprehensive logic
+        all_conditions = temp_parser._extract_filter_conditions(where_clause.this)
         
-        return conditions
+        # Filter to only include conditions that reference this derived table alias
+        relevant_conditions = []
+        for condition in all_conditions:
+            if condition.get("column", "").startswith(f"{alias}."):
+                relevant_conditions.append(condition)
+        
+        return relevant_conditions
     
     def _build_three_layer_structure(self, source_table: str, derived_table_entity: str,
                                    source_columns: List[Dict], derived_columns: List[Dict], 

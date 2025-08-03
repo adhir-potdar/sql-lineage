@@ -9,7 +9,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 from analyzer import SQLLineageAnalyzer
-from analyzer.metadata import SampleMetadataRegistry
 from analyzer.visualization import SQLLineageVisualizer, create_lineage_visualization
 
 
@@ -24,7 +23,6 @@ def test_basic_visualization():
     
     # Initialize analyzer
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     # Complex CTE query for testing
     sql = """
@@ -280,7 +278,6 @@ def test_custom_styling():
     
     # Initialize analyzer
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     # Simple query for styling test
     sql = """
@@ -345,7 +342,6 @@ def test_different_formats():
     
     # Initialize analyzer
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     sql = "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id"
     

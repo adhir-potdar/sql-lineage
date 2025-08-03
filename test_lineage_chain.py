@@ -13,9 +13,17 @@ import os
 import traceback
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from analyzer import SQLLineageAnalyzer
-from analyzer.metadata import SampleMetadataRegistry
 from analyzer.visualization.visualizer import SQLLineageVisualizer
 from test_formatter import print_section_header, print_subsection_header, print_test_summary
+
+# Global flag to control registry usage
+USE_SAMPLE_REGISTRY = False
+
+def create_analyzer():
+    """Create analyzer - no metadata registry needed."""
+    analyzer = SQLLineageAnalyzer(dialect="trino")
+    print("📊 Using SQL-only analysis (no external metadata)")
+    return analyzer
 
 
 def save_lineage_chain_outputs(chain_outputs, test_name):
@@ -74,8 +82,7 @@ def test_lineage_chain_basic_functionality():
     """Test basic functionality of get_lineage_chain and get_lineage_chain_json functions."""
     print_subsection_header("Basic Lineage Chain Functionality")
     
-    analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
+    analyzer = create_analyzer()
     
     # Simple test query
     sql = """
@@ -706,8 +713,7 @@ def test_lineage_chain_comprehensive():
     """Generate comprehensive lineage chain JSON files for all test queries."""
     print_subsection_header("Comprehensive Lineage Chain Generation")
     
-    analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
+    analyzer = create_analyzer()
     
     # Collect all queries from test files
     all_queries = []
@@ -803,8 +809,7 @@ def test_lineage_chain_advanced_features():
     """Test advanced features of the lineage chain functions."""
     print_subsection_header("Advanced Lineage Chain Features")
     
-    analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
+    analyzer = create_analyzer()
     
     # Complex query with multiple transformation types
     complex_sql = """

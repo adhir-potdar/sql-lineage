@@ -8,7 +8,6 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from analyzer import SQLLineageAnalyzer
-from analyzer.metadata import SampleMetadataRegistry
 from analyzer.visualization import SQLLineageVisualizer
 from test_formatter import print_quick_result, print_section_header, print_test_summary, print_lineage_analysis
 
@@ -136,7 +135,6 @@ def quick_test():
     
     # Initialize analyzer with sample metadata
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     # Store all JSON outputs and chain outputs
     json_outputs = []
@@ -249,7 +247,6 @@ def performance_test():
     
     import time
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     # Complex query for performance testing
     complex_sql = """
@@ -326,8 +323,7 @@ def dialect_test():
     
     for dialect in dialects:
         analyzer = SQLLineageAnalyzer(dialect=dialect)
-        analyzer.set_metadata_registry(SampleMetadataRegistry())
-        result = analyzer.analyze(sql)
+            result = analyzer.analyze(sql)
         
         if result.has_errors():
             print(f"❌ {dialect}: {result.errors[0]}")
@@ -345,7 +341,6 @@ def test_column_lineage_flag():
     print("─" * 40)
     
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     sql = "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id"
     result = analyzer.analyze(sql)
     
@@ -370,7 +365,6 @@ def test_chain_functionality():
     print("─" * 40)
     
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     # Complex multi-level CTE for chain testing
     sql = """

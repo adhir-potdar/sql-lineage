@@ -1,10 +1,13 @@
 """Chain building engine for SQL lineage analysis."""
 
 from typing import Dict, List, Any, Optional, Set
-from ..utils.sql_parsing_utils import is_column_from_table
+import sqlglot
+from ..utils.sql_parsing_utils import is_column_from_table, extract_function_type, extract_clean_column_name, is_subquery_expression, is_subquery_relevant_to_table, extract_columns_referenced_by_table_in_union
 from ..utils.metadata_utils import create_metadata_entry
+from ..utils.regex_patterns import is_aggregate_function
+from ..utils.aggregate_utils import is_aggregate_function_for_table, extract_alias_from_expression
 from .analyzers.derived_table_analyzer import DerivedTableAnalyzer
-
+from .transformation_engine import TransformationEngine
 
 class ChainBuilderEngine:
     """Engine for building lineage chains from dependencies."""
@@ -13,6 +16,7 @@ class ChainBuilderEngine:
         """Initialize the chain builder engine."""
         self.dialect = dialect
         self.derived_table_analyzer = DerivedTableAnalyzer(dialect)
+        self.transformation_engine = TransformationEngine(dialect)
     
     def build_chain_from_dependencies(self, entity_name: str, entity_type: str, 
                                     table_lineage_data: Dict, column_lineage_data: Dict,
@@ -99,6 +103,7 @@ class ChainBuilderEngine:
                     # Add group by columns
                     trans_data = self._add_group_by_columns(trans_data, trans, entity_name, sql)
                     
+                    
                     # Add having conditions
                     trans_data = self._add_having_conditions(trans_data, trans, entity_name, sql)
                     
@@ -145,7 +150,12 @@ class ChainBuilderEngine:
     
     def _add_filter_conditions(self, trans_data: Dict, trans, entity_name: str, sql: str) -> Dict:
         """Add filter conditions to transformation data."""
+        print(f"DEBUG: _add_filter_conditions called for {entity_name}, trans has filter_conditions: {hasattr(trans, 'filter_conditions')}")
+        if hasattr(trans, 'filter_conditions'):
+            print(f"DEBUG: Filter conditions count: {len(trans.filter_conditions) if trans.filter_conditions else 0}")
+        
         if hasattr(trans, 'filter_conditions') and trans.filter_conditions:
+            print(f"DEBUG: Processing filter conditions for {entity_name}: {[(fc.column, fc.operator, fc.value) for fc in trans.filter_conditions]}")
             # Determine context for column filtering
             is_single_table = (
                 trans.target_table == "QUERY_RESULT" or  # Regular SELECT
@@ -162,7 +172,9 @@ class ChainBuilderEngine:
             relevant_filters = []
             for fc in trans.filter_conditions:
                 # Only include filter conditions that reference columns from this entity
-                if is_column_from_table(fc.column, entity_name, sql, self.dialect):
+                column_belongs = is_column_from_table(fc.column, entity_name, sql, self.dialect)
+                print(f"DEBUG: Filter condition '{fc.column}' belongs to {entity_name}? {column_belongs}")
+                if column_belongs:
                     relevant_filters.append({
                         "column": fc.column,
                         "operator": fc.operator.value if hasattr(fc.operator, 'value') else str(fc.operator),
@@ -385,11 +397,12 @@ class ChainBuilderEngine:
     def add_missing_source_columns(self, chains: Dict, sql: str = None, column_lineage_data: Dict = None, column_transformations_data: Dict = None) -> None:
         """Add missing source columns and handle QUERY_RESULT dependencies - moved from LineageChainBuilder."""
         if not sql:
-            return
+            return 
             
         try:
             # Parse SQL to get select columns and alias mapping for QUERY_RESULT columns
             import sqlglot
+            from ..utils.sql_parsing_utils import is_subquery_expression
             parsed = sqlglot.parse_one(sql, dialect='trino')
             
             # Build alias to table mapping
@@ -399,19 +412,30 @@ class ChainBuilderEngine:
                 if table.alias:
                     alias_to_table[str(table.alias)] = str(table.name)
             
-            # Get select columns from parsing
+            # Get select columns from parsing - handle all SELECT statements including UNIONs
             select_columns = []
-            select_stmt = parsed if isinstance(parsed, sqlglot.exp.Select) else parsed.find(sqlglot.exp.Select)
-            if select_stmt:
+            
+            # Collect all SELECT statements (handles UNION queries properly)
+            select_stmts = list(parsed.find_all(sqlglot.exp.Select))
+            
+            # Process each SELECT statement
+            for select_stmt in select_stmts:
+                # Get the FROM table for this SELECT to track source
+                from_clause = select_stmt.find(sqlglot.exp.From)
+                stmt_source_table = None
+                if from_clause and isinstance(from_clause.this, sqlglot.exp.Table):
+                    stmt_source_table = str(from_clause.this.name)
+                
                 for expr in select_stmt.expressions:
                     if isinstance(expr, sqlglot.exp.Column):
                         raw_expr = str(expr)
-                        table_part = str(expr.table) if expr.table else None
+                        table_part = str(expr.table) if expr.table else stmt_source_table
                         column_name = str(expr.name) if expr.name else raw_expr
                         select_columns.append({
                             'raw_expression': raw_expr,
                             'column_name': column_name,
-                            'source_table': table_part
+                            'source_table': table_part,
+                            'from_table': stmt_source_table  # Track which table this SELECT is from
                         })
                     else:
                         # Handle other expressions (including Alias expressions for subqueries)
@@ -422,11 +446,21 @@ class ChainBuilderEngine:
                             column_name = str(expr.alias)
                         else:
                             column_name = raw_expr
+                        
+                        # For subquery expressions, set source_table to the subquery's table
+                        source_table_for_expr = stmt_source_table
+                        if is_subquery_expression(raw_expr, self.dialect):
+                            # Extract the actual source table from the subquery
+                            from ..utils.sql_parsing_utils import extract_tables_from_subquery
+                            subquery_tables = extract_tables_from_subquery(raw_expr, self.dialect)
+                            if subquery_tables:
+                                source_table_for_expr = subquery_tables[0]  # Use the first table from subquery
                             
                         select_columns.append({
                             'raw_expression': raw_expr,
                             'column_name': column_name,
-                            'source_table': None
+                            'source_table': source_table_for_expr,
+                            'from_table': stmt_source_table  # Track which table this SELECT is from
                         })
         except:
             select_columns = []
@@ -469,7 +503,9 @@ class ChainBuilderEngine:
                         add_group_by_to_ctas_transformations(dep, sql)
                     else:
                         # Check if this is a JOIN or UNION query first
-                        is_join_query = any(sel_col.get('source_table') is not None for sel_col in select_columns)
+                        # A JOIN query should have multiple different source tables or JOIN keywords
+                        unique_source_tables = set(sel_col.get('source_table') for sel_col in select_columns if sel_col.get('source_table'))
+                        is_join_query = len(unique_source_tables) > 1 or 'JOIN' in sql.upper()
                         is_union_query = 'UNION' in sql.upper()
                         
                         # Run aggregate-aware processing if needed, or for JOIN/UNION queries
@@ -480,7 +516,167 @@ class ChainBuilderEngine:
                             inferred_columns = infer_query_result_columns_simple(sql, select_columns)
                             has_table_prefixes = any('.' in col.get('name', '') for col in inferred_columns)
                             
-                            if has_table_prefixes or is_join_query:
+                            # Special handling for QUERY_RESULT: Add all SELECT columns with transformation details
+                            # Only add to the primary table (FROM clause) or the table that most SELECT expressions reference
+                            if dep_entity == 'QUERY_RESULT':
+                                # For UNION queries, filter select_columns to only those from this entity
+                                if is_union_query:
+                                    entity_select_columns = [col for col in select_columns if col.get('source_table') == entity_name]
+                                else:
+                                    entity_select_columns = select_columns
+                                
+                                # Determine primary table from FROM clause
+                                primary_table = None
+                                try:
+                                    parsed_sql = sqlglot.parse_one(sql, dialect='trino')
+                                    from_clause = parsed_sql.find(sqlglot.exp.From)
+                                    if from_clause and hasattr(from_clause.this, 'name'):
+                                        primary_table = str(from_clause.this.name)
+                                except:
+                                    pass
+                                
+                                # For aggregate queries, only add to primary table
+                                # For JOIN/UNION queries, add to the main table that most SELECT expressions reference
+                                should_add_columns = False
+                                
+                                if needs_aggregate_processing:
+                                    # For aggregate queries, only add to primary table
+                                    should_add_columns = (entity_name == primary_table)
+                                elif is_join_query or is_union_query:
+                                    # For JOIN/UNION queries, always process columns but filter by table relevance
+                                    should_add_columns = True
+                                else:
+                                    # For simple queries, add to primary table
+                                    should_add_columns = (entity_name == primary_table)
+                                
+                                if should_add_columns:
+                                    for sel_col in entity_select_columns:
+                                        raw_expression = sel_col.get('raw_expression')
+                                        column_name = sel_col.get('column_name')
+                                        source_table = sel_col.get('source_table')
+                                        
+                                        print(f"DEBUG: Processing column for {entity_name}: '{raw_expression}' (source_table: {source_table})")
+                                        
+                                        # Skip subquery columns for entities that don't match the subquery's source table
+                                        if (is_subquery_expression(raw_expression, self.dialect) and 
+                                            source_table != entity_name):
+                                            print(f"DEBUG: Skipping subquery column '{raw_expression[:50]}...' for {entity_name} (belongs to {source_table})")
+                                            continue
+                                        
+                                        # Skip individual aggregate functions that are part of subqueries
+                                        if (is_aggregate_function(raw_expression) and 
+                                            not is_subquery_expression(raw_expression, self.dialect) and
+                                            source_table != entity_name):
+                                            # Check if this aggregate function is part of a subquery by looking at other columns
+                                            skip_aggregate = False
+                                            for other_col in entity_select_columns:
+                                                other_expr = other_col.get('raw_expression', '')
+                                                if (is_subquery_expression(other_expr, self.dialect) and 
+                                                    raw_expression in other_expr):
+                                                    skip_aggregate = True
+                                                    print(f"DEBUG: Skipping aggregate '{raw_expression}' as it's part of subquery '{other_expr[:50]}...'")
+                                                    break
+                                            if skip_aggregate:
+                                                continue
+                                        
+                                        # For JOIN/UNION queries, only add columns that reference this specific table
+                                        column_belongs_to_this_table = False
+                                        
+                                        if is_join_query or is_union_query:
+                                            # FIRST: Check if this is a subquery expression - these should only belong to their source table
+                                            if is_subquery_expression(raw_expression, self.dialect):
+                                                from ..utils.sql_parsing_utils import extract_tables_from_subquery
+                                                subquery_tables = extract_tables_from_subquery(raw_expression, self.dialect)
+                                                column_belongs_to_this_table = entity_name in subquery_tables
+                                            else:
+                                                # SECOND: Check if this column expression references this entity's table alias
+                                                for alias, table in alias_to_table.items():
+                                                    if table == entity_name and f'{alias}.' in raw_expression:
+                                                        column_belongs_to_this_table = True
+                                                        break
+                                            
+                                            # Special handling for aggregate functions without table prefixes (like COUNT(*))
+                                            # These should belong to the primary table
+                                            if not column_belongs_to_this_table and is_aggregate_function(raw_expression):
+                                                if entity_name == primary_table:
+                                                    column_belongs_to_this_table = True
+                                            
+                                            # For UNION queries, use existing helper to get columns for this table
+                                            if is_union_query and not column_belongs_to_this_table:
+                                                from ..utils.sql_parsing_utils import get_union_columns_for_table
+                                                union_columns = get_union_columns_for_table(sql, entity_name)
+                                                # Check if this column expression matches any of the table's UNION columns
+                                                for union_col in union_columns:
+                                                    if (raw_expression in union_col or 
+                                                        column_name in union_col or
+                                                        raw_expression == union_col):
+                                                        column_belongs_to_this_table = True
+                                                        break
+                                            
+                                        else:
+                                            # For aggregate queries or simple queries, add all columns to primary table
+                                            column_belongs_to_this_table = True
+                                        
+                                        if not column_belongs_to_this_table:
+                                            continue
+                                        
+                                        # Extract clean name (prefer alias over raw column name)
+                                        clean_name = extract_clean_column_name(raw_expression, column_name)
+                                        
+                                        # For non-aggregate columns, use the raw expression format (e.g., "u.department")
+                                        # For aggregate columns, use clean name (e.g., "employee_count")
+                                        # For UNION queries, use the output column names (aliases)
+                                        if is_aggregate_function(raw_expression):
+                                            display_name = clean_name
+                                        elif is_union_query:
+                                            # For UNION queries, use the output column name (alias)
+                                            display_name = column_name
+                                        else:
+                                            display_name = raw_expression if not ' AS ' in raw_expression.upper() else raw_expression.split(' AS ')[0].strip()
+                                        
+                                        if clean_name not in existing_column_names:
+                                            # For UNION queries in QUERY_RESULT, use table-specific expressions and upstream
+                                            if is_union_query and dep_entity == 'QUERY_RESULT':
+                                                # Use the raw expression as the name and table-specific upstream
+                                                column_name_to_use = raw_expression  # Full expression like "'product' as type"
+                                                upstream_ref = f"{entity_name}.{raw_expression}"
+                                            else:
+                                                column_name_to_use = display_name
+                                                upstream_ref = f"{entity_name}.{clean_name}"
+                                                
+                                            column_info = {
+                                                "name": column_name_to_use,
+                                                "upstream": [upstream_ref],
+                                                "type": "DIRECT"
+                                            }
+                                            
+                                            # Check if this is a subquery first (before checking for aggregates)
+                                            if is_subquery_expression(raw_expression, self.dialect):
+                                                from ..utils.sql_parsing_utils import extract_tables_from_subquery
+                                                subquery_tables = extract_tables_from_subquery(raw_expression, self.dialect)
+                                                if subquery_tables:
+                                                    main_subquery_table = subquery_tables[0]
+                                                    column_info["upstream"] = [f"{main_subquery_table}.{clean_name}"]
+                                                column_info["transformation"] = {
+                                                    "source_expression": raw_expression,
+                                                    "transformation_type": "SUBQUERY",
+                                                    "function_type": "SUBQUERY"
+                                                }
+                                            # Check if this is an aggregate function and add transformation details
+                                            elif is_aggregate_function(raw_expression):
+                                                function_type = extract_function_type(raw_expression)
+                                                # Clean source expression: remove AS clause
+                                                source_expr = raw_expression.split(' AS ')[0].strip() if ' AS ' in raw_expression.upper() else raw_expression
+                                                column_info["transformation"] = {
+                                                    "source_expression": source_expr,
+                                                    "transformation_type": "AGGREGATE",
+                                                    "function_type": function_type
+                                                }
+                                            
+                                            table_columns.append(column_info)
+                                            existing_column_names.add(clean_name)
+                            
+                            elif has_table_prefixes or is_join_query:
                                 # JOIN query: Use qualified names from select columns
                                 for sel_col in select_columns:
                                     source_table = sel_col.get('source_table')
@@ -499,24 +695,14 @@ class ChainBuilderEngine:
                                                 "type": "DIRECT"
                                             }
                                             table_columns.append(column_info)
-                                    elif source_table is None and self._is_subquery_expression(raw_expression):
-                                        # Subquery expression - check if relevant to this entity
-                                        if self._is_subquery_relevant_to_table(raw_expression, entity_name, sql):
-                                            # For subqueries, extract the alias using subquery-aware function
-                                            column_name_to_use = extract_clean_column_name(raw_expression, f"subquery_{len(table_columns)}")
-                                            
-                                            if column_name_to_use not in existing_column_names:
-                                                column_info = {
-                                                    "name": column_name_to_use,
-                                                    "upstream": [f"{entity_name}.{column_name_to_use}"],
-                                                    "type": "DIRECT",
-                                                    "transformation": {
-                                                        "source_expression": raw_expression,
-                                                        "transformation_type": "SUBQUERY",
-                                                        "function_type": "SUBQUERY"
-                                                    }
-                                                }
-                                                table_columns.append(column_info)
+                                    elif source_table is None and is_subquery_expression(raw_expression, self.dialect):
+                                        # Subquery expression - use transformation engine for proper handling
+                                        subquery_columns = self.transformation_engine.handle_subquery_functions(sql, entity_name)
+                                        for subquery_col in subquery_columns:
+                                            col_name = subquery_col.get("name")
+                                            if col_name and col_name not in existing_column_names:
+                                                table_columns.append(subquery_col)
+                                                existing_column_names.add(col_name)
                                     elif source_table is None and is_aggregate_function(raw_expression):
                                         # Aggregate function column - only add if relevant to this entity
                                         if is_aggregate_function_for_table(raw_expression, entity_name, sql):
@@ -537,26 +723,12 @@ class ChainBuilderEngine:
                                                 }
                                                 table_columns.append(column_info)
                             elif is_union_query:
-                                # UNION query: Only add columns that belong to this specific table
+                                # UNION query: Add unified output columns with proper upstream attribution
                                 from ..utils.sql_parsing_utils import get_union_columns_for_table
                                 union_columns = get_union_columns_for_table(sql, entity_name)
-                                for column_name in union_columns:
-                                    if column_name not in existing_column_names:
-                                        column_info = {
-                                            "name": column_name,
-                                            "upstream": [f"{entity_name}.{column_name}"],
-                                            "type": "DIRECT"
-                                        }
-                                        table_columns.append(column_info)
-                        else:
-                            # Simple query: Add columns from select statement to QUERY_RESULT
-                            for sel_col in select_columns:
-                                if sel_col.get('source_table') is None:  # Unprefixed columns
-                                    raw_expression = sel_col.get('raw_expression')
-                                    column_name = sel_col.get('column_name')
-                                    
-                                    # Extract clean name (prefer alias over raw column name)
-                                    clean_name = extract_clean_column_name(raw_expression, column_name)
+                                for column_expr in union_columns:
+                                    # Extract clean column name (remove aliases and expressions)
+                                    clean_name = extract_clean_column_name(column_expr, column_expr)
                                     
                                     if clean_name not in existing_column_names:
                                         column_info = {
@@ -565,6 +737,73 @@ class ChainBuilderEngine:
                                             "type": "DIRECT"
                                         }
                                         table_columns.append(column_info)
+                        else:
+                            # Simple query: Add ALL columns from SELECT statement to QUERY_RESULT
+                            # For simple queries, QUERY_RESULT should contain all SELECT columns
+                            for sel_col in select_columns:
+                                raw_expression = sel_col.get('raw_expression')
+                                column_name = sel_col.get('column_name')
+                                
+                                # Extract clean name (prefer alias over raw column name)
+                                clean_name = extract_clean_column_name(raw_expression, column_name)
+                                
+                                if clean_name not in existing_column_names:
+                                    column_info = {
+                                        "name": clean_name,
+                                        "upstream": [f"QUERY_RESULT.{clean_name}"],
+                                        "type": "DIRECT"
+                                    }
+                                    
+                                    # Check if this is a subquery first (before checking for aggregates)
+                                    if is_subquery_expression(raw_expression, self.dialect):
+                                        # Use transformation engine for subquery handling
+                                        from ..utils.sql_parsing_utils import extract_tables_from_subquery
+                                        subquery_tables = extract_tables_from_subquery(raw_expression, self.dialect)
+                                        if subquery_tables:
+                                            main_subquery_table = subquery_tables[0]
+                                            column_info["upstream"] = [f"{main_subquery_table}.{clean_name}"]
+                                        column_info["transformation"] = {
+                                            "source_expression": raw_expression,
+                                            "transformation_type": "SUBQUERY",
+                                            "function_type": "SUBQUERY"
+                                        }
+                                    # Check if this is an aggregate function and add transformation details
+                                    elif is_aggregate_function(raw_expression):
+                                        function_type = extract_function_type(raw_expression)
+                                        column_info["transformation"] = {
+                                            "source_expression": raw_expression,
+                                            "transformation_type": "AGGREGATE",
+                                            "function_type": function_type
+                                        }
+                                    
+                                    table_columns.append(column_info)
+                                    existing_column_names.add(clean_name)
+                    
+                    # Add subquery result columns to the QUERY_RESULT of tables referenced in subqueries
+                    if dep_entity == 'QUERY_RESULT' and not table_columns:
+                        # Check if any SELECT columns contain subqueries that reference this entity
+                        for sel_col in select_columns:
+                            raw_expression = sel_col.get('raw_expression', '')
+                            if is_subquery_expression(raw_expression, self.dialect):
+                                # Check if this subquery references the current entity
+                                from ..utils.sql_parsing_utils import extract_tables_from_subquery
+                                subquery_tables = extract_tables_from_subquery(raw_expression, self.dialect)
+                                if entity_name in subquery_tables:
+                                    # Extract the alias/column name for this subquery result
+                                    clean_name = extract_clean_column_name(raw_expression, f"subquery_{len(table_columns)}")
+                                    if clean_name not in existing_column_names:
+                                        column_info = {
+                                            "name": clean_name,
+                                            "upstream": [f"{entity_name}.{clean_name}"],
+                                            "type": "DIRECT",
+                                            "transformation": {
+                                                "source_expression": raw_expression,
+                                                "transformation_type": "SUBQUERY",
+                                                "function_type": "SUBQUERY"
+                                            }
+                                        }
+                                        table_columns.append(column_info)
+                                        existing_column_names.add(clean_name)
                     
                     if table_columns:
                         if 'metadata' not in dep:
@@ -579,39 +818,47 @@ class ChainBuilderEngine:
             if entity_data.get('depth') == 0:
                 source_columns = set()
                 
-                # Look through dependencies to find transformations that reference this table
-                for dep in entity_data.get('dependencies', []):
-                    for trans in dep.get('transformations', []):
-                        if trans.get('source_table') == entity_name:
-                            # Extract filter condition columns - only if they actually belong to this entity
-                            for condition in trans.get('filter_conditions', []):
-                                col = condition.get('column', '')
-                                if col:
-                                    # Only add columns that actually belong to this entity
-                                    if self._column_belongs_to_entity(col, entity_name, sql, self.dialect):
-                                        # Clean column name by removing table prefix if present
-                                        clean_col = col.split('.')[-1] if '.' in col else col
-                                        source_columns.add(clean_col)
-                            
-                            # Extract group by columns - only if they actually belong to this entity
-                            for group_col in trans.get('group_by_columns', []):
-                                if group_col:
-                                    # Only add columns that actually belong to this entity
-                                    if self._column_belongs_to_entity(group_col, entity_name, sql, self.dialect):
-                                        # Clean column name by removing table prefix if present
-                                        clean_col = group_col.split('.')[-1] if '.' in group_col else group_col
-                                        source_columns.add(clean_col)
-                            
-                            # Extract join condition columns
-                            for join in trans.get('joins', []):
-                                for condition in join.get('conditions', []):
-                                    for col_key in ['left_column', 'right_column']:
-                                        col_ref = condition.get(col_key, '')
-                                        if col_ref:
-                                            # Only add columns that actually belong to this entity
-                                            if self._column_belongs_to_entity(col_ref, entity_name, sql, self.dialect):
-                                                clean_col = col_ref.split('.')[-1] if '.' in col_ref else col_ref
-                                                source_columns.add(clean_col)
+                # Check if this is a UNION query - use specialized column extraction
+                is_union_query = sql and 'UNION' in sql.upper()
+                if is_union_query:
+                    # For UNION queries, get table-specific columns directly
+                    union_table_columns = extract_columns_referenced_by_table_in_union(sql, entity_name, self.dialect)
+                    source_columns.update(union_table_columns)
+                else:
+                    # Look through dependencies to find transformations that reference this table
+                    for dep in entity_data.get('dependencies', []):
+                        for trans in dep.get('transformations', []):
+                            if trans.get('source_table') == entity_name:
+                                # Extract filter condition columns - only if they actually belong to this entity
+                                for condition in trans.get('filter_conditions', []):
+                                    col = condition.get('column', '')
+                                    if col:
+                                        # Only add columns that actually belong to this entity
+                                        belongs = is_column_from_table(col, entity_name, sql, self.dialect)
+                                        if belongs:
+                                            # Clean column name by removing table prefix if present
+                                            clean_col = col.split('.')[-1] if '.' in col else col
+                                            source_columns.add(clean_col)
+                                
+                                # Extract group by columns - only if they actually belong to this entity
+                                for group_col in trans.get('group_by_columns', []):
+                                    if group_col:
+                                        # Only add columns that actually belong to this entity
+                                        if is_column_from_table(group_col, entity_name, sql, self.dialect):
+                                            # Clean column name by removing table prefix if present
+                                            clean_col = group_col.split('.')[-1] if '.' in group_col else group_col
+                                            source_columns.add(clean_col)
+                                
+                                # Extract join condition columns
+                                for join in trans.get('joins', []):
+                                    for condition in join.get('conditions', []):
+                                        for col_key in ['left_column', 'right_column']:
+                                            col_ref = condition.get(col_key, '')
+                                            if col_ref:
+                                                # Only add columns that actually belong to this entity
+                                                if is_column_from_table(col_ref, entity_name, sql, self.dialect):
+                                                    clean_col = col_ref.split('.')[-1] if '.' in col_ref else col_ref
+                                                    source_columns.add(clean_col)
                 
                 # Add the columns found in transformations, merging with existing
                 if source_columns:
@@ -632,122 +879,3 @@ class ChainBuilderEngine:
                     if 'metadata' not in entity_data:
                         entity_data['metadata'] = {}
                     entity_data['metadata']['table_columns'] = table_columns
-    
-    def _is_subquery_expression(self, expression: str) -> bool:
-        """Check if expression contains a subquery (SELECT statement)."""
-        if not expression:
-            return False
-        
-        # Look for (SELECT ... ) pattern
-        import re
-        pattern = r"\(\s*SELECT\s+.*?\s+FROM\s+.*?\)"
-        return bool(re.search(pattern, expression, re.IGNORECASE | re.DOTALL))
-    
-    def _is_subquery_relevant_to_table(self, subquery_expr: str, table_name: str, sql: str) -> bool:
-        """Check if a subquery expression is relevant to a specific table."""
-        if not subquery_expr or not table_name:
-            return False
-        
-        # A subquery belongs to the table it queries data FROM, not the table it correlates with
-        # For lineage purposes, we want to track where data comes from
-        import re
-        
-        try:
-            # Parse the subquery to extract the FROM clause (source table)
-            import sqlglot
-            
-            # Extract just the subquery part (without outer alias)
-            subquery_pattern = r'\(SELECT.*?\)'
-            subquery_match = re.search(subquery_pattern, subquery_expr, re.IGNORECASE | re.DOTALL)
-            if not subquery_match:
-                return False
-                
-            subquery_sql = subquery_match.group(0)
-            
-            # Parse the subquery
-            parsed_subquery = sqlglot.parse_one(subquery_sql, dialect="trino")
-            if not isinstance(parsed_subquery, sqlglot.exp.Select):
-                return False
-            
-            # Get the FROM clause of the subquery
-            from_clause = parsed_subquery.find(sqlglot.exp.From)
-            if not from_clause:
-                return False
-            
-            # Get tables from the subquery's FROM clause
-            subquery_tables = list(from_clause.find_all(sqlglot.exp.Table))
-            for table in subquery_tables:
-                actual_table_name = str(table.name)
-                if actual_table_name == table_name:
-                    return True
-                        
-            return False
-            
-        except Exception:
-            # Fallback: check if table name appears in the subquery FROM clause
-            from_pattern = rf'FROM\s+{re.escape(table_name)}\s+'
-            return bool(re.search(from_pattern, subquery_expr, re.IGNORECASE))
-    
-    def _column_belongs_to_entity(self, column_name: str, entity_name: str, sql: str, dialect: str = None) -> bool:
-        """
-        Check if a column actually belongs to a specific entity based on SQL context and schema.
-        This is a more accurate version than the generic is_column_from_table function.
-        
-        Args:
-            column_name: Name of the column to check
-            entity_name: Name of the entity/table to check against
-            sql: SQL query for context
-            dialect: SQL dialect to use (defaults to self.dialect)
-        """
-        if not column_name or not entity_name:
-            return False
-        
-        # Use provided dialect or fall back to instance dialect
-        effective_dialect = dialect or self.dialect
-        
-        # Handle qualified column names (e.g., "u.id", "orders.total")
-        if '.' in column_name:
-            table_part, col_part = column_name.split('.', 1)
-            
-            # Build alias to table mapping from the SQL
-            try:
-                import sqlglot
-                parsed = sqlglot.parse_one(sql, dialect=effective_dialect)
-                
-                # Build alias to table mapping
-                alias_to_table = {}
-                tables = list(parsed.find_all(sqlglot.exp.Table))
-                for table in tables:
-                    table_name = str(table.name)
-                    if table.alias:
-                        alias_to_table[str(table.alias)] = table_name
-                    # Also map table name to itself
-                    alias_to_table[table_name] = table_name
-                
-                # Check if the table part resolves to our entity
-                actual_table = alias_to_table.get(table_part)
-                return actual_table == entity_name
-                
-            except Exception:
-                # Fallback: direct comparison
-                return table_part == entity_name
-        
-        # For unqualified columns, use schema knowledge from metadata registry
-        # This is context-aware and based on actual schema information
-        from ..metadata.sample_registry import SampleMetadataRegistry
-        
-        try:
-            # Get schema for this entity
-            registry = SampleMetadataRegistry()
-            entity_metadata = registry.get_table_metadata(entity_name)
-            if entity_metadata and entity_metadata.columns:
-                # Check if the column exists in this entity's schema
-                entity_columns = {col.name.lower() for col in entity_metadata.columns}
-                return column_name.lower() in entity_columns
-        except Exception:
-            pass
-        
-        # Final fallback: if we can't determine schema, be conservative
-        # Only allow common columns that are likely to be in any table
-        common_columns = {'id', 'created_at', 'updated_at'}
-        return column_name.lower() in common_columns

@@ -874,6 +874,7 @@ class LineageExtractor:
     
     def _extract_filter_conditions(self, filter_node: Expression, alias_mappings: Dict[str, str]) -> List[FilterCondition]:
         """Extract filter conditions from WHERE or HAVING clause."""
+        print(f"DEBUG: Extracting filter conditions from: {str(filter_node)[:100]}...")
         conditions = []
         
         try:
@@ -900,6 +901,15 @@ class LineageExtractor:
                         # Handle IN specially
                         column = self._resolve_column_reference(str(comp.this), alias_mappings)
                         value = [str(expr) for expr in comp.expressions]
+                        
+                        # Recursively extract conditions from subqueries in IN clause
+                        for expr in comp.expressions:
+                            if isinstance(expr, exp.Select):
+                                # Found a subquery - recursively extract its WHERE conditions
+                                subquery_where = expr.find(exp.Where)
+                                if subquery_where:
+                                    subquery_conditions = self._extract_filter_conditions(subquery_where, alias_mappings)
+                                    conditions.extend(subquery_conditions)
                     else:
                         # Handle regular binary comparisons
                         column = self._resolve_column_reference(str(comp.this), alias_mappings)
@@ -914,6 +924,7 @@ class LineageExtractor:
         except Exception:
             pass
         
+        print(f"DEBUG: Found {len(conditions)} filter conditions: {[(c.column, c.operator, c.value) for c in conditions]}")
         return conditions
     
     def _get_aggregate_type(self, agg: exp.AggFunc) -> AggregateType:

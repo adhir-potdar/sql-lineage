@@ -2,9 +2,6 @@
 
 import pytest
 from analyzer import SQLLineageAnalyzer
-from analyzer.metadata import MetadataRegistry
-
-
 @pytest.fixture
 def sample_sql_queries():
     """Sample SQL queries for testing."""
@@ -55,12 +52,6 @@ def sample_sql_queries():
             ORDER BY ms.month DESC, ms.monthly_total DESC
         """
     }
-
-
-@pytest.fixture
-def metadata_registry():
-    """Create a metadata registry for testing."""
-    return MetadataRegistry()
 
 
 @pytest.fixture  

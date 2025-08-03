@@ -125,16 +125,8 @@ class TransformationEngine:
         ordered_metadata["table_type"] = metadata.get("table_type", "TABLE")
         ordered_metadata["schema"] = metadata.get("schema", "default")
         
-        # Get description from metadata registry if available
-        if (main_analyzer and hasattr(main_analyzer, 'metadata_registry') 
-            and main_analyzer.metadata_registry):
-            table_metadata = main_analyzer.metadata_registry.get_table_metadata(entity_name)
-            if table_metadata and 'description' in table_metadata:
-                ordered_metadata["description"] = table_metadata['description']
-            else:
-                ordered_metadata["description"] = metadata.get("description", "Table information")
-        else:
-            ordered_metadata["description"] = metadata.get("description", "Table information")
+        # Use generic description since no external metadata
+        ordered_metadata["description"] = metadata.get("description", "Table information")
         
         return ordered_metadata
     
@@ -143,16 +135,8 @@ class TransformationEngine:
         metadata.setdefault("table_type", "TABLE")
         metadata.setdefault("schema", "default")
         
-        # Get description from metadata registry if available
-        if (main_analyzer and hasattr(main_analyzer, 'metadata_registry') 
-            and main_analyzer.metadata_registry):
-            table_metadata = main_analyzer.metadata_registry.get_table_metadata(entity_name)
-            if table_metadata and 'description' in table_metadata:
-                metadata.setdefault("description", table_metadata['description'])
-            else:
-                metadata.setdefault("description", "Table information")
-        else:
-            metadata.setdefault("description", "Table information")
+        # Use generic description since no external metadata
+        metadata.setdefault("description", "Table information")
         
         return metadata
     
@@ -210,6 +194,73 @@ class TransformationEngine:
             pass
             
         return window_columns
+    
+    def handle_subquery_functions(self, sql: str, table_name: str) -> List[Dict]:
+        """Handle subquery expressions in SELECT clauses."""
+        subquery_columns = []
+        
+        try:
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            
+            # Build alias to table mapping
+            alias_to_table = build_alias_to_table_mapping(sql, self.dialect)
+            
+            # Find table aliases for this table_name  
+            table_aliases = []
+            for alias, actual_table in alias_to_table.items():
+                if actual_table == table_name:
+                    table_aliases.append(alias)
+            
+            # If no alias found, use the table name itself
+            if not table_aliases:
+                table_aliases = [table_name]
+            
+            select_stmt = parsed if isinstance(parsed, sqlglot.exp.Select) else parsed.find(sqlglot.exp.Select)
+            if select_stmt:
+                for expr in select_stmt.expressions:
+                    raw_expr = str(expr)
+                    
+                    # Check if this is a subquery expression first (before checking for aggregates)
+                    from ..utils.sql_parsing_utils import is_subquery_expression
+                    if is_subquery_expression(raw_expr):
+                        # Extract alias if present
+                        alias = None
+                        if hasattr(expr, 'alias') and expr.alias:
+                            alias = str(expr.alias)
+                        
+                        column_name = alias if alias else raw_expr
+                        
+                        # Extract tables referenced in the subquery
+                        from ..utils.sql_parsing_utils import extract_tables_from_subquery
+                        subquery_tables = extract_tables_from_subquery(raw_expr, self.dialect)
+                        
+                        # Clean source expression to remove AS alias part
+                        clean_source_expr = raw_expr
+                        if ' AS ' in raw_expr.upper():
+                            clean_source_expr = raw_expr.split(' AS ')[0].strip()
+                        elif ' as ' in raw_expr:
+                            clean_source_expr = raw_expr.split(' as ')[0].strip()
+                        
+                        subquery_col = create_result_column_metadata(
+                            column_name=column_name,
+                            source_expression=clean_source_expr,
+                            transformation_type="SUBQUERY",
+                            function_type="SUBQUERY"
+                        )
+                        
+                        # Set upstream based on the tables referenced in the subquery
+                        if subquery_tables:
+                            # Point to the main table referenced in the subquery
+                            main_subquery_table = subquery_tables[0]  # Use first table found
+                            subquery_col["upstream"] = [f"{main_subquery_table}.{column_name}"]
+                        
+                        subquery_columns.append(subquery_col)
+                        
+        except Exception:
+            # If parsing fails, return empty list
+            pass
+            
+        return subquery_columns
     
     def extract_filter_transformations(self, sql: str) -> List[Dict]:
         """

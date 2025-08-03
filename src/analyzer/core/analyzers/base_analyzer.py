@@ -8,7 +8,6 @@ import json
 from ..models import LineageResult, TableMetadata
 from ..extractor import LineageExtractor
 from ..parsers import SelectParser, TransformationParser, CTEParser, CTASParser, InsertParser, UpdateParser
-from ...metadata.registry import MetadataRegistry
 from ...utils.validation import validate_sql_input
 
 
@@ -23,7 +22,6 @@ class BaseAnalyzer:
             dialect: SQL dialect to use for parsing
         """
         self.dialect = dialect
-        self.metadata_registry = MetadataRegistry()
         self.extractor = LineageExtractor()
         
         # Initialize modular parsers as core components

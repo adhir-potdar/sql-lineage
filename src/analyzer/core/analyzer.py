@@ -8,7 +8,6 @@ import json
 from .models import LineageResult, TableMetadata
 from .extractor import LineageExtractor
 from .parsers import SelectParser, TransformationParser, CTEParser, CTASParser, InsertParser, UpdateParser
-from ..metadata.registry import MetadataRegistry
 from ..utils.validation import validate_sql_input
 
 # Import the new modular analyzers
@@ -34,7 +33,6 @@ class SQLLineageAnalyzer:
             dialect: SQL dialect to use for parsing
         """
         self.dialect = dialect
-        self.metadata_registry = MetadataRegistry()
         self.extractor = LineageExtractor()
         
         # Initialize modular parsers as core components
@@ -176,27 +174,13 @@ class SQLLineageAnalyzer:
             all_tables.add(target)
             all_tables.update(sources)
         
-        # Get metadata for each table
+        # No external metadata - return empty metadata for each table
+        # Tables will be analyzed purely from SQL context
         for table_name in all_tables:
-            table_metadata = self.metadata_registry.get_table_metadata(table_name)
-            if table_metadata:
-                metadata[table_name] = table_metadata
+            metadata[table_name] = None
         
         return metadata
     
-    def set_metadata_registry(self, metadata_registry: MetadataRegistry) -> None:
-        """
-        Set the metadata registry for the analyzer.
-        
-        Args:
-            metadata_registry: MetadataRegistry instance to use
-        """
-        self.metadata_registry = metadata_registry
-        self.extractor = LineageExtractor()
-    
-    def add_metadata_provider(self, provider) -> None:
-        """Add a metadata provider to the registry."""
-        self.metadata_registry.add_provider(provider)
     
     def set_dialect(self, dialect: str) -> None:
         """Set the SQL dialect for parsing."""

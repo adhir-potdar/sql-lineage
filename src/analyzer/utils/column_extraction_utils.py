@@ -10,6 +10,12 @@ def extract_all_referenced_columns(sql: str, table_name: str, dialect: str = "tr
     """Extract all columns referenced in SQL for a specific table."""
     referenced_columns = set()
     
+    # Check if this is a UNION query - use specialized extraction
+    if sql and 'UNION' in sql.upper():
+        from .sql_parsing_utils import extract_columns_referenced_by_table_in_union
+        union_columns = extract_columns_referenced_by_table_in_union(sql, table_name, dialect)
+        return set(union_columns)
+    
     try:
         parsed = sqlglot.parse_one(sql, dialect=dialect)
         
@@ -40,8 +46,17 @@ def extract_all_referenced_columns(sql: str, table_name: str, dialect: str = "tr
                     if table_part in table_aliases:
                         referenced_columns.add(column_name)
                     elif not table_part and len(table_aliases) == 1:
-                        # If no table prefix and this is a single-table context, assume it belongs to this table
-                        referenced_columns.add(column_name)
+                        # Check if this column is inside a subquery first
+                        # Find the parent node to see if we're inside a subquery
+                        parent_node = column.parent
+                        while parent_node:
+                            if isinstance(parent_node, sqlglot.exp.Subquery):
+                                # This column is inside a subquery, don't attribute it to outer table
+                                break
+                            parent_node = parent_node.parent
+                        else:
+                            # If no table prefix and this is a single-table context AND not in subquery, assume it belongs to this table
+                            referenced_columns.add(column_name)
         
         # 2. WHERE clause columns
         where_clause = select_stmt.find(sqlglot.exp.Where) if select_stmt else None
@@ -52,6 +67,17 @@ def extract_all_referenced_columns(sql: str, table_name: str, dialect: str = "tr
                 
                 if table_part in table_aliases:
                     referenced_columns.add(column_name)
+                elif not table_part and len(table_aliases) == 1:
+                    # Check if this column is inside a subquery first
+                    parent_node = column.parent
+                    while parent_node:
+                        if isinstance(parent_node, sqlglot.exp.Subquery):
+                            # This column is inside a subquery, don't attribute it to outer table
+                            break
+                        parent_node = parent_node.parent
+                    else:
+                        # If no table prefix and this is a single-table context AND not in subquery, assume it belongs to this table
+                        referenced_columns.add(column_name)
                     
         # 3. JOIN condition columns
         joins = list(parsed.find_all(sqlglot.exp.Join)) if parsed else []
@@ -108,10 +134,14 @@ def extract_columns_from_joins(sql: str, table_name: str) -> Set[str]:
         column_refs = re.findall(r'(\w+)\.(\w+)', on_clause)
         
         for table_alias, column_name in column_refs:
-            # Check if this column belongs to our table
-            if table_alias == table_name.lower()[:1]:  # Simple heuristic: first letter match
+            # Check if this column belongs to our table using proper alias mapping
+            # This requires parsing the FROM clause to get actual table-to-alias mappings
+            alias_to_table = build_alias_to_table_mapping(sql, "trino")
+            
+            # Check if the alias maps to our table
+            if alias_to_table.get(table_alias) == table_name:
                 join_columns.add(column_name)
-            elif table_name.lower().startswith(table_alias):
+            elif table_alias == table_name:  # Direct table name match
                 join_columns.add(column_name)
     
     return join_columns
@@ -430,16 +460,3 @@ def process_select_expression(expr, sql: str, dialect: str = "trino") -> Dict:
     return result
 
 
-def is_column_from_table(column_name: str, table_name: str, context_info: dict = None) -> bool:
-    """Check if a column belongs to a specific table."""
-    if not column_name or not table_name:
-        return False
-        
-    # Handle qualified column names (e.g., "users.active", "u.salary")
-    if '.' in column_name:
-        table_part = column_name.split('.')[0]
-        return table_part == table_name or (context_info and context_info.get('aliases', {}).get(table_part) == table_name)
-    
-    # For unqualified columns, we need more context to determine ownership
-    # This is a simplified implementation
-    return context_info is None or context_info.get('single_table', False)

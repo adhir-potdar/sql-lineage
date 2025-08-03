@@ -11,7 +11,6 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 from analyzer import SQLLineageAnalyzer
-from analyzer.metadata import SampleMetadataRegistry
 from analyzer.formatters import ConsoleFormatter
 from analyzer.visualization import SQLLineageVisualizer
 from test_formatter import print_lineage_analysis, print_section_header, print_subsection_header, print_test_summary
@@ -307,7 +306,6 @@ def test_original_sample1():
     print_subsection_header("Sample 1: Complex CTE Query")
     
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     sql = """
     WITH CategorySales AS (SELECT c.category_name,
@@ -363,7 +361,6 @@ def test_original_sample2():
     print_subsection_header("Sample 2: Fully Qualified Names")
     
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     sql = """
     WITH SalesSummary AS (
@@ -488,7 +485,6 @@ def test_sqlglot_test_queries():
     print_subsection_header("SQLGlot Test Queries")
     
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     queries = [
         ("SELECT id, name, age FROM users WHERE age > 21", "Basic SELECT"),
@@ -517,7 +513,6 @@ def test_trino_specific():
     print_subsection_header("Trino-Specific Queries")
     
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     queries = [
         ("SELECT * FROM hive.default.users", "Hive catalog reference"),
@@ -553,7 +548,6 @@ def test_edge_cases():
     print_subsection_header("Edge Cases and Error Handling")
     
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     test_cases = [
         ("", "Empty SQL", True),  # Should error
@@ -598,7 +592,6 @@ def test_output_formats():
     print_subsection_header("Output Format Tests")
     
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     sql = "SELECT u.name, COUNT(o.id) FROM users u JOIN orders o ON u.id = o.user_id GROUP BY u.name"
     
     try:
@@ -642,7 +635,6 @@ def test_complex_multi_cte_union():
     print_subsection_header("Sample 3: Complex Multi-CTE with UNION")
     
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     sql = """
     WITH OrderSummary AS (
@@ -783,7 +775,6 @@ def test_column_lineage_flag_control():
     print_subsection_header("Column Lineage Flag Control")
     
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     sql = "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id"
     
     print("\n🧪 Testing Column Lineage Flag Control:")
@@ -809,7 +800,6 @@ def test_ctas_queries():
     print_subsection_header("CREATE TABLE AS SELECT (CTAS) Queries")
     
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     # Test various CTAS patterns
     ctas_queries = [
@@ -1148,7 +1138,6 @@ def main():
     
     # Initialize analyzer for JSON collection
     analyzer = SQLLineageAnalyzer(dialect="trino")
-    analyzer.set_metadata_registry(SampleMetadataRegistry())
     
     # Collect JSON outputs for key sample queries
     sample_queries = [

@@ -2,7 +2,6 @@
 
 import pytest
 from analyzer import SQLLineageAnalyzer
-from analyzer.metadata import SampleMetadataRegistry
 from analyzer.core.models import LineageResult
 
 
@@ -13,7 +12,6 @@ class TestSQLLineageAnalyzer:
     def analyzer(self):
         """Create analyzer instance for testing."""
         analyzer = SQLLineageAnalyzer(dialect="trino")
-        analyzer.set_metadata_registry(SampleMetadataRegistry())
         return analyzer
     
     def test_simple_select(self, analyzer):

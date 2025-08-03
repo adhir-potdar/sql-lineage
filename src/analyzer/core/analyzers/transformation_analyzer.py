@@ -422,11 +422,19 @@ class TransformationAnalyzer(BaseAnalyzer):
         if f"{table_lower}." in expression_lower:
             return True
         
-        # Check for table aliases (first letter of table name)
-        if table_lower.startswith('u') and 'u.' in expression_lower:
-            return True
-        elif table_lower.startswith('o') and 'o.' in expression_lower:
-            return True
+        # Check for table aliases using proper SQL parsing
+        # Parse the SQL to get actual alias-to-table mappings
+        try:
+            from ...utils.sql_parsing_utils import build_alias_to_table_mapping
+            alias_to_table = build_alias_to_table_mapping(sql or "", "trino")
+            
+            # Check if any alias in the expression maps to our table
+            for alias, actual_table in alias_to_table.items():
+                if actual_table == table_name and f"{alias}." in expression_lower:
+                    return True
+        except Exception:
+            # Fallback: if parsing fails, be conservative and assume it might belong
+            pass
         
         # For single-table contexts, unqualified column names belong to that table
         if sql and self._is_single_table_context(sql):
@@ -485,10 +493,17 @@ class TransformationAnalyzer(BaseAnalyzer):
         if f"{table_lower}." in group_by_lower:
             return True
         
-        # Check for aliases
-        if table_lower.startswith('u') and 'u.' in group_by_lower:
-            return True
-        elif table_lower.startswith('o') and 'o.' in group_by_lower:
-            return True
+        # Check for aliases using proper SQL parsing
+        try:
+            from ...utils.sql_parsing_utils import build_alias_to_table_mapping
+            alias_to_table = build_alias_to_table_mapping(sql or "", "trino")
+            
+            # Check if any alias in the GROUP BY clause maps to our table
+            for alias, actual_table in alias_to_table.items():
+                if actual_table == table_name and f"{alias}." in group_by_lower:
+                    return True
+        except Exception:
+            # Fallback: if parsing fails, be conservative
+            pass
         
         return False
