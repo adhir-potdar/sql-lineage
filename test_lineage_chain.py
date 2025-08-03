@@ -665,6 +665,43 @@ def collect_queries_from_test_cte_stats():
     ]
 
 
+def collect_queries_from_derived_tables():
+    """Collect complex derived table queries for testing the DerivedTableAnalyzer."""
+    queries = []
+    
+    # Complex derived table query with 2 derived tables from different source tables
+    complex_derived_tables_query = '''
+    SELECT 
+        emp_stats.department_id,
+        emp_stats.avg_salary,
+        dept_stats.total_budget,
+        dept_stats.employee_count,
+        (emp_stats.avg_salary * dept_stats.employee_count) AS projected_cost
+    FROM (
+        SELECT 
+            department_id,
+            AVG(salary) AS avg_salary,
+            COUNT(*) AS emp_count
+        FROM employees 
+        GROUP BY department_id
+    ) AS emp_stats
+    JOIN (
+        SELECT 
+            dept_id,
+            SUM(budget) AS total_budget,
+            COUNT(DISTINCT manager_id) AS employee_count
+        FROM departments
+        WHERE active = 1
+        GROUP BY dept_id
+    ) AS dept_stats ON emp_stats.department_id = dept_stats.dept_id
+    WHERE emp_stats.avg_salary > 60000 
+      AND dept_stats.total_budget < 500000;
+    '''
+    
+    queries.append(("complex_derived_tables", complex_derived_tables_query))
+    return queries
+
+
 def test_lineage_chain_comprehensive():
     """Generate comprehensive lineage chain JSON files for all test queries."""
     print_subsection_header("Comprehensive Lineage Chain Generation")
@@ -678,6 +715,7 @@ def test_lineage_chain_comprehensive():
     all_queries.extend(collect_queries_from_test_simple())
     all_queries.extend(collect_queries_from_test_samples())
     all_queries.extend(collect_queries_from_test_cte_stats())
+    all_queries.extend(collect_queries_from_derived_tables())
     
     print(f"🔍 Collected {len(all_queries)} queries from all test files")
     
@@ -998,6 +1036,7 @@ def main():
             quick_files = [f for f in lineage_files if 'quick_' in f]
             simple_files = [f for f in lineage_files if 'simple_' in f]
             sample_files = [f for f in lineage_files if 'sample' in f and 'simple_' not in f]
+            derived_files = [f for f in lineage_files if 'complex_derived_tables' in f]
             advanced_files = [f for f in lineage_files if 'advanced_' in f]
             
             if quick_files:
@@ -1017,6 +1056,13 @@ def main():
             if sample_files:
                 print(f"\n   🎯 From test_samples.py queries ({len(sample_files)} files):")
                 for file in sorted(sample_files):
+                    file_path = os.path.join(output_dir, file)
+                    size = os.path.getsize(file_path)
+                    print(f"     • {file} ({size:,} bytes)")
+            
+            if derived_files:
+                print(f"\n   🏗️  Derived table tests ({len(derived_files)} file):")
+                for file in sorted(derived_files):
                     file_path = os.path.join(output_dir, file)
                     size = os.path.getsize(file_path)
                     print(f"     • {file} ({size:,} bytes)")
@@ -1041,6 +1087,7 @@ def main():
             quick_jpegs = [f for f in jpeg_files if 'quick_' in f]
             simple_jpegs = [f for f in jpeg_files if 'simple_' in f]
             sample_jpegs = [f for f in jpeg_files if 'sample' in f and 'simple_' not in f]
+            derived_jpegs = [f for f in jpeg_files if 'complex_derived_tables' in f]
             advanced_jpegs = [f for f in jpeg_files if 'advanced_' in f]
             
             if quick_jpegs:
@@ -1060,6 +1107,13 @@ def main():
             if sample_jpegs:
                 print(f"\n   🎯 From test_samples.py queries ({len(sample_jpegs)} files):")
                 for file in sorted(sample_jpegs):
+                    file_path = os.path.join(output_dir, file)
+                    size = os.path.getsize(file_path)
+                    print(f"     • {file} ({size:,} bytes)")
+            
+            if derived_jpegs:
+                print(f"\n   🏗️  Derived table tests ({len(derived_jpegs)} file):")
+                for file in sorted(derived_jpegs):
                     file_path = os.path.join(output_dir, file)
                     size = os.path.getsize(file_path)
                     print(f"     • {file} ({size:,} bytes)")

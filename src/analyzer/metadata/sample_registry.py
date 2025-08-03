@@ -222,3 +222,23 @@ class SampleMetadataRegistry(MetadataRegistry):
         )
         self.tables["default.employees"] = employees_metadata
         self.tables["employees"] = employees_metadata
+        
+        # Departments table for derived table testing
+        departments_columns = [
+            ColumnMetadata("dept_id", "BIGINT", False, True, description="Unique department identifier"),
+            ColumnMetadata("dept_name", "VARCHAR(255)", False, description="Department name"),
+            ColumnMetadata("budget", "DECIMAL(12,2)", False, description="Department budget"),
+            ColumnMetadata("manager_id", "BIGINT", False, description="Department manager ID"),
+            ColumnMetadata("active", "BOOLEAN", False, description="Department active status")
+        ]
+        
+        departments_metadata = TableMetadata(
+            catalog=None, schema="default", table="departments",
+            columns=departments_columns,
+            description="Department information",
+            owner="hr_team",
+            row_count=50,
+            storage_format="PARQUET"
+        )
+        self.tables["default.departments"] = departments_metadata
+        self.tables["departments"] = departments_metadata

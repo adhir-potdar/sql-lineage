@@ -3,6 +3,7 @@
 from typing import Dict, List, Any, Optional, Set
 from ..utils.sql_parsing_utils import is_column_from_table
 from ..utils.metadata_utils import create_metadata_entry
+from .analyzers.derived_table_analyzer import DerivedTableAnalyzer
 
 
 class ChainBuilderEngine:
@@ -11,6 +12,7 @@ class ChainBuilderEngine:
     def __init__(self, dialect: str = "trino"):
         """Initialize the chain builder engine."""
         self.dialect = dialect
+        self.derived_table_analyzer = DerivedTableAnalyzer(dialect)
     
     def build_chain_from_dependencies(self, entity_name: str, entity_type: str, 
                                     table_lineage_data: Dict, column_lineage_data: Dict,
@@ -340,6 +342,45 @@ class ChainBuilderEngine:
             max_depth = max(max_depth, chain_depth)
         
         return max_depth
+    
+    def process_derived_tables(self, sql: str) -> Dict[str, Any]:
+        """Process derived tables and return 3-layer lineage structure."""
+        if not sql:
+            return {}
+        
+        return self.derived_table_analyzer.analyze_derived_tables(sql)
+    
+    def merge_derived_table_chains(self, base_chains: Dict, derived_chains: Dict) -> Dict:
+        """Merge derived table chains with base chains, giving priority to derived table analysis."""
+        if not derived_chains:
+            return base_chains
+        
+        # If we have derived table chains, they provide more complete analysis
+        # Merge them with base chains, with derived tables taking priority
+        merged = base_chains.copy()
+        
+        for entity_name, chain_data in derived_chains.items():
+            # If this entity exists in base chains, merge metadata
+            if entity_name in merged:
+                # Keep the derived table structure but merge any additional metadata
+                base_metadata = merged[entity_name].get('metadata', {})
+                derived_metadata = chain_data.get('metadata', {})
+                
+                # Merge table metadata (keep derived table columns as they're more complete)
+                if 'table_type' in base_metadata and 'table_type' not in derived_metadata:
+                    derived_metadata['table_type'] = base_metadata['table_type']
+                if 'schema' in base_metadata and 'schema' not in derived_metadata:
+                    derived_metadata['schema'] = base_metadata['schema']
+                if 'description' in base_metadata and 'description' not in derived_metadata:
+                    derived_metadata['description'] = base_metadata['description']
+                
+                # Update the derived chain with merged metadata
+                chain_data['metadata'].update(derived_metadata)
+            
+            # Use the derived table chain (it has the complete 3-layer structure)
+            merged[entity_name] = chain_data
+        
+        return merged
     
     def add_missing_source_columns(self, chains: Dict, sql: str = None, column_lineage_data: Dict = None, column_transformations_data: Dict = None) -> None:
         """Add missing source columns and handle QUERY_RESULT dependencies - moved from LineageChainBuilder."""

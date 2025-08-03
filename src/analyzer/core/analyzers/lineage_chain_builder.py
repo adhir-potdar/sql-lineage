@@ -562,6 +562,11 @@ class LineageChainBuilder(BaseAnalyzer):
             for entity_name in table_lineage_data.keys():
                 chains[entity_name] = build_comprehensive_chain(entity_name, "table", 1, set())
         
+        # Process derived tables and merge with existing chains
+        derived_table_chains = self.chain_builder_engine.process_derived_tables(sql)
+        if derived_table_chains:
+            chains = self.chain_builder_engine.merge_derived_table_chains(chains, derived_table_chains)
+        
         # Post-process chains to add missing source columns from filter conditions
         self.chain_builder_engine.add_missing_source_columns(chains, sql, column_lineage_data, column_transformations_data)
         
