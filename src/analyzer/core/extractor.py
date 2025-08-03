@@ -841,8 +841,28 @@ class LineageExtractor:
             return None
     
     def _get_join_type(self, join: exp.Join) -> JoinType:
-        """Extract JOIN type from JOIN expression."""
+        """Extract JOIN type from JOIN expression.
+        
+        Preserves the exact syntax as written by the user:
+        - LEFT JOIN → JoinType.LEFT  
+        - LEFT OUTER JOIN → JoinType.LEFT_OUTER
+        - RIGHT JOIN → JoinType.RIGHT
+        - RIGHT OUTER JOIN → JoinType.RIGHT_OUTER
+        - etc.
+        """
         join_side = getattr(join, 'side', None)
+        join_kind = getattr(join, 'kind', None)
+        
+        # Handle explicit OUTER JOIN variants
+        if join_kind == 'OUTER':
+            if join_side == 'LEFT':
+                return JoinType.LEFT_OUTER
+            elif join_side == 'RIGHT':
+                return JoinType.RIGHT_OUTER
+            elif join_side == 'FULL':
+                return JoinType.FULL_OUTER
+        
+        # Handle other JOIN types
         if join_side == 'LEFT':
             return JoinType.LEFT
         elif join_side == 'RIGHT':
@@ -851,7 +871,10 @@ class LineageExtractor:
             return JoinType.FULL
         elif join_side == 'CROSS':
             return JoinType.CROSS
+        elif join_kind == 'INNER':
+            return JoinType.INNER
         else:
+            # Plain JOIN without qualifiers defaults to INNER
             return JoinType.INNER
     
     def _extract_join_conditions(self, join: exp.Join, alias_mappings: Dict[str, str]) -> List[JoinCondition]:

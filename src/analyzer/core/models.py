@@ -20,6 +20,10 @@ class JoinType(str, Enum):
     RIGHT = "RIGHT"
     FULL = "FULL"
     CROSS = "CROSS"
+    OUTER = "OUTER"
+    LEFT_OUTER = "LEFT OUTER"
+    RIGHT_OUTER = "RIGHT OUTER"
+    FULL_OUTER = "FULL OUTER"
 
 class AggregateType(str, Enum):
     """Aggregate function type enumeration."""
