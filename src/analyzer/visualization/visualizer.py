@@ -52,6 +52,7 @@ TRANSFORMATION_TYPES = {
     'CASE': 'CASE',
     'COMPUTED': 'COMPUTED',
     'AGGREGATE': 'AGGREGATE',
+    'SUBQUERY': 'SUBQUERY',
     'UNION': 'UNION',
     'UNION_ALL': 'UNION_ALL'
 }
@@ -1056,6 +1057,9 @@ class SQLLineageVisualizer:
             elif column_transformations.get('has_case'):
                 # If there are CASE statements in columns
                 trans_type = "CASE TRANSFORMATION"
+            elif column_transformations.get('has_subquery'):
+                # If there are subquery columns
+                trans_type = "SUBQUERY TRANSFORMATION"
             elif column_transformations.get('has_aggregation'):
                 # If there are aggregate functions like MAX, MIN, COUNT, SUM, AVG
                 trans_type = "AGGREGATE TRANSFORMATION"
@@ -2583,6 +2587,7 @@ class SQLLineageVisualizer:
             'has_case': False,
             'has_computed': False,
             'has_aggregation': False,
+            'has_subquery': False,
             'details': []
         }
         
@@ -2655,6 +2660,20 @@ class SQLLineageVisualizer:
                         result['details'].append(f"CASE ==> {column_name}")
                     else:
                         result['details'].append(f"{source_expression[:50]}... ==> {column_name}")
+                
+                elif transformation_type == TRANSFORMATION_TYPES['SUBQUERY']:
+                    result['has_subquery'] = True
+                    # Format subquery display nicely
+                    if source_expression and '(SELECT' in source_expression.upper():
+                        # Extract a readable summary of the subquery
+                        if len(source_expression) > 80:
+                            subquery_summary = source_expression[:77] + "..."
+                        else:
+                            subquery_summary = source_expression
+                        result['details'].append(f"SUBQUERY ==> {column_name}")
+                        result['details'].append(f"  {subquery_summary}")
+                    else:
+                        result['details'].append(f"SUBQUERY ==> {column_name}")
                 
                 elif transformation_type in [TRANSFORMATION_TYPES['COMPUTED'], TRANSFORMATION_TYPES['AGGREGATE']]:
                     if function_type in SQL_FUNCTIONS['AGGREGATE_FUNCTIONS']:

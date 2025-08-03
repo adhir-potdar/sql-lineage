@@ -102,9 +102,11 @@ def extract_alias_from_expression(expression: str) -> Optional[str]:
     """Extract alias from expression like 'COUNT(*) as login_count'."""
     if not expression:
         return None
-        
-    alias_match = re.search(r'\s+(?:as|AS)\s+([^\s,)]+)', expression)
-    return alias_match.group(1) if alias_match else None
+    
+    # For subqueries, we need to match the rightmost AS clause to get the outer alias
+    # Use findall to get all matches and take the last one
+    alias_matches = re.findall(r'\s+(?:as|AS)\s+([^\s,)]+)', expression)
+    return alias_matches[-1] if alias_matches else None
 
 
 def extract_function_type(expression: str) -> str:
@@ -270,7 +272,16 @@ def extract_clean_column_name(raw_expression: str, fallback_name: str) -> str:
     if not raw_expression:
         return fallback_name or ""
     
-    # Check for alias (AS keyword)
+    # Check for subqueries first - they should use their alias
+    if '(SELECT' in raw_expression.upper():
+        # For subqueries, extract the rightmost alias (outer alias, not internal table alias)
+        alias_matches = re.findall(r'\s+(?:as|AS)\s+([^\s,)]+)', raw_expression)
+        if alias_matches:
+            return alias_matches[-1].strip()  # Take the last (rightmost) alias
+        # If no alias found, return fallback
+        return fallback_name or "subquery"
+    
+    # Check for alias (AS keyword) for non-subqueries
     alias_match = re.search(r'\s+(?:as|AS)\s+([^\s,)]+)', raw_expression)
     if alias_match:
         return alias_match.group(1).strip()

@@ -203,3 +203,22 @@ class SampleMetadataRegistry(MetadataRegistry):
             row_count=180000,
             storage_format="AVRO"
         )
+        
+        # Employees table for subquery testing
+        employees_columns = [
+            ColumnMetadata("employee_id", "BIGINT", False, True, description="Unique employee identifier"),
+            ColumnMetadata("employee_name", "VARCHAR(255)", False, description="Employee full name"),
+            ColumnMetadata("salary", "DECIMAL(10,2)", False, description="Employee salary"),
+            ColumnMetadata("department_id", "BIGINT", False, description="Department identifier")
+        ]
+        
+        employees_metadata = TableMetadata(
+            catalog=None, schema="default", table="employees",
+            columns=employees_columns,
+            description="Employee information",
+            owner="hr_team",
+            row_count=10000,
+            storage_format="PARQUET"
+        )
+        self.tables["default.employees"] = employees_metadata
+        self.tables["employees"] = employees_metadata
