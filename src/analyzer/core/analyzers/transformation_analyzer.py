@@ -14,9 +14,9 @@ from ..transformation_engine import TransformationEngine
 class TransformationAnalyzer(BaseAnalyzer):
     """Analyzer for table and column transformations."""
     
-    def __init__(self, dialect: str = "trino"):
+    def __init__(self, dialect: str = "trino", compatibility_mode: str = None, table_registry = None):
         """Initialize transformation analyzer with transformation engine."""
-        super().__init__(dialect)
+        super().__init__(dialect, compatibility_mode, table_registry)
         self.transformation_engine = TransformationEngine(dialect)
     
     def parse_transformations(self, sql: str) -> Dict[str, Any]:

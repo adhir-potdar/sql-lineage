@@ -49,9 +49,13 @@ from ..chain_builder_engine import ChainBuilderEngine
 class LineageChainBuilder(BaseAnalyzer):
     """Analyzer for building lineage chains."""
     
-    def __init__(self, dialect: str = "trino", main_analyzer=None):
+    def __init__(self, dialect: str = "trino", main_analyzer=None, table_registry = None):
         """Initialize lineage chain builder with optional reference to main analyzer."""
-        super().__init__(dialect)
+        # Get compatibility mode from main analyzer if available
+        compatibility_mode = getattr(main_analyzer, 'compatibility_mode', None) if main_analyzer else None
+        registry = table_registry or getattr(main_analyzer, 'table_registry', None)
+        
+        super().__init__(dialect, compatibility_mode, registry)
         self.main_analyzer = main_analyzer
         self.transformation_engine = TransformationEngine(dialect)
         self.chain_builder_engine = ChainBuilderEngine(dialect)

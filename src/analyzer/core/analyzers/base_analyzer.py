@@ -9,20 +9,25 @@ from ..models import LineageResult, TableMetadata
 from ..extractor import LineageExtractor
 from ..parsers import SelectParser, TransformationParser, CTEParser, CTASParser, InsertParser, UpdateParser
 from ...utils.validation import validate_sql_input
+from ...utils.sql_parsing_utils import TableNameRegistry, CompatibilityMode
 
 
 class BaseAnalyzer:
     """Base analyzer class for SQL lineage analysis."""
     
-    def __init__(self, dialect: str = "trino"):
+    def __init__(self, dialect: str = "trino", compatibility_mode: str = CompatibilityMode.FULL, table_registry: TableNameRegistry = None):
         """
         Initialize the base analyzer.
         
         Args:
             dialect: SQL dialect to use for parsing
+            compatibility_mode: Table name normalization mode
+            table_registry: Shared table name registry (created if None)
         """
         self.dialect = dialect
-        self.extractor = LineageExtractor()
+        self.compatibility_mode = compatibility_mode
+        self.table_registry = table_registry or TableNameRegistry(dialect, compatibility_mode)
+        self.extractor = LineageExtractor(dialect, compatibility_mode)
         
         # Initialize modular parsers as core components
         self.select_parser = SelectParser(dialect)

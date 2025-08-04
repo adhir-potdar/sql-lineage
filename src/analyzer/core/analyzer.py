@@ -9,6 +9,7 @@ from .models import LineageResult, TableMetadata
 from .extractor import LineageExtractor
 from .parsers import SelectParser, TransformationParser, CTEParser, CTASParser, InsertParser, UpdateParser
 from ..utils.validation import validate_sql_input
+from ..utils.sql_parsing_utils import TableNameRegistry, CompatibilityMode
 
 # Import the new modular analyzers
 from .analyzers import (
@@ -25,15 +26,18 @@ from .analyzers import (
 class SQLLineageAnalyzer:
     """Main SQL lineage analyzer class - Wrapper for modular analyzers."""
     
-    def __init__(self, dialect: str = "trino"):
+    def __init__(self, dialect: str = "trino", compatibility_mode: str = CompatibilityMode.FULL):
         """
         Initialize the SQL lineage analyzer.
         
         Args:
             dialect: SQL dialect to use for parsing
+            compatibility_mode: Table name normalization mode
         """
         self.dialect = dialect
-        self.extractor = LineageExtractor()
+        self.compatibility_mode = compatibility_mode
+        self.table_registry = TableNameRegistry(dialect, compatibility_mode)
+        self.extractor = LineageExtractor(dialect, compatibility_mode)
         
         # Initialize modular parsers as core components
         self.select_parser = SelectParser(dialect)
@@ -43,15 +47,15 @@ class SQLLineageAnalyzer:
         self.insert_parser = InsertParser(dialect)
         self.update_parser = UpdateParser(dialect)
         
-        # Initialize the new modular analyzers
-        self.base_analyzer = BaseAnalyzer(dialect)
-        self.select_analyzer = SelectAnalyzer(dialect)
-        self.insert_analyzer = InsertAnalyzer(dialect)
-        self.update_analyzer = UpdateAnalyzer(dialect)
-        self.cte_analyzer = CTEAnalyzer(dialect, main_analyzer=self)
-        self.ctas_analyzer = CTASAnalyzer(dialect)
-        self.transformation_analyzer = TransformationAnalyzer(dialect)
-        self.lineage_chain_builder = LineageChainBuilder(dialect, main_analyzer=self)
+        # Initialize the new modular analyzers with shared registry
+        self.base_analyzer = BaseAnalyzer(dialect, compatibility_mode, self.table_registry)
+        self.select_analyzer = SelectAnalyzer(dialect, compatibility_mode, self.table_registry)
+        self.insert_analyzer = InsertAnalyzer(dialect, compatibility_mode, self.table_registry)
+        self.update_analyzer = UpdateAnalyzer(dialect, compatibility_mode, self.table_registry)
+        self.cte_analyzer = CTEAnalyzer(dialect, main_analyzer=self, table_registry=self.table_registry)
+        self.ctas_analyzer = CTASAnalyzer(dialect, compatibility_mode, self.table_registry)
+        self.transformation_analyzer = TransformationAnalyzer(dialect, compatibility_mode, self.table_registry)
+        self.lineage_chain_builder = LineageChainBuilder(dialect, main_analyzer=self, table_registry=self.table_registry)
     
     def analyze_comprehensive(self, sql: str) -> Dict[str, Any]:
         """
