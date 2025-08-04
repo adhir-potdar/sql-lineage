@@ -162,6 +162,10 @@ cython_debug/
 # VS Code
 .vscode/
 
+# IntelliJ
+.idea/
+*.iml
+
 # macOS
 .DS_Store
 .AppleDouble

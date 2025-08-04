@@ -10,7 +10,7 @@ from ...utils.sqlglot_helpers import (
 )
 from ...utils.column_extraction_utils import extract_all_referenced_columns
 from ...utils.metadata_utils import create_cte_metadata, merge_metadata_entries
-from ...utils.sql_parsing_utils import extract_function_type, extract_alias_from_expression
+from ...utils.sql_parsing_utils import extract_function_type, extract_alias_from_expression, TableNameRegistry, CompatibilityMode
 from ...utils.regex_patterns import is_aggregate_function
 from ..chain_builder_engine import ChainBuilderEngine
 
@@ -18,9 +18,13 @@ from ..chain_builder_engine import ChainBuilderEngine
 class CTEAnalyzer(BaseAnalyzer):
     """Analyzer for CTE statements."""
     
-    def __init__(self, dialect: str = "trino", main_analyzer=None):
+    def __init__(self, dialect: str = "trino", main_analyzer=None, table_registry: TableNameRegistry = None):
         """Initialize CTE analyzer with chain builder engine."""
-        super().__init__(dialect)
+        # Get compatibility mode from main analyzer if available
+        compatibility_mode = getattr(main_analyzer, 'compatibility_mode', CompatibilityMode.FULL) if main_analyzer else CompatibilityMode.FULL
+        registry = table_registry or getattr(main_analyzer, 'table_registry', None)
+        
+        super().__init__(dialect, compatibility_mode, registry)
         self.main_analyzer = main_analyzer
         self.chain_builder_engine = ChainBuilderEngine(dialect)
     
@@ -74,9 +78,33 @@ class CTEAnalyzer(BaseAnalyzer):
                     if table_name not in ctes:  # Not a CTE
                         base_tables.add(table_name)
             
-            # 2. For each base table, build a single continuous dependency chain
-            for table_name in base_tables:
-                chains[table_name] = self._build_single_cte_chain(table_name, ctes, execution_order, table_lineage_data, sql)
+            # Normalize base table names using registry to eliminate duplicates
+            original_to_canonical = {}
+            canonical_to_original = {}
+            
+            if self.table_registry and base_tables:
+                self.table_registry.register_tables(base_tables)
+                
+                for table_name in base_tables:
+                    canonical_name = self.table_registry.get_canonical_name(table_name)
+                    original_to_canonical[table_name] = canonical_name
+                    canonical_to_original[canonical_name] = table_name
+            else:
+                # No normalization - identity mapping
+                for table_name in base_tables:
+                    original_to_canonical[table_name] = table_name
+                    canonical_to_original[table_name] = table_name
+            
+            # 2. For each canonical base table, build a single continuous dependency chain
+            # Use original names for CTE lookups but store with canonical names
+            canonical_base_tables = set(canonical_to_original.keys())
+            
+            for canonical_name in canonical_base_tables:
+                original_name = canonical_to_original[canonical_name]
+                # Build chain using original name for CTE lookups but canonical name for output
+                chain = self._build_single_cte_chain(original_name, ctes, execution_order, table_lineage_data, sql, canonical_name)
+                # Store with canonical name
+                chains[canonical_name] = chain
             
             # 3. Handle any orphaned CTEs (CTEs that don't connect to base tables)
             # This shouldn't happen in well-formed queries, but handle gracefully
@@ -86,14 +114,14 @@ class CTEAnalyzer(BaseAnalyzer):
                     
                 # Check if this CTE is already included in any base table chain
                 cte_included = False
-                for base_table in base_tables:
-                    if self._cte_in_chain(cte_name, chains.get(base_table, {})):
+                for canonical_name in canonical_base_tables:
+                    if self._cte_in_chain(cte_name, chains.get(canonical_name, {})):
                         cte_included = True
                         break
                 
                 # If CTE is not included in any chain, add it as a separate chain
                 if not cte_included:
-                    chains[cte_name] = self._build_single_cte_chain(cte_name, ctes, execution_order, table_lineage_data)
+                    chains[cte_name] = self._build_single_cte_chain(cte_name, ctes, execution_order, table_lineage_data, sql)
         
         else:  # upstream
             # For upstream: start from final result, trace back through CTEs to base tables
@@ -355,14 +383,14 @@ class CTEAnalyzer(BaseAnalyzer):
         
         return entity
     
-    def _build_single_cte_chain(self, start_entity: str, ctes: dict, execution_order: list, table_lineage_data: dict, sql: str = None) -> dict:
+    def _build_single_cte_chain(self, start_entity: str, ctes: dict, execution_order: list, table_lineage_data: dict, sql: str = None, canonical_name: str = None) -> dict:
         """Build a single continuous chain from a base table through CTEs to QUERY_RESULT."""
         
         # For the nested CTE example:
         # orders → order_stats → customer_tiers → tier_summary → QUERY_RESULT
         # users → QUERY_RESULT
         
-        # Find the complete chain starting from this entity
+        # Find the complete chain starting from this entity (using original name for lookups)
         chain = self._build_complete_cte_chain_from_entity(start_entity, ctes, execution_order)
         
         # Build the nested dependency structure
@@ -370,8 +398,11 @@ class CTEAnalyzer(BaseAnalyzer):
         current_entity_dict = None
         
         for i, entity_name in enumerate(chain):
+            # Use canonical name for the root entity (base table), original names for CTEs
+            display_name = canonical_name if (i == 0 and canonical_name) else entity_name
+            
             entity_dict = {
-                "entity": entity_name,
+                "entity": display_name,
                 "entity_type": "cte" if entity_name in ctes else "table",
                 "depth": i,
                 "dependencies": [],
@@ -381,7 +412,9 @@ class CTEAnalyzer(BaseAnalyzer):
             # Add transformations if not the first entity
             if i > 0:
                 prev_entity = chain[i-1]
-                transformations = self._get_cte_transformations(prev_entity, entity_name, ctes)
+                # Use canonical name for source table in transformations
+                prev_display_name = canonical_name if (i == 1 and canonical_name) else prev_entity
+                transformations = self._get_cte_transformations(prev_display_name, entity_name, ctes)
                 if transformations:
                     entity_dict["transformations"] = transformations
             
@@ -437,7 +470,8 @@ class CTEAnalyzer(BaseAnalyzer):
                     
                     # Check if this CTE depends on the current entity
                     for source in source_tables:
-                        if source.get('name') == current_entity:
+                        source_name = source.get('name')
+                        if self._table_names_match(source_name, current_entity):
                             next_cte = cte_name
                             break
                     
@@ -451,6 +485,28 @@ class CTEAnalyzer(BaseAnalyzer):
                 break
         
         return chain
+    
+    def _table_names_match(self, source_name: str, target_name: str) -> bool:
+        """Check if two table names refer to the same table, accounting for canonical vs. original names."""
+        if not source_name or not target_name:
+            return False
+        
+        # Direct match
+        if source_name == target_name:
+            return True
+        
+        # If we have a table registry, check if they normalize to the same canonical name
+        if self.table_registry:
+            source_canonical = self.table_registry.get_canonical_name(source_name)
+            target_canonical = self.table_registry.get_canonical_name(target_name)
+            if source_canonical == target_canonical:
+                return True
+        
+        # Check if one is the base name of the other (e.g., "orders" vs "catalog.schema.orders")
+        source_base = source_name.split('.')[-1].strip('"')
+        target_base = target_name.split('.')[-1].strip('"')
+        
+        return source_base.lower() == target_base.lower()
     
     def _cte_in_chain(self, cte_name: str, chain_entity: dict) -> bool:
         """Check if a CTE is included in a dependency chain."""

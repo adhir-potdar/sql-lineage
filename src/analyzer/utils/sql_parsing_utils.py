@@ -15,6 +15,250 @@ def normalize_table_name(table_name: str) -> str:
     return normalized.lower()
 
 
+class CompatibilityMode:
+    """Control normalization behavior for backward compatibility"""
+    
+    DISABLED = "disabled"           # No normalization (existing behavior)
+    CONSERVATIVE = "conservative"   # Only normalize obvious duplicates
+    FULL = "full"                  # Full normalization (new behavior)
+
+
+class NamingPatternAnalysis:
+    """Analyze table naming patterns to determine normalization strategy"""
+    
+    def __init__(self, table_names: set, dialect: str = "trino"):
+        self.simple_names = set()      # users, orders
+        self.schema_qualified = set()   # schema.table  
+        self.catalog_qualified = set()  # catalog.schema.table
+        self.quoted_names = set()       # "catalog"."schema"."table"
+        self.needs_normalization = False
+        self.dialect = dialect
+        
+        self._analyze_patterns(table_names)
+    
+    def _analyze_patterns(self, table_names: set):
+        """Analyze naming patterns in the table set"""
+        for name in table_names:
+            if self._is_simple_name(name):
+                self.simple_names.add(name)
+            elif self._is_schema_qualified(name):
+                self.schema_qualified.add(name)
+            elif self._is_catalog_qualified(name):
+                self.catalog_qualified.add(name)
+            elif self._is_quoted_qualified(name):
+                self.quoted_names.add(name)
+        
+        # Determine if normalization is needed
+        pattern_types = sum([
+            bool(self.simple_names),
+            bool(self.schema_qualified), 
+            bool(self.catalog_qualified),
+            bool(self.quoted_names)
+        ])
+        
+        # Only normalize if we have mixed patterns
+        self.needs_normalization = pattern_types > 1
+    
+    def _is_simple_name(self, name: str) -> bool:
+        """Check if name is simple (users, orders)"""
+        return '.' not in name and '"' not in name and '`' not in name
+    
+    def _is_schema_qualified(self, name: str) -> bool:
+        """Check if name is schema.table format"""
+        return '.' in name and name.count('.') == 1 and '"' not in name
+    
+    def _is_catalog_qualified(self, name: str) -> bool:
+        """Check if name is catalog.schema.table format (unquoted)"""
+        return '.' in name and name.count('.') == 2 and '"' not in name
+    
+    def _is_quoted_qualified(self, name: str) -> bool:
+        """Check if name uses quoted identifiers"""
+        return '"' in name or '`' in name
+    
+    def has_obvious_duplicates(self) -> bool:
+        """Check if there are obvious duplicates (same base name, different qualification)"""
+        base_names = set()
+        for name in self._get_all_names():
+            base_name = self._extract_base_name(name)
+            if base_name in base_names:
+                return True
+            base_names.add(base_name)
+        return False
+    
+    def _get_all_names(self) -> set:
+        """Get all table names from all categories"""
+        return (self.simple_names | self.schema_qualified | 
+                self.catalog_qualified | self.quoted_names)
+    
+    def _extract_base_name(self, table_name: str) -> str:
+        """Extract base table name from any qualification format"""
+        # Handle quoted names: "catalog"."schema"."table" → table
+        if '"' in table_name:
+            parts = [p.strip('"') for p in table_name.split('.')]
+            return parts[-1].lower()
+        
+        # Handle backtick names: `catalog`.`schema`.`table` → table  
+        if '`' in table_name:
+            parts = [p.strip('`') for p in table_name.split('.')]
+            return parts[-1].lower()
+        
+        # Handle unquoted names: catalog.schema.table → table
+        return table_name.split('.')[-1].lower()
+
+
+def normalize_table_references(table_names: set, dialect: str = "trino", 
+                              compatibility_mode: str = CompatibilityMode.FULL) -> dict:
+    """
+    Normalize a set of table names to resolve duplicates with backward compatibility.
+    
+    Args:
+        table_names: Set of table names to normalize
+        dialect: SQL dialect for context-aware normalization
+        compatibility_mode: Compatibility mode for backward compatibility
+        
+    Returns:
+        Dict mapping original table names to their canonical forms
+    """
+    if not table_names:
+        return {}
+    
+    # Handle compatibility modes
+    if compatibility_mode == CompatibilityMode.DISABLED:
+        return {name: name for name in table_names}
+    
+    # Analyze naming patterns
+    analysis = NamingPatternAnalysis(table_names, dialect)
+    
+    if compatibility_mode == CompatibilityMode.CONSERVATIVE:
+        # Only normalize if we detect clear duplicates
+        if not analysis.has_obvious_duplicates():
+            return {name: name for name in table_names}
+    
+    # If no normalization needed, return identity mapping
+    if not analysis.needs_normalization:
+        return {name: name for name in table_names}
+    
+    # Group tables by their normalized base name (without catalog/schema)
+    base_name_groups = {}
+    canonical_mapping = {}
+    
+    for table_name in table_names:
+        # Extract base table name (last part after dots)
+        base_name = analysis._extract_base_name(table_name)
+        
+        if base_name not in base_name_groups:
+            base_name_groups[base_name] = []
+        base_name_groups[base_name].append(table_name)
+    
+    # For each group, choose the most qualified name as canonical
+    for base_name, table_list in base_name_groups.items():
+        if len(table_list) == 1:
+            # Only one table with this base name - use as-is
+            canonical_mapping[table_list[0]] = table_list[0]
+        else:
+            # Multiple tables with same base name - choose most qualified
+            canonical_name = choose_canonical_table_name(table_list, dialect)
+            for table_name in table_list:
+                canonical_mapping[table_name] = canonical_name
+    
+    return canonical_mapping
+
+
+def choose_canonical_table_name(candidates: List[str], dialect: str = "trino") -> str:
+    """
+    Choose canonical name based on context and dialect preferences.
+    
+    Priority order:
+    1. Most qualified name in current dialect format
+    2. Preserve existing format if no conflicts
+    3. Fallback to most explicit naming
+    """
+    if len(candidates) == 1:
+        return candidates[0]
+    
+    # Group by qualification level
+    simple = [c for c in candidates if '.' not in c]
+    qualified = [c for c in candidates if '.' in c]
+    
+    # If we have both simple and qualified names for same table
+    if simple and qualified:
+        # For Trino/similar: prefer fully qualified
+        if dialect.lower() in ['trino', 'presto', 'spark']:
+            return max(qualified, key=lambda x: (x.count('.'), '"' in x, len(x)))
+        # For others: prefer qualified but not overly complex
+        else:
+            schema_qualified = [q for q in qualified if q.count('.') == 1]
+            if schema_qualified:
+                return schema_qualified[0]
+            return qualified[0]
+    
+    # If all same qualification level, prefer quoted/explicit
+    return max(candidates, key=lambda x: ('"' in x, len(x)))
+
+
+class TableNameRegistry:
+    """Centralized registry for canonical table names with validation"""
+    
+    def __init__(self, dialect: str = "trino", compatibility_mode: str = CompatibilityMode.FULL):
+        self.dialect = dialect
+        self.compatibility_mode = compatibility_mode
+        self._canonical_mapping = {}
+        self._reverse_mapping = {}  # canonical -> set of original names
+        self._table_aliases = {}
+    
+    def register_tables(self, table_names: set, alias_mappings: dict = None):
+        """Register a set of table names and create canonical mappings"""
+        if alias_mappings is None:
+            alias_mappings = {}
+        
+        self._table_aliases.update(alias_mappings)
+        
+        # Create canonical mapping
+        canonical_mapping = normalize_table_references(
+            table_names, self.dialect, self.compatibility_mode
+        )
+        
+        # Update registries
+        for original, canonical in canonical_mapping.items():
+            self._canonical_mapping[original] = canonical
+            
+            if canonical not in self._reverse_mapping:
+                self._reverse_mapping[canonical] = set()
+            self._reverse_mapping[canonical].add(original)
+    
+    def get_canonical_name(self, table_name: str) -> str:
+        """Get the canonical name for any table reference"""
+        return self._canonical_mapping.get(table_name, table_name)
+    
+    def get_all_canonical_tables(self) -> set:
+        """Get all unique canonical table names"""
+        return set(self._canonical_mapping.values())
+    
+    def get_original_names(self, canonical_name: str) -> set:
+        """Get all original names that map to this canonical name"""
+        return self._reverse_mapping.get(canonical_name, {canonical_name})
+    
+    def is_canonical(self, table_name: str) -> bool:
+        """Check if a table name is in canonical form"""
+        canonical = self.get_canonical_name(table_name)
+        return table_name == canonical
+    
+    def has_duplicates(self) -> bool:
+        """Check if any table names had duplicates that were normalized"""
+        return any(len(originals) > 1 for originals in self._reverse_mapping.values())
+    
+    def get_normalization_summary(self) -> dict:
+        """Get summary of normalization actions taken"""
+        return {
+            'total_original_names': len(self._canonical_mapping),
+            'total_canonical_names': len(self._reverse_mapping),
+            'duplicates_found': self.has_duplicates(),
+            'normalization_count': sum(
+                len(originals) - 1 for originals in self._reverse_mapping.values()
+            )
+        }
+
+
 def clean_column_name(column_name: str) -> str:
     """Clean column name by removing quotes and normalizing format."""
     if not column_name:

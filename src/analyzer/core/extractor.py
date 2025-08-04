@@ -13,18 +13,35 @@ from .models import (
     JoinType, AggregateType, OperatorType, TransformationType
 )
 from ..utils.condition_utils import GenericConditionHandler
+from ..utils.sql_parsing_utils import TableNameRegistry, CompatibilityMode
 
 
 class LineageExtractor:
     """Extracts lineage information from parsed SQL expressions."""
     
-    def __init__(self):
-        pass
+    def __init__(self, dialect: str = "trino", compatibility_mode: str = CompatibilityMode.FULL):
+        self.dialect = dialect
+        self.compatibility_mode = compatibility_mode
+        self._table_registry = None
     
     def extract_table_lineage(self, expression: Expression) -> TableLineage:
         """Extract table-level lineage from SQL expression."""
         lineage = TableLineage()
         alias_mappings = self._extract_table_alias_mappings(expression)
+        
+        # Initialize table registry for this extraction
+        self._table_registry = TableNameRegistry(self.dialect, self.compatibility_mode)
+        raw_table_names = set()
+        
+        # Collect all raw table names first
+        for table in expression.find_all(exp.Table):
+            table_name = str(table)
+            clean_table_name = self._clean_table_reference(table_name)
+            raw_table_names.add(clean_table_name)
+        
+        # Register all table names to get canonical mappings
+        if raw_table_names:
+            self._table_registry.register_tables(raw_table_names)
         
         # First, collect all CTE names
         cte_mapping = {}
@@ -46,24 +63,30 @@ class LineageExtractor:
             # Find source tables in this CTE, allowing references to previous CTEs
             source_tables = self._get_source_tables_from_node(cte.this, alias_mappings, processed_ctes, cte_name)
             
+            # Normalize table names using registry
+            normalized_source_tables = self._normalize_table_names(source_tables)
+            
             # If this CTE should be skipped, store its dependencies but don't add to lineage
             if cte_name in ctes_to_skip:
-                skipped_cte_dependencies[cte_name] = source_tables
+                skipped_cte_dependencies[cte_name] = normalized_source_tables
                 processed_ctes[cte_name] = cte
                 continue
             
             # Always create an entry for this CTE, even if it has no sources
-            if not source_tables:
+            if not normalized_source_tables:
                 # Create empty entry
                 if cte_name not in lineage.upstream:
                     lineage.upstream[cte_name] = set()
             else:
-                for source in source_tables:
+                for source in normalized_source_tables:
                     lineage.add_dependency(cte_name, source)
                     
-                    # Extract transformation details for this CTE
-                    transformation = self._extract_table_transformation(cte.this, source, cte_name, alias_mappings)
+                    # Extract transformation details for this CTE (use original source for transformation analysis)
+                    original_source = next((orig for orig in source_tables if self._table_registry.get_canonical_name(orig) == source), source)
+                    transformation = self._extract_table_transformation(cte.this, original_source, cte_name, alias_mappings)
                     if transformation:
+                        # Update transformation to use canonical names
+                        transformation.source_table = source
                         lineage.add_transformation(cte_name, transformation)
             
             # Add this CTE to the processed set
@@ -73,11 +96,12 @@ class LineageExtractor:
         if isinstance(expression, exp.Select):
             target_name = "QUERY_RESULT"
             source_tables = self._get_source_tables_from_node(expression, alias_mappings, cte_mapping)
+            normalized_source_tables = self._normalize_table_names(source_tables)
             
             # Check if this is a simple pass-through of a single CTE (SELECT * FROM cte [ORDER BY ...])
-            passthrough_cte = self._detect_main_query_passthrough(expression, source_tables, cte_mapping)
+            passthrough_cte = self._detect_main_query_passthrough(expression, normalized_source_tables, cte_mapping)
             
-            for source in source_tables:
+            for source in normalized_source_tables:
                 # If this source is a skipped CTE, replace it with its dependencies
                 if source in ctes_to_skip and source in skipped_cte_dependencies:
                     # Add the dependencies of the skipped CTE instead
@@ -92,15 +116,19 @@ class LineageExtractor:
                 else:
                     lineage.add_dependency(target_name, source)
                     
-                    # Extract transformation details for main query
-                    transformation = self._extract_table_transformation(expression, source, target_name, alias_mappings)
+                    # Extract transformation details for main query (use original source for transformation analysis)
+                    original_source = next((orig for orig in source_tables if self._table_registry.get_canonical_name(orig) == source), source)
+                    transformation = self._extract_table_transformation(expression, original_source, target_name, alias_mappings)
                     if transformation:
+                        # Update transformation to use canonical names
+                        transformation.source_table = source
                         lineage.add_transformation(target_name, transformation)
         
         # Handle UNION queries
         elif isinstance(expression, exp.Union):
             target_name = "QUERY_RESULT"
             source_tables = self._get_source_tables_from_node(expression, alias_mappings, cte_mapping)
+            normalized_source_tables = self._normalize_table_names(source_tables)
             
             # Determine UNION type (UNION or UNION ALL)
             # In SQLGlot, distinct=False means UNION ALL, distinct=True means UNION
@@ -108,7 +136,7 @@ class LineageExtractor:
             union_type = "UNION ALL" if distinct_flag is False else "UNION"
             
             # Add dependencies
-            for source in source_tables:
+            for source in normalized_source_tables:
                 # If this source is a skipped CTE, replace it with its dependencies
                 if source in ctes_to_skip and source in skipped_cte_dependencies:
                     # Add the dependencies of the skipped CTE instead
@@ -118,7 +146,7 @@ class LineageExtractor:
                     lineage.add_dependency(target_name, source)
             
             # Extract transformations from each SELECT in the UNION
-            self._extract_union_transformations(expression, target_name, union_type, alias_mappings, ctes_to_skip, lineage)
+            self._extract_union_transformations(expression, target_name, union_type, alias_mappings, ctes_to_skip, lineage, source_tables)
         
         # Handle CREATE TABLE AS SELECT
         elif isinstance(expression, exp.Create):
@@ -129,7 +157,8 @@ class LineageExtractor:
                 # Find the SELECT part
                 for select in expression.find_all(exp.Select):
                     source_tables = self._get_source_tables_from_node(select, alias_mappings, cte_mapping)
-                    for source in source_tables:
+                    normalized_source_tables = self._normalize_table_names(source_tables)
+                    for source in normalized_source_tables:
                         # If this source is a skipped CTE, replace it with its dependencies
                         if source in ctes_to_skip and source in skipped_cte_dependencies:
                             # Add the dependencies of the skipped CTE instead
@@ -138,12 +167,27 @@ class LineageExtractor:
                         else:
                             lineage.add_dependency(target_name, source)
                             
-                            # Extract transformation details for CREATE TABLE AS SELECT
-                            transformation = self._extract_table_transformation(select, source, target_name, alias_mappings)
+                            # Extract transformation details for CREATE TABLE AS SELECT (use original source for transformation analysis)
+                            original_source = next((orig for orig in source_tables if self._table_registry.get_canonical_name(orig) == source), source)
+                            transformation = self._extract_table_transformation(select, original_source, target_name, alias_mappings)
                             if transformation:
+                                # Update transformation to use canonical names
+                                transformation.source_table = source
                                 lineage.add_transformation(target_name, transformation)
         
         return lineage
+    
+    def _normalize_table_names(self, table_names: Set[str]) -> Set[str]:
+        """Normalize table names using the registry to eliminate duplicates."""
+        if not self._table_registry:
+            return table_names
+        
+        normalized_names = set()
+        for table_name in table_names:
+            canonical_name = self._table_registry.get_canonical_name(table_name)
+            normalized_names.add(canonical_name)
+        
+        return normalized_names
     
     def extract_column_lineage(self, expression: Expression) -> ColumnLineage:
         """Extract column-level lineage from SQL expression."""
@@ -988,7 +1032,7 @@ class LineageExtractor:
     
     def _extract_union_transformations(self, union_expr: Expression, target_name: str, 
                                      union_type: str, alias_mappings: Dict[str, str], 
-                                     ctes_to_skip: Set[str], lineage) -> None:
+                                     ctes_to_skip: Set[str], lineage, original_source_tables: Set[str] = None) -> None:
         """Extract transformations from each SELECT statement in a UNION."""
         try:
             # Get all source tables in the entire UNION for context
@@ -1002,18 +1046,20 @@ class LineageExtractor:
             for select_stmt in select_statements:
                 # Get source tables for this SELECT
                 source_tables = self._get_source_tables_from_node(select_stmt, alias_mappings, {})
+                normalized_source_tables = self._normalize_table_names(source_tables)
                 
-                for source in source_tables:
+                for source in normalized_source_tables:
                     if source not in ctes_to_skip:
-                        # Extract full transformation details including filter conditions
+                        # Extract full transformation details including filter conditions (use original source for transformation analysis)
+                        original_source = next((orig for orig in source_tables if self._table_registry.get_canonical_name(orig) == source), source)
                         transformation = self._extract_table_transformation(
-                            select_stmt, source, target_name, alias_mappings
+                            select_stmt, original_source, target_name, alias_mappings
                         )
                         
                         if transformation:
                             # Convert to UNION transformation by updating type and adding union info
                             union_transformation = TableTransformation(
-                                source_table=transformation.source_table,
+                                source_table=source,  # Use canonical name
                                 target_table=transformation.target_table,
                                 transformation_type=TransformationType.UNION_ALL if union_type == "UNION ALL" else TransformationType.UNION,
                                 filter_conditions=transformation.filter_conditions,
@@ -1022,17 +1068,18 @@ class LineageExtractor:
                                 join_conditions=transformation.join_conditions,
                                 having_conditions=transformation.having_conditions,
                                 order_by_columns=transformation.order_by_columns,
-                                union_sources=[transformation.source_table],
+                                union_sources=[source],  # Use canonical name
                                 union_type=union_type
                             )
                             lineage.add_transformation(target_name, union_transformation)
         except Exception as e:
             # If extraction fails, fall back to basic UNION transformations
-            source_tables = self._get_source_tables_from_node(union_expr, alias_mappings, {})
-            for source in source_tables:
+            source_tables = self._get_source_tables_from_node(union_expr, alias_mappings, {}) if original_source_tables is None else original_source_tables
+            normalized_source_tables = self._normalize_table_names(source_tables)
+            for source in normalized_source_tables:
                 if source not in ctes_to_skip:
                     union_transformation = self._create_union_transformation(
-                        source, target_name, source_tables, union_type
+                        source, target_name, normalized_source_tables, union_type
                     )
                     if union_transformation:
                         lineage.add_transformation(target_name, union_transformation)
