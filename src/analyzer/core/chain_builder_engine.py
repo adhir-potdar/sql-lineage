@@ -405,12 +405,9 @@ class ChainBuilderEngine:
             from ..utils.sql_parsing_utils import is_subquery_expression
             parsed = sqlglot.parse_one(sql, dialect='trino')
             
-            # Build alias to table mapping
-            alias_to_table = {}
-            tables = list(parsed.find_all(sqlglot.exp.Table))
-            for table in tables:
-                if table.alias:
-                    alias_to_table[str(table.alias)] = str(table.name)
+            # Build alias to table mapping using the proper utility function
+            from ..utils.sql_parsing_utils import build_alias_to_table_mapping
+            alias_to_table = build_alias_to_table_mapping(sql, self.dialect)
             
             # Get select columns from parsing - handle all SELECT statements including UNIONs
             select_columns = []
@@ -528,20 +525,30 @@ class ChainBuilderEngine:
                                 # Determine primary table from FROM clause
                                 primary_table = None
                                 try:
-                                    parsed_sql = sqlglot.parse_one(sql, dialect='trino')
+                                    parsed_sql = sqlglot.parse_one(sql, dialect=self.dialect)
                                     from_clause = parsed_sql.find(sqlglot.exp.From)
                                     if from_clause and hasattr(from_clause.this, 'name'):
-                                        primary_table = str(from_clause.this.name)
+                                        # Extract full qualified table name including database part
+                                        table = from_clause.this
+                                        if table.db:
+                                            # Handle database.table naming (e.g., "ecommerce.users")
+                                            primary_table = f"{table.db}.{table.name}"
+                                        elif table.catalog and table.db:
+                                            # Handle three-part naming (e.g., "catalog.schema.table") 
+                                            primary_table = f"{table.catalog}.{table.db}.{table.name}"
+                                        else:
+                                            # Handle simple table naming (e.g., "users")
+                                            primary_table = str(table.name)
                                 except:
                                     pass
                                 
-                                # For aggregate queries, only add to primary table
+                                # For aggregate queries, process columns for all tables but filter correctly later
                                 # For JOIN/UNION queries, add to the main table that most SELECT expressions reference
                                 should_add_columns = False
                                 
                                 if needs_aggregate_processing:
-                                    # For aggregate queries, only add to primary table
-                                    should_add_columns = (entity_name == primary_table)
+                                    # For aggregate queries, process columns for all tables
+                                    should_add_columns = True
                                 elif is_join_query or is_union_query:
                                     # For JOIN/UNION queries, always process columns but filter by table relevance
                                     should_add_columns = True
@@ -555,12 +562,10 @@ class ChainBuilderEngine:
                                         column_name = sel_col.get('column_name')
                                         source_table = sel_col.get('source_table')
                                         
-                                        print(f"DEBUG: Processing column for {entity_name}: '{raw_expression}' (source_table: {source_table})")
                                         
                                         # Skip subquery columns for entities that don't match the subquery's source table
                                         if (is_subquery_expression(raw_expression, self.dialect) and 
                                             source_table != entity_name):
-                                            print(f"DEBUG: Skipping subquery column '{raw_expression[:50]}...' for {entity_name} (belongs to {source_table})")
                                             continue
                                         
                                         # Skip individual aggregate functions that are part of subqueries
@@ -582,7 +587,34 @@ class ChainBuilderEngine:
                                         # For JOIN/UNION queries, only add columns that reference this specific table
                                         column_belongs_to_this_table = False
                                         
-                                        if is_join_query or is_union_query:
+                                        # Handle different query types with proper precedence
+                                        if needs_aggregate_processing:
+                                            # For aggregate queries (including those with JOINs), assign columns based on their source tables
+                                            
+                                            # Check if this column expression references this entity's table alias
+                                            for alias, table in alias_to_table.items():
+                                                if table == entity_name and f'{alias}.' in raw_expression:
+                                                    column_belongs_to_this_table = True
+                                                    break
+                                            
+                                            # Special handling for aggregate functions without table prefixes (like COUNT(*))
+                                            # These should belong to the primary table
+                                            if not column_belongs_to_this_table and is_aggregate_function(raw_expression):
+                                                # Check if no specific table alias is referenced (like COUNT(*))
+                                                has_table_reference = any(f'{alias}.' in raw_expression for alias in alias_to_table.keys())
+                                                if not has_table_reference and entity_name == primary_table:
+                                                    column_belongs_to_this_table = True
+                                                    
+                                            # Handle direct column references (non-aggregate)
+                                            if not column_belongs_to_this_table and not is_aggregate_function(raw_expression):
+                                                # For columns like "u.user_id", assign to the table whose alias is referenced
+                                                for alias, table in alias_to_table.items():
+                                                    if table == entity_name and f'{alias}.' in raw_expression:
+                                                        column_belongs_to_this_table = True
+                                                        break
+                                        
+                                        elif is_join_query or is_union_query:
+                                            # For JOIN/UNION queries without aggregates
                                             # FIRST: Check if this is a subquery expression - these should only belong to their source table
                                             if is_subquery_expression(raw_expression, self.dialect):
                                                 from ..utils.sql_parsing_utils import extract_tables_from_subquery
@@ -612,9 +644,9 @@ class ChainBuilderEngine:
                                                         raw_expression == union_col):
                                                         column_belongs_to_this_table = True
                                                         break
-                                            
+                                        
                                         else:
-                                            # For aggregate queries or simple queries, add all columns to primary table
+                                            # For simple queries, add all columns to primary table
                                             column_belongs_to_this_table = True
                                         
                                         if not column_belongs_to_this_table:
@@ -733,7 +765,7 @@ class ChainBuilderEngine:
                                     if clean_name not in existing_column_names:
                                         column_info = {
                                             "name": clean_name,
-                                            "upstream": [f"QUERY_RESULT.{clean_name}"],
+                                            "upstream": [f"{entity_name}.{clean_name}"],
                                             "type": "DIRECT"
                                         }
                                         table_columns.append(column_info)
@@ -748,9 +780,11 @@ class ChainBuilderEngine:
                                 clean_name = extract_clean_column_name(raw_expression, column_name)
                                 
                                 if clean_name not in existing_column_names:
+                                    # Get source table for proper upstream reference
+                                    source_table = sel_col.get('source_table', entity_name)
                                     column_info = {
                                         "name": clean_name,
-                                        "upstream": [f"QUERY_RESULT.{clean_name}"],
+                                        "upstream": [f"{source_table}.{clean_name}"],
                                         "type": "DIRECT"
                                     }
                                     
@@ -859,6 +893,13 @@ class ChainBuilderEngine:
                                                 if is_column_from_table(col_ref, entity_name, sql, self.dialect):
                                                     clean_col = col_ref.split('.')[-1] if '.' in col_ref else col_ref
                                                     source_columns.add(clean_col)
+                
+                # If no columns found in transformations, extract from SELECT columns  
+                if not source_columns and sql:
+                    # Extract columns that belong to this source table from SELECT statement
+                    from ..utils.sql_parsing_utils import extract_table_columns_from_sql
+                    table_columns_in_select = extract_table_columns_from_sql(sql, entity_name, self.dialect)
+                    source_columns.update(table_columns_in_select)
                 
                 # Add the columns found in transformations, merging with existing
                 if source_columns:
