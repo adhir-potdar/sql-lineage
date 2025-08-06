@@ -409,29 +409,54 @@ class LineageChainBuilder(BaseAnalyzer):
                                     "target_table": trans.target_table
                                 }
                                 
-                                # Add join information if present
+                                # Add join information if present - filter conditions relevant to this entity
                                 if hasattr(trans, 'join_conditions') and trans.join_conditions:
-                                    join_entry = {
-                                        "join_type": trans.join_type.value if hasattr(trans, 'join_type') and trans.join_type else "INNER JOIN",
-                                        "right_table": None,
-                                        "conditions": [
-                                            {
-                                                "left_column": jc.left_column,
-                                                "operator": jc.operator.value if hasattr(jc.operator, 'value') else str(jc.operator),
-                                                "right_column": jc.right_column
-                                            }
-                                            for jc in trans.join_conditions
-                                        ]
-                                    }
+                                    # Filter join conditions to only include those relevant to this entity
+                                    relevant_join_conditions = []
+                                    for jc in trans.join_conditions:
+                                        # Include join condition if it references this specific entity table
+                                        # Check both left and right columns for entity table references
+                                        is_relevant = (
+                                            is_column_from_table(jc.left_column, entity_name, sql) or
+                                            is_column_from_table(jc.right_column, entity_name, sql)
+                                        )
+                                        if is_relevant:
+                                            relevant_join_conditions.append(jc)
                                     
-                                    # Extract right table from first condition
-                                    if trans.join_conditions:
-                                        first_condition = trans.join_conditions[0]
-                                        if hasattr(first_condition, 'right_column') and '.' in first_condition.right_column:
-                                            right_table = first_condition.right_column.split('.')[0]
-                                            join_entry["right_table"] = right_table
-                                    
-                                    trans_data["joins"] = [join_entry]
+                                    # Only add joins if there are relevant conditions for this entity
+                                    if relevant_join_conditions:
+                                        join_entry = {
+                                            "join_type": trans.join_type.value if hasattr(trans, 'join_type') and trans.join_type else "INNER JOIN",
+                                            "right_table": None,
+                                            "conditions": [
+                                                {
+                                                    "left_column": jc.left_column,
+                                                    "operator": jc.operator.value if hasattr(jc.operator, 'value') else str(jc.operator),
+                                                    "right_column": jc.right_column
+                                                }
+                                                for jc in relevant_join_conditions
+                                            ]
+                                        }
+                                        
+                                        # Extract right table from first relevant condition
+                                        if relevant_join_conditions:
+                                            first_condition = relevant_join_conditions[0]
+                                            if hasattr(first_condition, 'right_column') and '.' in first_condition.right_column:
+                                                # Extract table name from column string using consistent logic
+                                                column_parts = first_condition.right_column.split('.')
+                                                if len(column_parts) >= 3:
+                                                    # For database.table.column format, take database.table
+                                                    # This handles MySQL database.table naming and Trino catalog.schema.table naming
+                                                    right_table = f"{column_parts[0]}.{column_parts[1]}"
+                                                elif len(column_parts) == 2:
+                                                    # For table.column format, take table
+                                                    right_table = column_parts[0]
+                                                else:
+                                                    # Fallback for single part
+                                                    right_table = column_parts[0]
+                                                join_entry["right_table"] = right_table
+                                        
+                                        trans_data["joins"] = [join_entry]
                                 
                                 # Determine context for column filtering - used for all transformation types
                                 # Single-table context includes both QUERY_RESULT and CTAS scenarios
@@ -471,20 +496,75 @@ class LineageChainBuilder(BaseAnalyzer):
                                     if relevant_group_by:
                                         trans_data["group_by_columns"] = relevant_group_by
                                 
-                                # Having conditions - only include those referencing columns from this entity
+                                # Having conditions - special handling for aggregate queries
                                 if hasattr(trans, 'having_conditions') and trans.having_conditions:
                                     relevant_having = []
-                                    for hc in trans.having_conditions:
-                                        # Having conditions often involve aggregations like COUNT(*) or AVG(u.salary)
-                                        # Check if they reference this entity or if they are general aggregations for this table
-                                        is_relevant = (is_column_from_table(hc.column, entity_name, sql) or 
-                                                     is_aggregate_function_for_table(hc.column, entity_name, sql))
-                                        if is_relevant:
-                                            relevant_having.append({
-                                                "column": hc.column,
-                                                "operator": hc.operator.value if hasattr(hc.operator, 'value') else str(hc.operator),
-                                                "value": hc.value
-                                            })
+                                    
+                                    # Check if this is an aggregate query (has GROUP BY or aggregate functions)
+                                    is_aggregate_query = (
+                                        (hasattr(trans, 'group_by_columns') and trans.group_by_columns) or
+                                        any(is_aggregate_function(hc.column) for hc in trans.having_conditions)
+                                    )
+                                    
+                                    if is_aggregate_query:
+                                        # For aggregate queries, determine primary table from FROM clause
+                                        primary_table = None
+                                        try:
+                                            import sqlglot
+                                            parsed_sql = sqlglot.parse_one(sql, dialect='mysql')
+                                            from_clause = parsed_sql.find(sqlglot.exp.From)
+                                            if from_clause and hasattr(from_clause.this, 'name'):
+                                                table = from_clause.this
+                                                if table.db:
+                                                    primary_table = f"{table.db}.{table.name}"
+                                                elif table.catalog and table.db:
+                                                    primary_table = f"{table.catalog}.{table.db}.{table.name}"
+                                                else:
+                                                    primary_table = str(table.name)
+                                        except:
+                                            pass
+                                        
+                                        # Add HAVING conditions based on which table they reference
+                                        for hc in trans.having_conditions:
+                                            # Check if this HAVING condition references this entity's table alias
+                                            condition_belongs_to_this_table = False
+                                            
+                                            # Import utility functions for alias mapping
+                                            from ...utils.sql_parsing_utils import build_alias_to_table_mapping
+                                            alias_to_table = build_alias_to_table_mapping(sql, 'mysql')
+                                            
+                                            # Check if the HAVING condition references this entity's alias
+                                            for alias, table in alias_to_table.items():
+                                                if table == entity_name and f'{alias}.' in hc.column:
+                                                    condition_belongs_to_this_table = True
+                                                    break
+                                            
+                                            # For HAVING conditions without table prefixes (like COUNT(*)), assign to primary table
+                                            if not condition_belongs_to_this_table:
+                                                has_table_reference = any(f'{alias}.' in hc.column for alias in alias_to_table.keys())
+                                                if not has_table_reference and entity_name == primary_table: 
+                                                    condition_belongs_to_this_table = True
+                                            
+                                            if condition_belongs_to_this_table:
+                                                relevant_having.append({
+                                                    "column": hc.column,
+                                                    "operator": hc.operator.value if hasattr(hc.operator, 'value') else str(hc.operator),
+                                                    "value": hc.value
+                                                })
+                                    else:
+                                        # For non-aggregate queries, use original filtering logic
+                                        for hc in trans.having_conditions:
+                                            # Having conditions often involve aggregations like COUNT(*) or AVG(u.salary)
+                                            # Check if they reference this entity or if they are general aggregations for this table
+                                            is_relevant = (is_column_from_table(hc.column, entity_name, sql) or 
+                                                         is_aggregate_function_for_table(hc.column, entity_name, sql))
+                                            if is_relevant:
+                                                relevant_having.append({
+                                                    "column": hc.column,
+                                                    "operator": hc.operator.value if hasattr(hc.operator, 'value') else str(hc.operator),
+                                                    "value": hc.value
+                                                })
+                                    
                                     if relevant_having:
                                         trans_data["having_conditions"] = relevant_having
                                 

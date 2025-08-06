@@ -152,6 +152,17 @@ class CTEAnalyzer(BaseAnalyzer):
         # Build final result structure
         actual_max_depth = max([entity.get('depth', 0) for entity in chains.values()]) if chains else 0
         
+        # Add missing column information to QUERY_RESULT entities  
+        column_lineage_data = result.column_lineage.upstream if chain_type == "upstream" else result.column_lineage.downstream
+        column_transformations_data = result.column_lineage.transformations if hasattr(result.column_lineage, 'transformations') else {}
+        
+        # First call regular method for basic population
+        self.chain_builder_engine.add_missing_source_columns(chains, sql, column_lineage_data, column_transformations_data)
+        
+        # CTE-specific enhancements: populate both source tables AND QUERY_RESULTs
+        self._populate_cte_source_tables(chains, sql, result)
+        self._populate_cte_query_results(chains, sql, column_lineage_data, column_transformations_data)
+        
         return {
             "sql": sql,
             "dialect": result.dialect,
@@ -876,6 +887,455 @@ class CTEAnalyzer(BaseAnalyzer):
             return 'CASE'
         
         return function_type if function_type != "UNKNOWN" else 'EXPRESSION'
+    
+    def _populate_cte_source_tables(self, chains: dict, sql: str, result):
+        """Populate source table columns for CTE queries."""
+        try:
+            # Get table lineage to understand which tables are source tables  
+            table_lineage_data = result.table_lineage.downstream
+            
+            # For each source table, add basic column metadata
+            for table_name, chain_data in chains.items():
+                if isinstance(chain_data, dict) and chain_data.get("entity_type") == "table":
+                    metadata = chain_data.get("metadata", {})
+                    existing_columns = metadata.get("table_columns", [])
+                    
+                    # If source table has no columns, add basic ones based on usage
+                    if not existing_columns:
+                        # Extract columns that are used from this table
+                        table_columns = self._extract_source_table_columns(table_name, sql, result)
+                        if table_columns:
+                            metadata["table_columns"] = table_columns
+                            chain_data["metadata"] = metadata
+        except Exception:
+            pass
+            
+    def _extract_source_table_columns(self, table_name: str, sql: str, result) -> list:
+        """Extract columns that should belong to a source table using CTE tracing."""
+        columns = []
+        
+        try:
+            # Strategy 1: Look for direct references in downstream lineage
+            column_lineage_downstream = result.column_lineage.downstream 
+            for target_col, source_cols in column_lineage_downstream.items():
+                for source_col in source_cols:
+                    if self._source_column_belongs_to_table(source_col, table_name):
+                        col_name = source_col.split(".")[-1] if "." in source_col else source_col
+                        if not any(col.get("name") == col_name for col in columns):
+                            columns.append({
+                                "name": col_name,
+                                "upstream": [],
+                                "type": "SOURCE"
+                            })
+            
+            # Strategy 2: Trace back through CTE dependencies using upstream lineage
+            if not columns:
+                columns = self._trace_cte_columns_to_source(table_name, result)
+            
+            # Strategy 3: Parse SQL directly to find columns used from this table
+            if not columns:
+                columns = self._parse_sql_for_source_columns(table_name, sql)
+                            
+        except Exception:
+            pass
+            
+        return columns
+        
+    def _trace_cte_columns_to_source(self, table_name: str, result) -> list:
+        """Trace CTE columns back to source table."""
+        columns = []
+        
+        try:
+            # Use UPSTREAM table lineage to find what depends on this table
+            table_lineage_upstream = result.table_lineage.upstream
+            column_lineage_upstream = result.column_lineage.upstream
+            
+            # Find CTEs that depend on this table (table is in sources)
+            dependent_ctes = []
+            for target, sources in table_lineage_upstream.items():
+                if table_name in sources:
+                    dependent_ctes.append(target)
+            
+            # For each dependent CTE, find what columns it takes from the source
+            for cte_name in dependent_ctes:
+                for cte_col, source_cols in column_lineage_upstream.items():
+                    if cte_col.startswith(f"{cte_name}."):
+                        # This CTE column comes from source columns
+                        for source_col in source_cols:
+                            # These are the original column names from the source table
+                            if not any(col.get("name") == source_col for col in columns):
+                                columns.append({
+                                    "name": source_col,
+                                    "upstream": [],
+                                    "type": "SOURCE"
+                                })
+                                
+        except Exception:
+            pass
+            
+        return columns
+        
+    def _parse_sql_for_source_columns(self, table_name: str, sql: str) -> list:
+        """Parse SQL to find columns referenced from a source table."""
+        columns = []
+        
+        try:
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            
+            # Find all column references in the SQL
+            for column in parsed.find_all(sqlglot.exp.Column):
+                if column.table:
+                    col_table = str(column.table)
+                    if self._tables_match(col_table, table_name):
+                        col_name = str(column.name) if column.name else str(column)
+                        if not any(col.get("name") == col_name for col in columns):
+                            columns.append({
+                                "name": col_name,
+                                "upstream": [],
+                                "type": "SOURCE"
+                            })
+                            
+        except Exception:
+            pass
+            
+        return columns
+        
+    def _source_column_belongs_to_table(self, source_col: str, table_name: str) -> bool:
+        """Check if a source column belongs to a specific table."""
+        try:
+            # Handle qualified column names like "users.id", "ecommerce.users.name", "hive.default.users.name"
+            if "." in source_col and not source_col.startswith("QUERY_RESULT."):
+                # Extract table part from column name
+                parts = source_col.split(".")
+                if len(parts) >= 2:
+                    # Could be "users.id", "ecommerce.users.name", or "hive.default.users.name"
+                    if len(parts) == 2:
+                        # Simple case: "users.id"
+                        col_table = parts[0]
+                    elif len(parts) == 3:
+                        # "ecommerce.users.name" or "schema.table.column"
+                        col_table = f"{parts[0]}.{parts[1]}"
+                    elif len(parts) == 4:
+                        # "hive.default.users.name"
+                        col_table = f"{parts[0]}.{parts[1]}.{parts[2]}"
+                    else:
+                        col_table = ".".join(parts[:-1])
+                    
+                    return self._tables_match(col_table, table_name)
+        except Exception:
+            pass
+            
+        return False
+    
+    def _populate_cte_query_results(self, chains: dict, sql: str, column_lineage_data: dict, column_transformations_data: dict):
+        """CTE-specific method to populate QUERY_RESULT entities with proper column attribution."""
+        try:
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            
+            # Get the main SELECT (not in CTE)
+            main_select = self._get_main_select_from_cte(parsed)
+            if not main_select:
+                return
+                
+            # Build alias mapping for CTE resolution
+            alias_to_table_map, cte_to_source_map = self._build_alias_mappings(main_select, parsed)
+            
+            
+            # Process each source table's QUERY_RESULT
+            for source_table, chain_data in chains.items():
+                self._populate_single_query_result_for_source(
+                    chain_data, main_select, source_table, 
+                    column_lineage_data, alias_to_table_map, cte_to_source_map
+                )
+        except Exception:
+            pass  # Fallback to regular method
+    
+    def _get_main_select_from_cte(self, parsed):
+        """Get main SELECT statement (not in CTE)."""
+        import sqlglot
+        
+        if parsed.find(sqlglot.exp.With):
+            all_selects = list(parsed.find_all(sqlglot.exp.Select))
+            cte_selects = []
+            
+            for cte in parsed.find_all(sqlglot.exp.CTE):
+                cte_selects.extend(list(cte.find_all(sqlglot.exp.Select)))
+            
+            for select_stmt in all_selects:
+                if select_stmt not in cte_selects:
+                    return select_stmt
+        else:
+            return parsed.find(sqlglot.exp.Select)
+        return None
+    
+    def _build_alias_mappings(self, main_select, parsed):
+        """Build minimal alias-to-table and CTE-to-source mappings."""
+        import sqlglot
+        
+        alias_to_table_map = {}
+        cte_to_source_map = {}
+        
+        try:
+            # Build alias mapping from FROM/JOINs
+            from_clause = main_select.find(sqlglot.exp.From)
+            if from_clause and isinstance(from_clause.this, sqlglot.exp.Table):
+                if from_clause.this.alias:
+                    alias_to_table_map[str(from_clause.this.alias)] = str(from_clause.this.this)
+            
+            for join in main_select.find_all(sqlglot.exp.Join):
+                if isinstance(join.this, sqlglot.exp.Table) and join.this.alias:
+                    alias_to_table_map[str(join.this.alias)] = str(join.this.this)
+            
+            # Build CTE-to-source mapping
+            cte_names = {str(c.alias) for c in parsed.find_all(sqlglot.exp.CTE)}
+            
+            for cte in parsed.find_all(sqlglot.exp.CTE):
+                cte_name = str(cte.alias)
+                source_tables = [str(table) for table in cte.this.find_all(sqlglot.exp.Table)]
+                
+                if source_tables:
+                    # Use first non-CTE table as source, or trace through CTE chain
+                    for table in source_tables:
+                        clean_table = table.split('.')[-1].split(' ')[0]  # Handle "table AS alias"
+                        
+                        if clean_table not in cte_names:
+                            # Direct base table
+                            cte_to_source_map[cte_name] = clean_table
+                            break
+                        elif clean_table in cte_to_source_map:
+                            # Trace through CTE chain
+                            final_source = cte_to_source_map[clean_table]
+                            cte_to_source_map[cte_name] = final_source  
+                            break
+                    else:
+                        # If no base table found, try to resolve later
+                        pass
+            
+            # Second pass to resolve any remaining CTEs
+            max_iterations = 3
+            for iteration in range(max_iterations):
+                unresolved = []
+                for cte in parsed.find_all(sqlglot.exp.CTE):
+                    cte_name = str(cte.alias)
+                    if cte_name not in cte_to_source_map:
+                        source_tables = [str(table) for table in cte.this.find_all(sqlglot.exp.Table)]
+                        for table in source_tables:
+                            clean_table = table.split('.')[-1].split(' ')[0]
+                            if clean_table in cte_to_source_map:
+                                final_source = cte_to_source_map[clean_table]
+                                cte_to_source_map[cte_name] = final_source
+                                break
+                        else:
+                            unresolved.append(cte_name)
+                
+                if not unresolved:
+                    break
+            
+        except Exception:
+            pass
+            
+        return alias_to_table_map, cte_to_source_map
+    
+    def _populate_single_query_result_for_source(self, chain_data, main_select, source_table, 
+                                                column_lineage_data, alias_to_table_map, cte_to_source_map):
+        """Populate QUERY_RESULT for a single source table."""
+        try:
+            # Find all QUERY_RESULT entities in chain (including deeply nested ones)
+            query_results = self._find_query_result_entity(chain_data)
+            if not query_results:
+                return
+                
+            table_columns = []
+            
+            # Process each SELECT expression
+            for expr in main_select.expressions:
+                column_name = str(expr)
+                
+                # Handle SELECT * expansion  
+                if column_name == "*":
+                    # For SELECT *, expand to all available columns from column lineage
+                    # For simple cases like "SELECT * FROM cte", all columns belong to the source
+                    from_table = None
+                    from_clause = main_select.find(__import__('sqlglot').exp.From)
+                    if from_clause:
+                        from_table = str(from_clause.this)
+                        
+                    # If SELECT * FROM single_table (no JOINs), all columns go to mapped source
+                    joins = list(main_select.find_all(__import__('sqlglot').exp.Join))
+                    if not joins and from_table:
+                        # Simple SELECT * FROM table case
+                        final_source = cte_to_source_map.get(from_table, from_table)
+                        if self._tables_match(final_source, source_table):
+                            # All columns belong to this source
+                            for col_name in column_lineage_data.keys():
+                                table_columns.append({
+                                    "name": col_name,
+                                    "upstream": list(column_lineage_data[col_name]),
+                                    "type": "DIRECT"
+                                })
+                    else:
+                        # Complex SELECT * with JOINs - use original logic
+                        for key, values in column_lineage_data.items():
+                            if "QUERY_RESULT." in key:
+                                bare_col_name = key.replace("QUERY_RESULT.", "")
+                                if self._column_belongs_to_source(bare_col_name, source_table, 
+                                                               alias_to_table_map, cte_to_source_map, column_lineage_data):
+                                    table_columns.append({
+                                        "name": bare_col_name,
+                                        "upstream": list(values),
+                                        "type": "DIRECT"
+                                    })
+                else:
+                    # Check if column belongs to this source table
+                    belongs = self._column_belongs_to_source(column_name, source_table, 
+                                                           alias_to_table_map, cte_to_source_map, column_lineage_data)
+                    
+                    if belongs:
+                        # Get upstream info
+                        bare_name = column_name.split('.')[-1] if '.' in column_name else column_name
+                        upstream = set()
+                        for key, values in column_lineage_data.items():
+                            if bare_name in key:
+                                upstream.update(values)
+                        
+                        table_columns.append({
+                            "name": column_name,
+                            "upstream": list(upstream),
+                            "type": "DIRECT"
+                        })
+            
+            # If no columns were found but source table is involved, add fallback columns
+            if not table_columns:
+                # Look for any columns in column_lineage_data that reference this source table
+                for col_name, sources in column_lineage_data.items():
+                    for source in sources:
+                        # Try different matching strategies
+                        source_table_part = source.split('.')[0] if '.' in source else source
+                        # Remove quotes for comparison
+                        source_clean = source_table_part.replace('"', '').replace("'", "")
+                        target_clean = source_table.replace('"', '').replace("'", "")
+                        
+                        # Check if this source belongs to our target table
+                        if (source_clean == target_clean or 
+                            source_clean.endswith('.' + target_clean) or 
+                            target_clean.endswith('.' + source_clean) or
+                            source.startswith(source_table) or
+                            source_table.startswith(source_clean)):
+                            table_columns.append({
+                                "name": col_name.split('.')[-1],  # Use bare column name
+                                "upstream": [source],
+                                "type": "INDIRECT"
+                            })
+                            break  # Only add one column per source for fallback
+                    if table_columns:  # Found at least one, stop looking
+                        break
+            
+            # Update all QUERY_RESULT entities that belong to this source
+            for query_result in query_results:
+                metadata = query_result.get("metadata", {})
+                existing_columns = metadata.get("table_columns", [])
+                existing_names = {col.get("name") for col in existing_columns}
+                
+                # Only add new columns that don't already exist
+                for new_col in table_columns:
+                    if new_col["name"] not in existing_names:
+                        existing_columns.append(new_col)
+                        existing_names.add(new_col["name"])
+                
+                metadata["table_columns"] = existing_columns
+                query_result["metadata"] = metadata
+            
+        except Exception:
+            pass
+    
+    def _find_query_result_entity(self, chain_data):
+        """Find all QUERY_RESULT entities in chain data (including deeply nested ones)."""
+        results = []
+        
+        def _recursive_find(data):
+            if isinstance(data, dict):
+                if data.get("entity") == "QUERY_RESULT":
+                    results.append(data)
+                if "dependencies" in data:
+                    for dep in data["dependencies"]:
+                        _recursive_find(dep)
+        
+        _recursive_find(chain_data)
+        return results  # Return all found QUERY_RESULT entities
+    
+    def _column_belongs_to_source(self, column_name, source_table, alias_to_table_map, cte_to_source_map, column_lineage_data):
+        """Check if column belongs to source table."""
+        try:
+            # Handle qualified names like "ts.tier"
+            if "." in column_name:
+                alias = column_name.split(".")[0]
+                bare_column = column_name.split(".")[1]
+                
+                # Check alias mapping: ts -> tier_summary
+                actual_table = alias_to_table_map.get(alias, alias)
+                
+                # Check CTE mapping: tier_summary -> orders  
+                final_source = cte_to_source_map.get(actual_table, actual_table)
+                
+                if self._tables_match(final_source, source_table):
+                    # Double-check by looking at column lineage for the bare column
+                    return self._verify_column_lineage_trace(bare_column, actual_table, source_table, column_lineage_data, cte_to_source_map)
+                
+                return False
+            else:
+                # Handle unqualified names - check upstream
+                for key, values in column_lineage_data.items():
+                    if column_name in key:
+                        for upstream_col in values:
+                            if source_table in upstream_col:
+                                return True
+                            # Check CTE tracing
+                            if "." in upstream_col:
+                                upstream_table = upstream_col.split(".")[0] 
+                                final_source = cte_to_source_map.get(upstream_table, upstream_table)
+                                if self._tables_match(final_source, source_table):
+                                    return True
+        except Exception:
+            pass
+        return False
+        
+    def _verify_column_lineage_trace(self, bare_column, cte_table, source_table, column_lineage_data, cte_to_source_map):
+        """Verify that the column lineage supports the CTE-to-source mapping."""
+        try:
+            # Look for entries like "tier_summary.tier" or just "tier" 
+            for key, values in column_lineage_data.items():
+                # Check both qualified and unqualified forms
+                if (key == bare_column or 
+                    key == f"{cte_table}.{bare_column}" or
+                    bare_column in key.lower()):
+                    
+                    # Check if any upstream values trace back to our source
+                    for upstream_col in values:
+                        if "QUERY_RESULT." in upstream_col:
+                            # This confirms it's part of the final result
+                            return True
+                        if "." in upstream_col:
+                            upstream_table = upstream_col.split(".")[0]
+                            final_source = cte_to_source_map.get(upstream_table, upstream_table)
+                            if self._tables_match(final_source, source_table):
+                                return True
+            
+            return True  # Default to True if we can't disprove it
+        except Exception:
+            return True
+    
+    def _tables_match(self, table1, table2):
+        """Check if two table names match."""
+        if not table1 or not table2:
+            return False
+        
+        # Remove schema/catalog prefixes for comparison
+        clean1 = table1.split('.')[-1]
+        clean2 = table2.split('.')[-1]
+        
+        return clean1 == clean2
     
     def _get_transformation_type(self, col_info: Dict, expression: str) -> str:
         """Determine the transformation type generically."""

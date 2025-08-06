@@ -330,7 +330,17 @@ def build_alias_to_table_mapping(sql: str, dialect: str = "trino") -> Dict[str, 
         # Find all table references with aliases
         tables = list(parsed.find_all(sqlglot.exp.Table))
         for table in tables:
-            table_name = table.name
+            # Extract full qualified table name including database part for two-part naming
+            if table.db:
+                # Handle database.table naming (e.g., "ecommerce.users")
+                table_name = f"{table.db}.{table.name}"
+            elif table.catalog and table.db:
+                # Handle three-part naming (e.g., "catalog.schema.table") 
+                table_name = f"{table.catalog}.{table.db}.{table.name}"
+            else:
+                # Handle simple table naming (e.g., "users")
+                table_name = table.name
+                
             if table.alias:
                 alias = str(table.alias).lower()
                 alias_to_table[alias] = table_name
@@ -367,10 +377,16 @@ def is_column_from_table(column_name: str, table_name: str, sql: str = None, dia
     if not column_name or not table_name:
         return False
     
-    # Handle qualified column names (e.g., "users.active", "u.salary")
+    # Handle qualified column names (e.g., "users.active", "u.salary", "ecommerce.users.status")
     if '.' in column_name:
         parsed = parse_qualified_name(column_name)
-        column_table = parsed["table"]
+        
+        # For database.table.column format, reconstruct full table name
+        if parsed["schema"] and parsed["table"] and '.' in table_name:
+            # This is likely database.table.column format
+            column_table = f"{parsed['schema']}.{parsed['table']}"
+        else:
+            column_table = parsed["table"]
         
         if not column_table:
             return False
@@ -380,10 +396,25 @@ def is_column_from_table(column_name: str, table_name: str, sql: str = None, dia
             return True
             
         # Check if it's an alias match using SQL context
+        alias_mapping = {}
         if sql:
             alias_mapping = build_alias_to_table_mapping(sql, dialect)
             actual_table = alias_mapping.get(column_table.lower())
             if actual_table and actual_table == table_name:
+                return True
+        
+        # Smart name matching for database.table vs simple table names
+        # Handle cases where column references simple name but table is database.table
+        if not alias_mapping:
+            # Extract base table names for comparison
+            column_table_base = column_table.split('.')[-1] if '.' in column_table else column_table
+            table_name_base = table_name.split('.')[-1] if '.' in table_name else table_name
+            
+            # Remove quotes for comparison
+            column_table_clean = column_table_base.strip('"').strip("'")
+            table_name_clean = table_name_base.strip('"').strip("'")
+            
+            if column_table_clean.lower() == table_name_clean.lower():
                 return True
     
     # For unqualified column names, we need to check if they're in subqueries
@@ -667,6 +698,11 @@ def extract_table_columns_from_sql(sql: str, table_name: str, dialect: str = "tr
                     actual_table = alias_mapping.get(table_ref.lower())
                     if actual_table == table_name:
                         columns.add(column_name)
+                    else:
+                        # Handle three-part table names: if table_name ends with table_ref, it's a match
+                        # Example: table_name="dbxadmin40test"."trino_demo"."orders" and table_ref="orders"
+                        if table_name.endswith(f'"."{table_ref}"') or table_name.endswith(f'.{table_ref}'):
+                            columns.add(column_name)
     
     except Exception:
         # Fallback to regex-based extraction
