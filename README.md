@@ -11,6 +11,7 @@ A production-quality SQL lineage analysis tool that extracts table and column de
 ✅ **External Metadata**: Integrate with your data catalog  
 ✅ **Rich Output**: JSON, console, and custom formatters  
 ✅ **Extensible Architecture**: Plugin-based metadata providers  
+✅ **Comprehensive Logging**: Built-in logging for all components with configurable levels  
 ✨ **Optimized JSON Output**: 81% size reduction with comprehensive analysis  
 ✨ **Comprehensive Lineage**: Combined table+column analysis in single call  
 ✨ **Advanced Visualization**: Professional diagrams with Graphviz integration  
@@ -51,7 +52,7 @@ from analyzer.metadata import SampleMetadataRegistry
 analyzer = SQLLineageAnalyzer(dialect="trino")
 analyzer.set_metadata_registry(SampleMetadataRegistry())
 
-# Analyze SQL query
+# Analyze SQL query (logging is automatic)
 sql = \"\"\"
 SELECT u.name, COUNT(o.id) as order_count
 FROM users u
@@ -60,6 +61,8 @@ GROUP BY u.name
 \"\"\"
 
 result = analyzer.analyze(sql)
+# Logs: "Starting analysis for SQL (length: 73)" (DEBUG level shows detailed info)
+# Logs: "Analysis completed successfully"
 
 # Check results
 print(f"Tables: {list(result.table_lineage.upstream.keys())}")
@@ -70,6 +73,11 @@ print(f"Column mappings: {len(result.column_lineage.upstream)}")
 comprehensive_json = analyzer.get_lineage_chain_json(sql, "upstream")
 print(f"Comprehensive JSON: {len(comprehensive_json):,} characters")
 # 81% smaller than basic JSON while providing more complete analysis!
+
+# Optional: Override defaults (DEBUG level and /tmp/sql_lineage.log are automatic)
+import os
+os.environ['SQL_LINEAGE_LOG_FILE'] = '/my/custom/path/analysis.log'
+os.environ['SQL_LINEAGE_LOG_LEVEL'] = 'INFO'  # Reduce verbosity if needed
 ```
 
 ### Quick Test
@@ -354,9 +362,133 @@ PYTHONPATH=src python3 -m pytest tests/ -v
 - Activate virtual environment: `source venv/bin/activate`
 - Install dependencies: `pip install -r requirements.txt`
 
+## Logging
+
+SQL Lineage Analyzer provides comprehensive logging support across all components including the API, analyzers, and parsers. The logging system uses hierarchical loggers and supports configurable output levels, formats, and destinations.
+
+**Default Log File**: `/tmp/sql_lineage.log` (automatically created)  
+**Default Log Level**: `DEBUG` (shows all analysis details)
+
+### Logging Configuration
+
+The logging system is automatically configured when you use any analyzer component with both console and file logging enabled by default. You can customize the logging behavior using environment variables:
+
+```bash
+# Set log level (DEBUG, INFO, WARNING, ERROR, CRITICAL) - defaults to DEBUG
+export SQL_LINEAGE_LOG_LEVEL=INFO
+
+# Override default log file location (optional, defaults to /tmp/sql_lineage.log)
+export SQL_LINEAGE_LOG_FILE=/var/log/sql_lineage/analysis.log
+
+# Custom log format (optional)
+export SQL_LINEAGE_LOG_FORMAT="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+```
+
+### Python Configuration
+
+```python
+from analyzer import SQLLineageAnalyzer
+from analyzer.utils.logging_config import SQLLineageLogger
+
+# Basic usage - logging is automatically configured (console + /tmp/sql_lineage.log at DEBUG level)
+analyzer = SQLLineageAnalyzer(dialect="trino")
+result = analyzer.analyze("SELECT * FROM users")
+
+# Manual logging configuration
+SQLLineageLogger.configure(
+    level="DEBUG",
+    enable_console=True,
+    log_file="/tmp/sql_analysis.log",
+    log_format="%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s"
+)
+
+# Get logger for custom components
+logger = SQLLineageLogger.get_logger("my_component")
+logger.info("Custom logging message")
+```
+
+### Logging Levels
+
+- **DEBUG**: Detailed SQL parsing, AST analysis, transformation details
+- **INFO**: Analysis start/completion, table/column counts, successful operations
+- **WARNING**: Non-critical issues, fallback behaviors, missing metadata
+- **ERROR**: Analysis failures, parsing errors, configuration issues
+- **CRITICAL**: System-level failures, initialization errors
+
+### CLI Logging
+
+The CLI automatically logs important operations:
+
+```bash
+# Default behavior - logs to console and /tmp/sql_lineage.log at DEBUG level
+python -m analyzer.cli analyze "SELECT * FROM users"
+
+# Reduce verbosity and use custom file location
+export SQL_LINEAGE_LOG_LEVEL=INFO SQL_LINEAGE_LOG_FILE=/tmp/analysis.log
+python -m analyzer.cli analyze "SELECT * FROM users"
+
+# View log output (default location)
+tail -f /tmp/sql_lineage.log
+
+# View custom log location  
+tail -f /tmp/analysis.log
+```
+
+### Log Structure
+
+All logs follow a consistent hierarchical naming convention:
+
+- `sql_lineage.analyzer` - Main analyzer operations
+- `sql_lineage.analyzers.*` - Specific analyzer components
+  - `sql_lineage.analyzers.select` - SELECT statement analysis  
+  - `sql_lineage.analyzers.cte` - CTE analysis
+  - `sql_lineage.analyzers.ctas` - CREATE TABLE AS analysis
+- `sql_lineage.parsers.*` - SQL parsing components
+  - `sql_lineage.parsers.select` - SELECT parsing
+  - `sql_lineage.parsers.cte` - CTE parsing
+- `sql_lineage.core.*` - Core components
+  - `sql_lineage.core.extractor` - Lineage extraction
+  - `sql_lineage.core.transformation_engine` - Transformation processing
+  - `sql_lineage.core.chain_builder_engine` - Chain building
+
+### Example Log Output
+
+```
+2025-08-07 11:37:40 - sql_lineage.analyzer - INFO - Initializing SQLLineageAnalyzer with dialect: trino
+2025-08-07 11:37:40 - sql_lineage.analyzer - INFO - Starting analysis for SQL (length: 73)
+2025-08-07 11:37:40 - sql_lineage.core.extractor - INFO - Starting table lineage extraction
+2025-08-07 11:37:40 - sql_lineage.analyzers.select - INFO - Analyzing SELECT statement (length: 73)
+2025-08-07 11:37:40 - sql_lineage.parsers.select - INFO - Parsing SELECT statement (length: 73)
+2025-08-07 11:37:40 - sql_lineage.parsers.select - INFO - SELECT parsing completed - 2 columns, 1 tables, 1 joins
+2025-08-07 11:37:40 - sql_lineage.analyzers.select - INFO - SELECT analysis completed - found 1 source tables, 2 result columns
+2025-08-07 11:37:40 - sql_lineage.core.extractor - INFO - Table lineage extraction completed - upstream: 1 entries, downstream: 2 entries
+2025-08-07 11:37:40 - sql_lineage.analyzer - INFO - Analysis completed successfully
+```
+
+### Production Logging
+
+For production environments, configure logging appropriately:
+
+```python
+# Production configuration
+import logging
+from analyzer.utils.logging_config import SQLLineageLogger
+
+# Configure for production (override DEBUG default)
+SQLLineageLogger.configure(
+    level="WARNING",  # Only log warnings and errors (instead of DEBUG default)
+    enable_console=False,  # Disable console output
+    log_file="/var/log/sql_lineage/analysis.log",
+    log_format="%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
+)
+
+# Use analyzer as normal - all logging is handled automatically
+analyzer = SQLLineageAnalyzer(dialect="trino")
+```
+
 ## Dependencies
 
-- **sqlglot** >= 20.0.0 - SQL parsing and transformation
+- **sqlglot** >= 27.6.0 - SQL parsing and transformation  
 - **rich** >= 13.0.0 - Console formatting  
 - **click** >= 8.0.0 - CLI interface
 - **pydantic** >= 2.0.0 - Data validation

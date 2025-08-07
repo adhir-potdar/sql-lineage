@@ -49,12 +49,12 @@ class SQLLineageLogger:
             max_file_size: Maximum size of log file before rotation
             backup_count: Number of backup log files to keep
         """
-        # Get log level from environment variable or parameter
-        log_level = level or os.getenv('SQL_LINEAGE_LOG_LEVEL', 'INFO').upper()
+        # Get log level from environment variable or parameter, default to DEBUG
+        log_level = level or os.getenv('SQL_LINEAGE_LOG_LEVEL', 'DEBUG').upper()
         
-        # Get log file from environment variable or parameter
+        # Get log file from environment variable or parameter, default to /tmp/sql_lineage.log
         if not log_file:
-            log_file = os.getenv('SQL_LINEAGE_LOG_FILE')
+            log_file = os.getenv('SQL_LINEAGE_LOG_FILE', '/tmp/sql_lineage.log')
         
         # Default format string
         if not format_string:
