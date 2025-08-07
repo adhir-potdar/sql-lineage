@@ -134,9 +134,9 @@ class CTASAnalyzer(BaseAnalyzer):
                             entity_data['metadata'] = {}
                         entity_data['metadata']['table_columns'] = table_columns
                 
-                except Exception:
+                except Exception as e:
                     # If transformation extraction fails, continue without transformations
-                    pass
+                    self.logger.warning(f"CTAS transformation extraction failed: {str(e)} - continuing analysis without transformations", exc_info=True)
                 
                 break  # Found the CTAS transformation, no need to continue
     

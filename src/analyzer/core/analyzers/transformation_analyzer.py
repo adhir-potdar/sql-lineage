@@ -356,9 +356,9 @@ class TransformationAnalyzer(BaseAnalyzer):
                             }
                             table_columns.append(column_info)
                 
-            except Exception:
+            except Exception as e:
                 # If transformation extraction fails, continue without transformations
-                pass
+                self.logger.warning(f"Transformation extraction failed: {str(e)} - continuing analysis without transformations", exc_info=True)
             
             # Update the metadata with the new table_columns
             if 'metadata' not in entity_data:

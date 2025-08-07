@@ -60,7 +60,7 @@ class TransformationEngine:
                 
         except Exception as e:
             # If column integration fails, continue without column updates
-            self.logger.error(f"Column transformation integration failed: {str(e)}", exc_info=True)
+            self.logger.warning(f"Column transformation integration failed: {str(e)} - continuing analysis without column transformations", exc_info=True)
     
     def _extract_select_columns(self, parsed_sql) -> List[Dict]:
         """Extract SELECT columns from parsed SQL."""
