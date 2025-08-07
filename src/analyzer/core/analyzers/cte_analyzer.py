@@ -1421,6 +1421,7 @@ class CTEAnalyzer(BaseAnalyzer):
             # Get the main SELECT (not in CTE)
             main_select = self._get_main_select_from_cte(parsed)
             if not main_select:
+                self.logger.debug("Could not find main SELECT from CTE")
                 return None
                 
             # Look for table references in main SELECT
@@ -1430,9 +1431,11 @@ class CTEAnalyzer(BaseAnalyzer):
                 if hasattr(from_clause.this, 'name'):
                     return str(from_clause.this.name)
                     
+            self.logger.debug("Could not find final CTE reference in main SELECT")
             return None
             
-        except Exception:
+        except Exception as e:
+            self.logger.debug(f"Exception in _find_final_cte_reference: {str(e)}")
             return None
     
     def _find_cte_columns_in_chains(self, chains: dict, cte_name: str) -> list:
@@ -1447,7 +1450,8 @@ class CTEAnalyzer(BaseAnalyzer):
                             result = find_cte_entity(dep, target_name)
                             if result:
                                 return result
-                return None
+                # CTE entity not found in this data structure and caller of this fucntion is logging the reason for empty list.
+                return []
             
             # Search all chains for the CTE
             for chain_data in chains.values():
@@ -1455,9 +1459,11 @@ class CTEAnalyzer(BaseAnalyzer):
                 if columns:
                     return columns
                     
+            self.logger.debug(f"No columns found for CTE '{cte_name}' in chains")
             return []
             
-        except Exception:
+        except Exception as e:
+            self.logger.debug(f"Exception in _find_cte_columns_in_chains: {str(e)}")
             return []
     
     def _populate_query_result_with_cte_columns(self, query_result_entity: dict, cte_columns: list):
