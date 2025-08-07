@@ -320,6 +320,23 @@ def handle_schema_prefix(table_name: str, schema: Optional[str] = None) -> str:
     return normalize_table_name(table_name)
 
 
+def normalize_quoted_identifier(identifier: str) -> str:
+    """Normalize quoted identifiers for Trino/other dialects."""
+    if not identifier:
+        return ""
+    
+    # Remove outer quotes but preserve structure
+    normalized = str(identifier).strip()
+    
+    # Handle different quote types: "name", 'name', `name`
+    if ((normalized.startswith('"') and normalized.endswith('"')) or
+        (normalized.startswith("'") and normalized.endswith("'")) or
+        (normalized.startswith('`') and normalized.endswith('`'))):
+        normalized = normalized[1:-1]
+    
+    return normalized
+
+
 def build_alias_to_table_mapping(sql: str, dialect: str = "trino") -> Dict[str, str]:
     """Build a mapping from table aliases to actual table names by parsing SQL."""
     alias_to_table = {}
@@ -330,20 +347,34 @@ def build_alias_to_table_mapping(sql: str, dialect: str = "trino") -> Dict[str, 
         # Find all table references with aliases
         tables = list(parsed.find_all(sqlglot.exp.Table))
         for table in tables:
-            # Extract full qualified table name including database part for two-part naming
-            if table.db:
+            # Extract full qualified table name with enhanced quoted identifier handling
+            if table.catalog and table.db:
+                # Handle three-part naming (e.g., "catalog"."schema"."table") 
+                catalog = normalize_quoted_identifier(str(table.catalog))
+                schema = normalize_quoted_identifier(str(table.db))  
+                table_name_part = normalize_quoted_identifier(str(table.name))
+                table_name = f'"{catalog}"."{schema}"."{table_name_part}"'
+            elif table.db:
                 # Handle database.table naming (e.g., "ecommerce.users")
-                table_name = f"{table.db}.{table.name}"
-            elif table.catalog and table.db:
-                # Handle three-part naming (e.g., "catalog.schema.table") 
-                table_name = f"{table.catalog}.{table.db}.{table.name}"
+                db = normalize_quoted_identifier(str(table.db))
+                table_name_part = normalize_quoted_identifier(str(table.name))
+                table_name = f"{db}.{table_name_part}"
             else:
                 # Handle simple table naming (e.g., "users")
-                table_name = table.name
+                table_name = normalize_quoted_identifier(str(table.name))
                 
             if table.alias:
-                alias = str(table.alias).lower()
+                alias = normalize_quoted_identifier(str(table.alias)).lower()
                 alias_to_table[alias] = table_name
+                
+        # Also find CTE aliases in WITH clauses for better CTE column resolution
+        if 'WITH' in sql.upper():
+            ctes = list(parsed.find_all(sqlglot.exp.CTE))
+            for cte in ctes:
+                if cte.alias:
+                    cte_alias = normalize_quoted_identifier(str(cte.alias)).lower()
+                    # CTE aliases map to themselves as they define new tables
+                    alias_to_table[cte_alias] = cte_alias
                 
     except Exception:
         # If parsing fails, return empty mapping to avoid incorrect assumptions

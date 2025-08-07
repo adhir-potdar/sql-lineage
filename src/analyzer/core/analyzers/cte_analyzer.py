@@ -1066,9 +1066,13 @@ class CTEAnalyzer(BaseAnalyzer):
             if not main_select:
                 return
                 
+            self.logger.debug("Found main SELECT statement for CTE QUERY_RESULT population")
+                
             # Build alias mapping for CTE resolution
             alias_to_table_map, cte_to_source_map = self._build_alias_mappings(main_select, parsed)
             
+            # ENHANCED: Direct column inheritance from source CTE to QUERY_RESULT
+            self._inherit_columns_from_final_cte(chains, sql, parsed, column_lineage_data)
             
             # Process each source table's QUERY_RESULT
             for source_table, chain_data in chains.items():
@@ -1374,3 +1378,140 @@ class CTEAnalyzer(BaseAnalyzer):
             return 'COMPUTED'
         else:
             return 'DIRECT'
+    
+    def _inherit_columns_from_final_cte(self, chains: dict, sql: str, parsed, column_lineage_data: dict):
+        """Enhanced method to inherit columns from final CTE to QUERY_RESULT entities."""
+        self.logger.debug("Starting direct column inheritance from final CTE to QUERY_RESULT")
+        
+        try:
+            # Find the final CTE that the main SELECT uses (e.g., join_step2 in our case)
+            final_cte_name = self._find_final_cte_reference(parsed)
+            if not final_cte_name:
+                self.logger.debug("No final CTE reference found")
+                return
+                
+            self.logger.debug(f"Found final CTE reference: {final_cte_name}")
+            
+            # Find the final CTE entity in chains to get its columns
+            final_cte_columns = self._find_cte_columns_in_chains(chains, final_cte_name)
+            if not final_cte_columns:
+                self.logger.debug(f"No columns found for final CTE: {final_cte_name}")
+                return
+                
+            self.logger.debug(f"Found {len(final_cte_columns)} columns in final CTE")
+            
+            # Find all QUERY_RESULT entities and populate them with final CTE columns
+            query_result_count = 0
+            for chain_data in chains.values():
+                query_result_entities = self._find_query_result_entity(chain_data)
+                for query_result in query_result_entities:
+                    self._populate_query_result_with_cte_columns(query_result, final_cte_columns)
+                    query_result_count += 1
+                    
+            self.logger.debug(f"Populated {query_result_count} QUERY_RESULT entities with CTE columns")
+            
+        except Exception as e:
+            self.logger.warning(f"Column inheritance from final CTE failed: {str(e)}")
+    
+    def _find_final_cte_reference(self, parsed) -> str:
+        """Find the final CTE that the main SELECT references."""
+        try:
+            import sqlglot
+            
+            # Get the main SELECT (not in CTE)
+            main_select = self._get_main_select_from_cte(parsed)
+            if not main_select:
+                return None
+                
+            # Look for table references in main SELECT
+            from_clause = main_select.find(sqlglot.exp.From)
+            if from_clause and from_clause.this:
+                # Check if it's a simple table reference (CTE name)
+                if hasattr(from_clause.this, 'name'):
+                    return str(from_clause.this.name)
+                    
+            return None
+            
+        except Exception:
+            return None
+    
+    def _find_cte_columns_in_chains(self, chains: dict, cte_name: str) -> list:
+        """Find columns for a specific CTE in the chains structure."""
+        try:
+            def find_cte_entity(data, target_name: str):
+                if isinstance(data, dict):
+                    if data.get("entity") == target_name and data.get("entity_type") == "cte":
+                        return data.get("metadata", {}).get("table_columns", [])
+                    if "dependencies" in data:
+                        for dep in data["dependencies"]:
+                            result = find_cte_entity(dep, target_name)
+                            if result:
+                                return result
+                return None
+            
+            # Search all chains for the CTE
+            for chain_data in chains.values():
+                columns = find_cte_entity(chain_data, cte_name)
+                if columns:
+                    return columns
+                    
+            return []
+            
+        except Exception:
+            return []
+    
+    def _populate_query_result_with_cte_columns(self, query_result_entity: dict, cte_columns: list):
+        """Populate QUERY_RESULT entity with columns from source CTE, adding only missing columns."""
+        try:
+            if not query_result_entity or not cte_columns:
+                return
+                
+            # Get existing metadata
+            metadata = query_result_entity.get("metadata", {})
+            existing_columns = metadata.get("table_columns", [])
+            
+            # Create a set of existing column names for efficient lookup
+            existing_column_names = {col.get("name") for col in existing_columns if col.get("name")}
+            
+            # Track columns added in this operation
+            columns_added = 0
+            columns_skipped = 0
+            
+            # Add only missing columns from CTE
+            for cte_col in cte_columns:
+                col_name = cte_col.get("name")
+                if not col_name:
+                    continue
+                    
+                # Check if column already exists
+                if col_name in existing_column_names:
+                    columns_skipped += 1
+                    self.logger.debug(f"Skipping existing column: {col_name}")
+                    continue
+                
+                # Create new QUERY_RESULT column with proper inheritance
+                new_col = {
+                    "name": col_name,
+                    "upstream": cte_col.get("upstream", []),
+                    "type": cte_col.get("type", "DIRECT")  # Preserve original CTE column type
+                }
+                
+                # Preserve transformation info if available
+                if "transformation" in cte_col:
+                    new_col["transformation"] = cte_col["transformation"]
+                
+                # Add the new column and update tracking set
+                existing_columns.append(new_col)
+                existing_column_names.add(col_name)
+                columns_added += 1
+            
+            # Update metadata with the enhanced column list
+            metadata["table_columns"] = existing_columns
+            query_result_entity["metadata"] = metadata
+            
+            # Log the operation results
+            total_existing = len(existing_column_names) - columns_added
+            self.logger.debug(f"QUERY_RESULT column update: {columns_added} added, {columns_skipped} skipped, {total_existing} existing, {len(existing_column_names)} total")
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to populate QUERY_RESULT with CTE columns: {str(e)}")
