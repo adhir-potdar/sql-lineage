@@ -9,6 +9,7 @@ from ...utils.sqlglot_helpers import parse_sql_safely, get_where_conditions
 from ...utils.metadata_utils import create_result_column_metadata
 from ...utils.sql_parsing_utils import extract_function_type, extract_alias_from_expression
 from ..transformation_engine import TransformationEngine
+from ...utils.logging_config import get_logger
 
 
 class TransformationAnalyzer(BaseAnalyzer):
@@ -18,14 +19,32 @@ class TransformationAnalyzer(BaseAnalyzer):
         """Initialize transformation analyzer with transformation engine."""
         super().__init__(dialect, compatibility_mode, table_registry)
         self.transformation_engine = TransformationEngine(dialect)
+        self.logger = get_logger('analyzers.transformation')
     
     def parse_transformations(self, sql: str) -> Dict[str, Any]:
-        """Parse transformations using modular parser.""" 
-        return self.transformation_parser.parse(sql)
+        """Parse transformations using modular parser."""
+        self.logger.info(f"Parsing transformations for SQL (length: {len(sql)})")
+        self.logger.debug(f"Transformation SQL: {sql[:200]}..." if len(sql) > 200 else f"Transformation SQL: {sql}")
+        
+        try:
+            result = self.transformation_parser.parse(sql)
+            self.logger.info("Transformation parsing completed successfully")
+            return result
+        except Exception as e:
+            self.logger.error(f"Transformation parsing failed: {str(e)}", exc_info=True)
+            raise
     
     def extract_filter_transformations(self, sql: str) -> List[Dict]:
         """Extract filter transformations from WHERE clause."""
-        return self.transformation_engine.extract_filter_transformations(sql)
+        self.logger.debug("Extracting filter transformations from WHERE clause")
+        
+        try:
+            result = self.transformation_engine.extract_filter_transformations(sql)
+            self.logger.debug(f"Extracted {len(result)} filter transformations")
+            return result
+        except Exception as e:
+            self.logger.error(f"Filter transformation extraction failed: {str(e)}", exc_info=True)
+            raise
     
     def _build_select_lineage(self, select_data: Dict[str, Any], transformation_data: Dict[str, Any]) -> Dict[str, Any]:
         """Build lineage chain for SELECT statement."""

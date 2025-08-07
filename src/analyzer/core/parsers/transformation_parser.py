@@ -5,28 +5,48 @@ import sqlglot
 from sqlglot import exp
 from .base_parser import BaseParser
 from ...utils.condition_utils import GenericConditionHandler
+from ...utils.logging_config import get_logger
 
 
 class TransformationParser(BaseParser):
     """Parser for SQL transformation components."""
     
+    def __init__(self, dialect: str = "trino"):
+        super().__init__(dialect)
+        self.logger = get_logger('parsers.transformation')
+    
     def parse(self, sql: str) -> Dict[str, Any]:
         """Parse all transformations in SQL statement."""
-        ast = self.parse_sql(sql)
-        select_stmt = self._find_select(ast)
+        self.logger.info(f"Parsing transformations in SQL (length: {len(sql)})")
+        self.logger.debug(f"Transformation SQL: {sql[:200]}..." if len(sql) > 200 else f"Transformation SQL: {sql}")
         
-        if not select_stmt:
-            return {}
-        
-        return {
-            'filters': self.parse_transformation_filters(select_stmt),
-            'joins': self.parse_transformation_joins(select_stmt),
-            'aggregations': self.parse_transformation_aggregations(select_stmt),
-            'window_functions': self.parse_transformation_window_functions(select_stmt),
-            'sorting': self.parse_transformation_sorting(select_stmt),
-            'limiting': self.parse_transformation_limiting(select_stmt),
-            'case_statements': self.parse_transformation_case_statements(select_stmt)
-        }
+        try:
+            ast = self.parse_sql(sql)
+            select_stmt = self._find_select(ast)
+            
+            if not select_stmt:
+                self.logger.warning("No SELECT statement found for transformation parsing")
+                return {}
+            
+            self.logger.debug("SELECT statement found, parsing transformations")
+            
+            result = {
+                'filters': self.parse_transformation_filters(select_stmt),
+                'joins': self.parse_transformation_joins(select_stmt),
+                'aggregations': self.parse_transformation_aggregations(select_stmt),
+                'window_functions': self.parse_transformation_window_functions(select_stmt),
+                'sorting': self.parse_transformation_sorting(select_stmt),
+                'limiting': self.parse_transformation_limiting(select_stmt),
+                'case_statements': self.parse_transformation_case_statements(select_stmt)
+            }
+            
+            transformation_count = sum(1 for v in result.values() if v)
+            self.logger.info(f"Transformation parsing completed - found {transformation_count} types of transformations")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Transformation parsing failed: {str(e)}", exc_info=True)
+            raise
     
     def _find_select(self, ast) -> Optional[exp.Select]:
         """Find SELECT statement in AST."""

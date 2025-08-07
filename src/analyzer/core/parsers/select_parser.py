@@ -5,31 +5,51 @@ import sqlglot
 from sqlglot import exp
 from .base_parser import BaseParser
 from ...utils.condition_utils import GenericConditionHandler
+from ...utils.logging_config import get_logger
 
 
 class SelectParser(BaseParser):
     """Parser for SELECT statement components."""
     
+    def __init__(self, dialect: str = "trino"):
+        super().__init__(dialect)
+        self.logger = get_logger('parsers.select')
+    
     def parse(self, sql: str) -> Dict[str, Any]:
         """Parse SELECT statement and extract all components."""
-        ast = self.parse_sql(sql)
+        self.logger.info(f"Parsing SELECT statement (length: {len(sql)})")
+        self.logger.debug(f"SELECT SQL: {sql[:200]}..." if len(sql) > 200 else f"SELECT SQL: {sql}")
         
-        # Find the main SELECT statement
-        select_stmt = self._find_main_select(ast)
-        if not select_stmt:
-            return {}
+        try:
+            ast = self.parse_sql(sql)
+            
+            # Find the main SELECT statement
+            select_stmt = self._find_main_select(ast)
+            if not select_stmt:
+                self.logger.warning("No main SELECT statement found in SQL")
+                return {}
+            
+            self.logger.debug("Main SELECT statement found")
         
-        return {
-            'select_columns': self.parse_select_columns(select_stmt),
-            'from_tables': self.parse_from_clause(select_stmt),
-            'joins': self.parse_joins(select_stmt),
-            'where_conditions': self.parse_where_clause(select_stmt),
-            'group_by': self.parse_group_by(select_stmt),
-            'having_conditions': self.parse_having_clause(select_stmt),
-            'order_by': self.parse_order_by(select_stmt),
-            'limit_clause': self.parse_limit_clause(select_stmt),
-            'ctes': self.parse_ctes(ast)
-        }
+            self.logger.debug("Parsing SELECT components")
+            result = {
+                'select_columns': self.parse_select_columns(select_stmt),
+                'from_tables': self.parse_from_clause(select_stmt),
+                'joins': self.parse_joins(select_stmt),
+                'where_conditions': self.parse_where_clause(select_stmt),
+                'group_by': self.parse_group_by(select_stmt),
+                'having_conditions': self.parse_having_clause(select_stmt),
+                'order_by': self.parse_order_by(select_stmt),
+                'limit_clause': self.parse_limit_clause(select_stmt),
+                'ctes': self.parse_ctes(ast)
+            }
+            
+            self.logger.info(f"SELECT parsing completed - {len(result['select_columns'])} columns, {len(result['from_tables'])} tables, {len(result['joins'])} joins")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"SELECT parsing failed: {str(e)}", exc_info=True)
+            raise
     
     def _find_main_select(self, ast) -> Optional[exp.Select]:
         """Find the main SELECT statement in the AST."""

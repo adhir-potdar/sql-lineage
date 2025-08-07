@@ -44,6 +44,7 @@ from ...utils.regex_patterns import (
 from .ctas_analyzer import is_ctas_target_table, build_ctas_target_columns, add_group_by_to_ctas_transformations
 from ..transformation_engine import TransformationEngine
 from ..chain_builder_engine import ChainBuilderEngine
+from ...utils.logging_config import get_logger
 
 
 class LineageChainBuilder(BaseAnalyzer):
@@ -59,6 +60,7 @@ class LineageChainBuilder(BaseAnalyzer):
         self.main_analyzer = main_analyzer
         self.transformation_engine = TransformationEngine(dialect)
         self.chain_builder_engine = ChainBuilderEngine(dialect)
+        self.logger = get_logger('analyzers.lineage_chain_builder')
     
     def get_table_lineage_chain(self, sql: str, chain_type: str = "upstream", depth: int = 1, **kwargs) -> Dict[str, Any]:
         """
@@ -73,10 +75,15 @@ class LineageChainBuilder(BaseAnalyzer):
         Returns:
             Dictionary containing the table lineage chain information
         """
+        self.logger.info(f"Building table lineage chain - type: {chain_type}, depth: {depth}")
+        self.logger.debug(f"Chain SQL: {sql[:200]}..." if len(sql) > 200 else f"Chain SQL: {sql}")
+        
         if chain_type not in ["upstream", "downstream"]:
+            self.logger.error(f"Invalid chain_type: {chain_type}")
             raise ValueError("chain_type must be 'upstream' or 'downstream'")
         
         if depth < 1:
+            self.logger.error(f"Invalid depth: {depth}")
             raise ValueError("depth must be at least 1")
         
         # Parse SQL and extract lineage using LineageExtractor

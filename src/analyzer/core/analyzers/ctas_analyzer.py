@@ -8,6 +8,7 @@ from ...utils.regex_patterns import is_ctas_query
 from ...utils.column_extraction_utils import extract_all_referenced_columns
 from ...utils.metadata_utils import create_table_metadata
 from ..transformation_engine import TransformationEngine
+from ...utils.logging_config import get_logger
 
 
 class CTASAnalyzer(BaseAnalyzer):
@@ -17,21 +18,39 @@ class CTASAnalyzer(BaseAnalyzer):
         """Initialize CTAS analyzer with transformation engine."""
         super().__init__(dialect, compatibility_mode, table_registry)
         self.transformation_engine = TransformationEngine(dialect)
+        self.logger = get_logger('analyzers.ctas')
     
     def analyze_ctas(self, sql: str) -> Dict[str, Any]:
         """Analyze CREATE TABLE AS SELECT statement."""
-        ctas_data = self.ctas_parser.parse(sql)
-        ctas_lineage = self.ctas_parser.get_ctas_lineage(sql)
-        transformation_data = self.transformation_parser.parse(sql)
+        self.logger.info(f"Analyzing CTAS statement (length: {len(sql)})")
+        self.logger.debug(f"CTAS SQL: {sql[:200]}..." if len(sql) > 200 else f"CTAS SQL: {sql}")
         
-        return {
-            'ctas_structure': ctas_data,
-            'ctas_lineage': ctas_lineage,
-            'transformations': transformation_data,
-            'target_table': ctas_data.get('target_table', {}),
-            'source_analysis': ctas_lineage.get('source_analysis', {}),
-            'ctas_transformations': ctas_lineage.get('transformations', [])
-        }
+        try:
+            self.logger.debug("Parsing CTAS structure")
+            ctas_data = self.ctas_parser.parse(sql)
+            self.logger.debug("Building CTAS lineage")
+            ctas_lineage = self.ctas_parser.get_ctas_lineage(sql)
+            self.logger.debug("Parsing CTAS transformations")
+            transformation_data = self.transformation_parser.parse(sql)
+            self.logger.info("CTAS parsing completed successfully")
+            
+            result = {
+                'ctas_structure': ctas_data,
+                'ctas_lineage': ctas_lineage,
+                'transformations': transformation_data,
+                'target_table': ctas_data.get('target_table', {}),
+                'source_analysis': ctas_lineage.get('source_analysis', {}),
+                'ctas_transformations': ctas_lineage.get('transformations', [])
+            }
+            
+            target_table = ctas_data.get('target_table', {}).get('name', 'unknown')
+            source_count = len(ctas_lineage.get('source_analysis', {}).get('source_tables', []))
+            self.logger.info(f"CTAS analysis completed - target: {target_table}, {source_count} source tables")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"CTAS analysis failed: {str(e)}", exc_info=True)
+            raise
     
     def parse_ctas(self, sql: str) -> Dict[str, Any]:
         """Parse CTAS using modular parser.""" 

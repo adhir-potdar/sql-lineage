@@ -6,6 +6,7 @@ from sqlglot import exp
 from .base_parser import BaseParser
 from .select_parser import SelectParser
 from ...utils.condition_utils import GenericConditionHandler
+from ...utils.logging_config import get_logger
 
 
 class UpdateParser(BaseParser):
@@ -14,25 +15,41 @@ class UpdateParser(BaseParser):
     def __init__(self, dialect: str = "trino"):
         super().__init__(dialect)
         self.select_parser = SelectParser(dialect)
+        self.logger = get_logger('parsers.update')
     
     def parse(self, sql: str) -> Dict[str, Any]:
         """Parse UPDATE statement and extract all components."""
-        ast = self.parse_sql(sql)
+        self.logger.info(f"Parsing UPDATE statement (length: {len(sql)})")
+        self.logger.debug(f"UPDATE SQL: {sql[:200]}..." if len(sql) > 200 else f"UPDATE SQL: {sql}")
         
-        # Find the UPDATE statement
-        update_stmt = self._find_update_statement(ast)
-        if not update_stmt:
-            return {}
-        
-        return {
-            'target_table': self.parse_target_table(update_stmt),
-            'set_clauses': self.parse_set_clauses(update_stmt),
-            'from_tables': self.parse_from_tables(update_stmt),
-            'joins': self.parse_joins(update_stmt),
-            'where_conditions': self.parse_where_conditions(update_stmt),
-            'returning_clause': self.parse_returning_clause(update_stmt),
-            'update_type': self.determine_update_type(update_stmt)
-        }
+        try:
+            ast = self.parse_sql(sql)
+            
+            # Find the UPDATE statement
+            update_stmt = self._find_update_statement(ast)
+            if not update_stmt:
+                self.logger.warning("No UPDATE statement found in SQL")
+                return {}
+            
+            self.logger.debug("UPDATE statement found")
+            
+            result = {
+                'target_table': self.parse_target_table(update_stmt),
+                'set_clauses': self.parse_set_clauses(update_stmt),
+                'from_tables': self.parse_from_tables(update_stmt),
+                'joins': self.parse_joins(update_stmt),
+                'where_conditions': self.parse_where_conditions(update_stmt),
+                'returning_clause': self.parse_returning_clause(update_stmt),
+                'update_type': self.determine_update_type(update_stmt)
+            }
+            
+            target_table = result.get('target_table', {}).get('name', 'unknown')
+            self.logger.info(f"UPDATE parsing completed - target: {target_table}")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"UPDATE parsing failed: {str(e)}", exc_info=True)
+            raise
     
     def _find_update_statement(self, ast) -> Optional[exp.Update]:
         """Find UPDATE statement in AST."""

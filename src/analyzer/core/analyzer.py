@@ -10,6 +10,7 @@ from .extractor import LineageExtractor
 from .parsers import SelectParser, TransformationParser, CTEParser, CTASParser, InsertParser, UpdateParser
 from ..utils.validation import validate_sql_input
 from ..utils.sql_parsing_utils import TableNameRegistry, CompatibilityMode
+from ..utils.logging_config import get_logger
 
 # Import the new modular analyzers
 from .analyzers import (
@@ -34,10 +35,15 @@ class SQLLineageAnalyzer:
             dialect: SQL dialect to use for parsing
             compatibility_mode: Table name normalization mode
         """
+        self.logger = get_logger('analyzer')
+        self.logger.info(f"Initializing SQLLineageAnalyzer with dialect: {dialect}, compatibility_mode: {compatibility_mode}")
+        
         self.dialect = dialect
         self.compatibility_mode = compatibility_mode
         self.table_registry = TableNameRegistry(dialect, compatibility_mode)
         self.extractor = LineageExtractor(dialect, compatibility_mode)
+        
+        self.logger.debug("Core components initialized")
         
         # Initialize modular parsers as core components
         self.select_parser = SelectParser(dialect)
@@ -48,6 +54,7 @@ class SQLLineageAnalyzer:
         self.update_parser = UpdateParser(dialect)
         
         # Initialize the new modular analyzers with shared registry
+        self.logger.debug("Initializing modular analyzers")
         self.base_analyzer = BaseAnalyzer(dialect, compatibility_mode, self.table_registry)
         self.select_analyzer = SelectAnalyzer(dialect, compatibility_mode, self.table_registry)
         self.insert_analyzer = InsertAnalyzer(dialect, compatibility_mode, self.table_registry)
@@ -56,6 +63,8 @@ class SQLLineageAnalyzer:
         self.ctas_analyzer = CTASAnalyzer(dialect, compatibility_mode, self.table_registry)
         self.transformation_analyzer = TransformationAnalyzer(dialect, compatibility_mode, self.table_registry)
         self.lineage_chain_builder = LineageChainBuilder(dialect, main_analyzer=self, table_registry=self.table_registry)
+        
+        self.logger.info("SQLLineageAnalyzer initialization completed successfully")
     
     def analyze_comprehensive(self, sql: str) -> Dict[str, Any]:
         """
@@ -67,9 +76,13 @@ class SQLLineageAnalyzer:
         Returns:
             Comprehensive analysis result
         """
+        self.logger.info(f"Starting comprehensive analysis for SQL (length: {len(sql)})")
+        self.logger.debug(f"SQL query: {sql[:200]}..." if len(sql) > 200 else f"SQL query: {sql}")
+        
         try:
             # Determine SQL type and route to appropriate parser
             sql_type = self.base_analyzer._determine_sql_type(sql)
+            self.logger.info(f"Detected SQL type: {sql_type}")
             
             analysis_result = {
                 'sql': sql,
@@ -79,6 +92,7 @@ class SQLLineageAnalyzer:
             }
             
             try:
+                self.logger.debug(f"Routing to {sql_type} analyzer")
                 if sql_type == 'SELECT':
                     analysis_result.update(self.select_analyzer.analyze_select(sql))
                 elif sql_type == 'CTE':
@@ -90,14 +104,19 @@ class SQLLineageAnalyzer:
                 elif sql_type == 'UPDATE':
                     analysis_result.update(self.update_analyzer.analyze_update(sql))
                 else:
+                    self.logger.warning(f"Using generic analysis for SQL type: {sql_type}")
                     analysis_result.update(self._analyze_generic(sql))
+                
+                self.logger.info(f"Analysis completed successfully for {sql_type}")
             except Exception as analysis_error:
+                self.logger.error(f"Analysis failed for {sql_type}: {str(analysis_error)}", exc_info=True)
                 analysis_result['success'] = False
                 analysis_result['error'] = f"Analysis error for {sql_type}: {str(analysis_error)}"
             
             return analysis_result
             
         except Exception as e:
+            self.logger.error(f"Comprehensive analysis failed: {str(e)}", exc_info=True)
             return {
                 'sql': sql,
                 'error': str(e),
@@ -106,14 +125,17 @@ class SQLLineageAnalyzer:
     
     def _analyze_generic(self, sql: str) -> Dict[str, Any]:
         """Analyze other types of SQL statements."""
+        self.logger.debug("Attempting generic analysis")
         # For now, try to extract what we can using the select parser
         try:
             select_data = self.select_parser.parse(sql)
+            self.logger.info("Generic analysis completed with partial data")
             return {
                 'partial_analysis': select_data,
                 'note': 'Generic analysis - limited information available'
             }
-        except Exception:
+        except Exception as e:
+            self.logger.warning(f"Generic analysis failed: {str(e)}")
             return {
                 'error': 'Unable to parse this SQL type'
             }
@@ -129,9 +151,13 @@ class SQLLineageAnalyzer:
         Returns:
             LineageResult containing table and column lineage information
         """
+        self.logger.info(f"Starting analysis for SQL (length: {len(sql)})")
+        self.logger.debug(f"SQL query: {sql[:200]}..." if len(sql) > 200 else f"SQL query: {sql}")
+        
         # Validate input
         validation_error = validate_sql_input(sql)
         if validation_error:
+            self.logger.error(f"SQL validation failed: {validation_error}")
             return LineageResult(
                 sql=sql,
                 dialect=self.dialect,
@@ -142,24 +168,33 @@ class SQLLineageAnalyzer:
         
         try:
             # Parse SQL into AST
+            self.logger.debug("Parsing SQL into AST")
             parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            self.logger.info(f"SQL parsed successfully using dialect: {self.dialect}")
             
             # Extract lineage using the extractor
+            self.logger.debug("Extracting table lineage")
             table_lineage = self.extractor.extract_table_lineage(parsed)
+            self.logger.debug("Extracting column lineage")
             column_lineage = self.extractor.extract_column_lineage(parsed)
+            self.logger.info("Lineage extraction completed")
             
             # Extract metadata
+            self.logger.debug("Collecting metadata")
             metadata = self._collect_metadata(table_lineage)
             
-            return LineageResult(
+            result = LineageResult(
                 sql=sql,
                 dialect=self.dialect,
                 table_lineage=table_lineage,
                 column_lineage=column_lineage,
                 metadata=metadata
             )
+            self.logger.info("Analysis completed successfully")
+            return result
             
         except Exception as e:
+            self.logger.error(f"Analysis failed: {str(e)}", exc_info=True)
             return LineageResult(
                 sql=sql,
                 dialect=self.dialect,
@@ -188,7 +223,9 @@ class SQLLineageAnalyzer:
     
     def set_dialect(self, dialect: str) -> None:
         """Set the SQL dialect for parsing."""
+        old_dialect = self.dialect
         self.dialect = dialect
+        self.logger.info(f"Dialect changed from {old_dialect} to {dialect}")
     
     def get_lineage_result(self, sql: str, **kwargs) -> LineageResult:
         """
@@ -201,6 +238,7 @@ class SQLLineageAnalyzer:
         Returns:
             LineageResult object containing table and column lineage information
         """
+        self.logger.debug("get_lineage_result called")
         return self.analyze(sql, **kwargs)
     
     def get_lineage_json(self, sql: str, **kwargs) -> str:
@@ -214,9 +252,39 @@ class SQLLineageAnalyzer:
         Returns:
             JSON string representation of the lineage analysis
         """
+        self.logger.debug("get_lineage_json called")
         import json
         result = self.analyze(sql, **kwargs)
-        return json.dumps(result.to_dict(), indent=2)
+        json_result = json.dumps(result.to_dict(), indent=2)
+        self.logger.info(f"Generated JSON result (length: {len(json_result)})")
+        return json_result
+    
+    def analyze_file(self, file_path: str, **kwargs) -> LineageResult:
+        """
+        Analyze SQL from a file.
+        
+        Args:
+            file_path: Path to SQL file to analyze
+            **kwargs: Additional options
+            
+        Returns:
+            LineageResult object containing table and column lineage information
+        """
+        self.logger.info(f"Analyzing SQL file: {file_path}")
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                sql = f.read()
+            self.logger.debug(f"Read {len(sql)} characters from file: {file_path}")
+            return self.analyze(sql, **kwargs)
+        except Exception as e:
+            self.logger.error(f"Failed to read file {file_path}: {str(e)}", exc_info=True)
+            return LineageResult(
+                sql="",
+                dialect=self.dialect,
+                table_lineage=self.extractor.extract_table_lineage(sqlglot.expressions.Anonymous()),
+                column_lineage=self.extractor.extract_column_lineage(sqlglot.expressions.Anonymous()),
+                errors=[f"Failed to read file {file_path}: {str(e)}"]
+            )
     
     # Lineage chain methods - delegate to LineageChainBuilder
     def get_table_lineage_chain(self, sql: str, chain_type: str = "upstream", depth: int = 1, **kwargs) -> Dict[str, Any]:

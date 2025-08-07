@@ -10,6 +10,7 @@ from ..utils.metadata_utils import (
     create_source_column_metadata, create_result_column_metadata, 
     merge_metadata_entries, add_missing_source_columns
 )
+from ..utils.logging_config import get_logger
 
 
 class TransformationEngine:
@@ -18,16 +19,21 @@ class TransformationEngine:
     def __init__(self, dialect: str = "trino"):
         """Initialize the transformation engine."""
         self.dialect = dialect
+        self.logger = get_logger('core.transformation_engine')
     
     def integrate_column_transformations(self, chains: Dict, sql: str = None, main_analyzer=None) -> None:
         """
         Integrate column transformations into column metadata throughout the chain.
         Extracted and consolidated from lineage_chain_builder.py.
         """
+        self.logger.info(f"Integrating column transformations for {len(chains)} chain entities")
+        
         if not sql or not main_analyzer:
+            self.logger.warning("Missing SQL or main_analyzer for column transformation integration")
             return
         
         try:
+            self.logger.debug("Starting column transformation integration")
             # Get the analysis result to access column lineage
             result = main_analyzer.analyze(sql)
             column_lineage_data = result.column_lineage.downstream  # For downstream chains
@@ -42,15 +48,19 @@ class TransformationEngine:
             select_columns = self._extract_select_columns(parsed)
             
             # Process each entity in chains
+            processed_entities = 0
             for entity_name, entity_data in chains.items():
                 if entity_data.get('entity_type') != 'table' or entity_data.get('depth', 0) != 0:
                     continue  # Only process top-level table entities
                     
                 self._process_entity_transformations(entity_data, entity_name, sql, main_analyzer)
+                processed_entities += 1
                 
-        except Exception:
+            self.logger.info(f"Column transformation integration completed for {processed_entities} entities")
+                
+        except Exception as e:
             # If column integration fails, continue without column updates
-            pass
+            self.logger.error(f"Column transformation integration failed: {str(e)}", exc_info=True)
     
     def _extract_select_columns(self, parsed_sql) -> List[Dict]:
         """Extract SELECT columns from parsed SQL."""

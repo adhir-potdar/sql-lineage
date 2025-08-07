@@ -5,6 +5,7 @@ import sqlglot
 from sqlglot import exp
 from .base_parser import BaseParser
 from .select_parser import SelectParser
+from ...utils.logging_config import get_logger
 
 
 class CTEParser(BaseParser):
@@ -13,34 +14,50 @@ class CTEParser(BaseParser):
     def __init__(self, dialect: str = "trino"):
         super().__init__(dialect)
         self.select_parser = SelectParser(dialect)
+        self.logger = get_logger('parsers.cte')
     
     def parse(self, sql: str) -> Dict[str, Any]:
         """Parse CTE structure and dependencies."""
-        ast = self.parse_sql(sql)
+        self.logger.info(f"Parsing CTE statement (length: {len(sql)})")
+        self.logger.debug(f"CTE SQL: {sql[:200]}..." if len(sql) > 200 else f"CTE SQL: {sql}")
         
-        # Look for WITH statement - it might be at root level or nested
-        with_stmt = None
-        main_query = None
+        try:
+            ast = self.parse_sql(sql)
+            self.logger.debug("AST parsed successfully")
         
-        if isinstance(ast, exp.With):
-            with_stmt = ast
-            main_query = ast.this
-        else:
-            # Look for WITH statements in the AST
-            with_nodes = list(ast.find_all(exp.With))
-            if with_nodes:
-                with_stmt = with_nodes[0]  # Use the first WITH statement found
-                # For nested WITH, the main query is the parent of the WITH
-                main_query = ast
+            # Look for WITH statement - it might be at root level or nested
+            with_stmt = None
+            main_query = None
+            
+            if isinstance(ast, exp.With):
+                with_stmt = ast
+                main_query = ast.this
+                self.logger.debug("Found WITH statement at root level")
+            else:
+                # Look for WITH statements in the AST
+                with_nodes = list(ast.find_all(exp.With))
+                self.logger.debug(f"Found {len(with_nodes)} WITH statements in AST")
+                if with_nodes:
+                    with_stmt = with_nodes[0]  # Use the first WITH statement found
+                    # For nested WITH, the main query is the parent of the WITH
+                    main_query = ast
+            
+            if not with_stmt:
+                self.logger.warning("No WITH statement found in CTE SQL")
+                return {}
         
-        if not with_stmt:
-            return {}
-        
-        return {
-            'ctes': self.parse_cte_definitions(with_stmt),
-            'main_query': self.parse_main_query(main_query),
-            'cte_dependencies': self.analyze_cte_dependencies(with_stmt, main_query)
-        }
+            result = {
+                'ctes': self.parse_cte_definitions(with_stmt),
+                'main_query': self.parse_main_query(main_query),
+                'cte_dependencies': self.analyze_cte_dependencies(with_stmt, main_query)
+            }
+            
+            self.logger.info(f"CTE parsing completed - found {len(result['ctes'])} CTEs")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"CTE parsing failed: {str(e)}", exc_info=True)
+            raise
     
     def parse_cte_definitions(self, with_stmt: exp.With) -> List[Dict[str, Any]]:
         """Parse all CTE definitions."""

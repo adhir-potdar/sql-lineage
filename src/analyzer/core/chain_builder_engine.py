@@ -8,6 +8,7 @@ from ..utils.regex_patterns import is_aggregate_function
 from ..utils.aggregate_utils import is_aggregate_function_for_table, extract_alias_from_expression
 from .analyzers.derived_table_analyzer import DerivedTableAnalyzer
 from .transformation_engine import TransformationEngine
+from ..utils.logging_config import get_logger
 
 class ChainBuilderEngine:
     """Engine for building lineage chains from dependencies."""
@@ -17,6 +18,7 @@ class ChainBuilderEngine:
         self.dialect = dialect
         self.derived_table_analyzer = DerivedTableAnalyzer(dialect)
         self.transformation_engine = TransformationEngine(dialect)
+        self.logger = get_logger('core.chain_builder_engine')
     
     def build_chain_from_dependencies(self, entity_name: str, entity_type: str, 
                                     table_lineage_data: Dict, column_lineage_data: Dict,
@@ -27,6 +29,8 @@ class ChainBuilderEngine:
         Build comprehensive chain with metadata and transformations.
         Consolidated from lineage_chain_builder.py.
         """
+        self.logger.debug(f"Building chain for entity: {entity_name} (type: {entity_type}, depth: {current_depth})")
+        
         if visited_in_path is None:
             visited_in_path = set()
             
@@ -76,6 +80,7 @@ class ChainBuilderEngine:
                 
                 chain["dependencies"].append(dep_chain)
         
+        self.logger.debug(f"Chain building completed for {entity_name} with {len(chain['dependencies'])} dependencies")
         return chain
     
     def _add_transformations_to_chain(self, dep_chain: Dict, entity_name: str, 
@@ -396,7 +401,10 @@ class ChainBuilderEngine:
     
     def add_missing_source_columns(self, chains: Dict, sql: str = None, column_lineage_data: Dict = None, column_transformations_data: Dict = None) -> None:
         """Add missing source columns and handle QUERY_RESULT dependencies - moved from LineageChainBuilder."""
+        self.logger.info(f"Adding missing source columns for {len(chains)} chain entities")
+        
         if not sql:
+            self.logger.warning("No SQL provided for source column addition")
             return 
             
         try:

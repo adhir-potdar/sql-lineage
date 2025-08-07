@@ -28,7 +28,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "sqlglot>=20.0.0",
+    "sqlglot>=27.6.0",
     "pydantic>=2.0.0",
     "click>=8.0.0",
     "rich>=13.0.0",

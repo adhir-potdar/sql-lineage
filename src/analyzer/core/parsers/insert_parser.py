@@ -5,6 +5,7 @@ import sqlglot
 from sqlglot import exp
 from .base_parser import BaseParser
 from .select_parser import SelectParser
+from ...utils.logging_config import get_logger
 
 
 class InsertParser(BaseParser):
@@ -13,24 +14,40 @@ class InsertParser(BaseParser):
     def __init__(self, dialect: str = "trino"):
         super().__init__(dialect)
         self.select_parser = SelectParser(dialect)
+        self.logger = get_logger('parsers.insert')
     
     def parse(self, sql: str) -> Dict[str, Any]:
         """Parse INSERT statement and extract all components."""
-        ast = self.parse_sql(sql)
+        self.logger.info(f"Parsing INSERT statement (length: {len(sql)})")
+        self.logger.debug(f"INSERT SQL: {sql[:200]}..." if len(sql) > 200 else f"INSERT SQL: {sql}")
         
-        # Find the INSERT statement
-        insert_stmt = self._find_insert_statement(ast)
-        if not insert_stmt:
-            return {}
-        
-        return {
-            'target_table': self.parse_target_table(insert_stmt),
-            'insert_columns': self.parse_insert_columns(insert_stmt),
-            'source_data': self.parse_source_data(insert_stmt),
-            'insert_type': self.determine_insert_type(insert_stmt),
-            'on_conflict': self.parse_on_conflict(insert_stmt),
-            'returning_clause': self.parse_returning_clause(insert_stmt)
-        }
+        try:
+            ast = self.parse_sql(sql)
+            
+            # Find the INSERT statement
+            insert_stmt = self._find_insert_statement(ast)
+            if not insert_stmt:
+                self.logger.warning("No INSERT statement found in SQL")
+                return {}
+            
+            self.logger.debug("INSERT statement found")
+            
+            result = {
+                'target_table': self.parse_target_table(insert_stmt),
+                'insert_columns': self.parse_insert_columns(insert_stmt),
+                'source_data': self.parse_source_data(insert_stmt),
+                'insert_type': self.determine_insert_type(insert_stmt),
+                'on_conflict': self.parse_on_conflict(insert_stmt),
+                'returning_clause': self.parse_returning_clause(insert_stmt)
+            }
+            
+            target_table = result.get('target_table', {}).get('name', 'unknown')
+            self.logger.info(f"INSERT parsing completed - target: {target_table}")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"INSERT parsing failed: {str(e)}", exc_info=True)
+            raise
     
     def _find_insert_statement(self, ast) -> Optional[exp.Insert]:
         """Find INSERT statement in AST."""

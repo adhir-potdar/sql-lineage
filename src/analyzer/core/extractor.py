@@ -14,6 +14,7 @@ from .models import (
 )
 from ..utils.condition_utils import GenericConditionHandler
 from ..utils.sql_parsing_utils import TableNameRegistry, CompatibilityMode
+from ..utils.logging_config import get_logger
 
 
 class LineageExtractor:
@@ -23,11 +24,15 @@ class LineageExtractor:
         self.dialect = dialect
         self.compatibility_mode = compatibility_mode
         self._table_registry = None
+        self.logger = get_logger('core.extractor')
     
     def extract_table_lineage(self, expression: Expression) -> TableLineage:
         """Extract table-level lineage from SQL expression."""
+        self.logger.info("Starting table lineage extraction")
+        
         lineage = TableLineage()
         alias_mappings = self._extract_table_alias_mappings(expression)
+        self.logger.debug(f"Found {len(alias_mappings)} table aliases")
         
         # Initialize table registry for this extraction
         self._table_registry = TableNameRegistry(self.dialect, self.compatibility_mode)
@@ -175,6 +180,7 @@ class LineageExtractor:
                                 transformation.source_table = source
                                 lineage.add_transformation(target_name, transformation)
         
+        self.logger.info(f"Table lineage extraction completed - upstream: {len(lineage.upstream)} entries, downstream: {len(lineage.downstream)} entries")
         return lineage
     
     def _normalize_table_names(self, table_names: Set[str]) -> Set[str]:
@@ -191,6 +197,8 @@ class LineageExtractor:
     
     def extract_column_lineage(self, expression: Expression) -> ColumnLineage:
         """Extract column-level lineage from SQL expression."""
+        self.logger.info("Starting column lineage extraction")
+        
         lineage = ColumnLineage()
         alias_mappings = self._extract_table_alias_mappings(expression)
         
@@ -235,6 +243,7 @@ class LineageExtractor:
                         select, lineage, alias_mappings, target_prefix=target_table
                     )
         
+        self.logger.info(f"Column lineage extraction completed - upstream: {len(lineage.upstream)} entries, downstream: {len(lineage.downstream)} entries")
         return lineage
     
     def _extract_table_alias_mappings(self, expression: Expression) -> Dict[str, str]:

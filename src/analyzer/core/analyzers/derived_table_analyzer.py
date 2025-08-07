@@ -8,6 +8,7 @@ import re
 from typing import Dict, List, Any, Optional, Tuple
 import sqlglot
 from sqlglot import exp
+from ...utils.logging_config import get_logger
 
 
 class DerivedTableAnalyzer:
@@ -16,6 +17,7 @@ class DerivedTableAnalyzer:
     def __init__(self, dialect: str = "trino"):
         """Initialize the derived table analyzer."""
         self.dialect = dialect
+        self.logger = get_logger('analyzers.derived_table')
     
     def analyze_derived_tables(self, sql: str) -> Dict[str, Any]:
         """
@@ -27,6 +29,9 @@ class DerivedTableAnalyzer:
         Returns:
             Dict containing derived table analysis with 3-layer flow
         """
+        self.logger.info(f"Analyzing derived tables in SQL (length: {len(sql)})")
+        self.logger.debug(f"Derived table SQL: {sql[:200]}..." if len(sql) > 200 else f"Derived table SQL: {sql}")
+        
         try:
             parsed = sqlglot.parse_one(sql, dialect=self.dialect)
             

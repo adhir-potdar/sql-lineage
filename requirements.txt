@@ -1,5 +1,5 @@
 # Core dependencies for SQL Lineage Analyzer
-sqlglot>=20.0.0
+sqlglot>=27.6.0
 rich>=13.0.0
 click>=8.0.0
 

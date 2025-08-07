@@ -2,26 +2,46 @@
 
 from typing import Dict, Any, List
 from .base_analyzer import BaseAnalyzer
+from ...utils.logging_config import get_logger
 
 
 class SelectAnalyzer(BaseAnalyzer):
     """Analyzer for SELECT statements."""
     
+    def __init__(self, dialect: str = "trino", compatibility_mode: str = None, table_registry = None):
+        super().__init__(dialect, compatibility_mode, table_registry)
+        self.logger = get_logger('analyzers.select')
+    
     def analyze_select(self, sql: str) -> Dict[str, Any]:
         """Analyze simple SELECT statement."""
-        select_data = self.select_parser.parse(sql)
-        transformation_data = self.transformation_parser.parse(sql)
+        self.logger.info(f"Analyzing SELECT statement (length: {len(sql)})")
+        self.logger.debug(f"SELECT SQL: {sql[:200]}..." if len(sql) > 200 else f"SELECT SQL: {sql}")
         
-        return {
-            'query_structure': select_data,
-            'transformations': transformation_data,
-            'lineage': self._build_select_lineage(select_data, transformation_data),
-            'result_columns': self._extract_result_columns(select_data),
-            'source_tables': self._extract_source_tables(select_data)
-        }
+        try:
+            self.logger.debug("Parsing SELECT structure")
+            select_data = self.select_parser.parse(sql)
+            self.logger.debug("Parsing transformations")
+            transformation_data = self.transformation_parser.parse(sql)
+            self.logger.info("SELECT parsing completed successfully")
+        
+            result = {
+                'query_structure': select_data,
+                'transformations': transformation_data,
+                'lineage': self._build_select_lineage(select_data, transformation_data),
+                'result_columns': self._extract_result_columns(select_data),
+                'source_tables': self._extract_source_tables(select_data)
+            }
+            
+            self.logger.info(f"SELECT analysis completed - found {len(result.get('source_tables', []))} source tables, {len(result.get('result_columns', []))} result columns")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"SELECT analysis failed: {str(e)}", exc_info=True)
+            raise
     
     def _build_select_lineage(self, select_data: Dict[str, Any], transformation_data: Dict[str, Any]) -> Dict[str, Any]:
         """Build lineage chain for SELECT statement."""
+        self.logger.debug("Building SELECT lineage")
         lineage = {
             'type': 'SELECT_LINEAGE',
             'flow': []

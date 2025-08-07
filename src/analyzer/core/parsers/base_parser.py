@@ -4,6 +4,7 @@ from typing import Dict, List, Any, Optional
 from abc import ABC, abstractmethod
 import sqlglot
 from sqlglot import Expression
+from ...utils.logging_config import get_logger
 
 
 class BaseParser(ABC):
@@ -11,12 +12,17 @@ class BaseParser(ABC):
     
     def __init__(self, dialect: str = "trino"):
         self.dialect = dialect
+        self.logger = get_logger('parsers.base')
     
     def parse_sql(self, sql: str) -> Expression:
         """Parse SQL string into AST."""
         try:
-            return sqlglot.parse_one(sql, dialect=self.dialect)
+            self.logger.debug(f"Parsing SQL with dialect {self.dialect}")
+            result = sqlglot.parse_one(sql, dialect=self.dialect)
+            self.logger.debug("SQL parsing successful")
+            return result
         except Exception as e:
+            self.logger.error(f"Failed to parse SQL: {e}")
             raise ValueError(f"Failed to parse SQL: {e}")
     
     def extract_table_name(self, table_node) -> str:

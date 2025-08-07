@@ -13,6 +13,7 @@ from ...utils.metadata_utils import create_cte_metadata, merge_metadata_entries
 from ...utils.sql_parsing_utils import extract_function_type, extract_alias_from_expression, TableNameRegistry, CompatibilityMode
 from ...utils.regex_patterns import is_aggregate_function
 from ..chain_builder_engine import ChainBuilderEngine
+from ...utils.logging_config import get_logger
 
 
 class CTEAnalyzer(BaseAnalyzer):
@@ -27,160 +28,186 @@ class CTEAnalyzer(BaseAnalyzer):
         super().__init__(dialect, compatibility_mode, registry)
         self.main_analyzer = main_analyzer
         self.chain_builder_engine = ChainBuilderEngine(dialect)
+        self.logger = get_logger('analyzers.cte')
     
     def analyze_cte(self, sql: str) -> Dict[str, Any]:
         """Analyze CTE statement."""
-        cte_data = self.cte_parser.parse(sql)
-        cte_lineage = self.cte_parser.get_cte_lineage_chain(sql)
-        transformation_data = self.transformation_parser.parse(sql)
+        self.logger.info(f"Analyzing CTE statement (length: {len(sql)})")
+        self.logger.debug(f"CTE SQL: {sql[:200]}..." if len(sql) > 200 else f"CTE SQL: {sql}")
         
-        return {
-            'cte_structure': cte_data,
-            'cte_lineage': cte_lineage,
-            'transformations': transformation_data,
-            'execution_order': cte_lineage.get('execution_order', []),
-            'final_result': cte_lineage.get('final_result', {}),
-            'cte_dependencies': cte_data.get('cte_dependencies', {})
-        }
+        try:
+            self.logger.debug("Parsing CTE structure")
+            cte_data = self.cte_parser.parse(sql)
+            self.logger.debug("Building CTE lineage chain")
+            cte_lineage = self.cte_parser.get_cte_lineage_chain(sql)
+            self.logger.debug("Parsing CTE transformations")
+            transformation_data = self.transformation_parser.parse(sql)
+            self.logger.info("CTE parsing completed successfully")
+        
+            result = {
+                'cte_structure': cte_data,
+                'cte_lineage': cte_lineage,
+                'transformations': transformation_data,
+                'execution_order': cte_lineage.get('execution_order', []),
+                'final_result': cte_lineage.get('final_result', {}),
+                'cte_dependencies': cte_data.get('cte_dependencies', {})
+            }
+            
+            cte_count = len(cte_data.get('ctes', []))
+            self.logger.info(f"CTE analysis completed - found {cte_count} CTEs")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"CTE analysis failed: {str(e)}", exc_info=True)
+            raise
     
     def build_cte_lineage_chain(self, sql: str, chain_type: str, depth: int, target_entity: Optional[str], **kwargs) -> Dict[str, Any]:
         """Build lineage chain for CTE queries with proper single-flow chains."""
-        # Get CTE-specific analysis
-        cte_result = self.analyze_cte(sql)
-        cte_lineage = cte_result.get('cte_lineage', {})
-        ctes = cte_lineage.get('ctes', {})
-        execution_order = cte_lineage.get('execution_order', [])
+        self.logger.info(f"Building CTE lineage chain - type: {chain_type}, depth: {depth}, target: {target_entity}")
         
-        # Also get standard table/column lineage for base tables and final result
-        result = self.main_analyzer.analyze(sql, **kwargs)
-        table_lineage_data = result.table_lineage.upstream if chain_type == "upstream" else result.table_lineage.downstream
-        
-        # Build chains dictionary
-        chains = {}
-        
-        if chain_type == "downstream":
-            # NEW APPROACH: Build single continuous chains from base tables through CTEs to QUERY_RESULT
+        try:
+            # Get CTE-specific analysis
+            cte_result = self.analyze_cte(sql)
+            cte_lineage = cte_result.get('cte_lineage', {})
+            self.logger.debug("CTE analysis completed for lineage chain building")
             
-            # 1. Identify base tables (non-CTE tables)
-            base_tables = set()
+            ctes = cte_lineage.get('ctes', {})
+            execution_order = cte_lineage.get('execution_order', [])
             
-            # Tables that CTEs depend on
-            for cte_name, cte_data in ctes.items():
-                source_tables = cte_data.get('source_tables', [])
-                for source in source_tables:
-                    table_name = source.get('name')
-                    if table_name and table_name not in ctes:  # Not a CTE
-                        base_tables.add(table_name)
+            # Also get standard table/column lineage for base tables and final result
+            result = self.main_analyzer.analyze(sql, **kwargs)
+            table_lineage_data = result.table_lineage.upstream if chain_type == "upstream" else result.table_lineage.downstream
             
-            # Tables that final query references directly (like users in JOINs)
-            if table_lineage_data:
-                for table_name in table_lineage_data.keys():
-                    if table_name not in ctes:  # Not a CTE
-                        base_tables.add(table_name)
+            # Build chains dictionary
+            chains = {}
             
-            # Normalize base table names using registry to eliminate duplicates
-            original_to_canonical = {}
-            canonical_to_original = {}
-            
-            if self.table_registry and base_tables:
-                self.table_registry.register_tables(base_tables)
+            if chain_type == "downstream":
+                # NEW APPROACH: Build single continuous chains from base tables through CTEs to QUERY_RESULT
                 
-                for table_name in base_tables:
-                    canonical_name = self.table_registry.get_canonical_name(table_name)
-                    original_to_canonical[table_name] = canonical_name
-                    canonical_to_original[canonical_name] = table_name
-            else:
-                # No normalization - identity mapping
-                for table_name in base_tables:
-                    original_to_canonical[table_name] = table_name
-                    canonical_to_original[table_name] = table_name
-            
-            # 2. For each canonical base table, build a single continuous dependency chain
-            # Use original names for CTE lookups but store with canonical names
-            canonical_base_tables = set(canonical_to_original.keys())
-            
-            for canonical_name in canonical_base_tables:
-                original_name = canonical_to_original[canonical_name]
-                # Build chain using original name for CTE lookups but canonical name for output
-                chain = self._build_single_cte_chain(original_name, ctes, execution_order, table_lineage_data, sql, canonical_name)
-                # Store with canonical name
-                chains[canonical_name] = chain
-            
-            # 3. Handle any orphaned CTEs (CTEs that don't connect to base tables)
-            # This shouldn't happen in well-formed queries, but handle gracefully
-            for cte_name in execution_order:
-                if cte_name not in ctes:
-                    continue
+                # 1. Identify base tables (non-CTE tables)
+                base_tables = set()
+                
+                # Tables that CTEs depend on
+                for cte_name, cte_data in ctes.items():
+                    source_tables = cte_data.get('source_tables', [])
+                    for source in source_tables:
+                        table_name = source.get('name')
+                        if table_name and table_name not in ctes:  # Not a CTE
+                            base_tables.add(table_name)
+                
+                # Tables that final query references directly (like users in JOINs)
+                if table_lineage_data:
+                    for table_name in table_lineage_data.keys():
+                        if table_name not in ctes:  # Not a CTE
+                            base_tables.add(table_name)
+                
+                # Normalize base table names using registry to eliminate duplicates
+                original_to_canonical = {}
+                canonical_to_original = {}
+                
+                if self.table_registry and base_tables:
+                    self.table_registry.register_tables(base_tables)
                     
-                # Check if this CTE is already included in any base table chain
-                cte_included = False
-                for canonical_name in canonical_base_tables:
-                    if self._cte_in_chain(cte_name, chains.get(canonical_name, {})):
-                        cte_included = True
-                        break
+                    for table_name in base_tables:
+                        canonical_name = self.table_registry.get_canonical_name(table_name)
+                        original_to_canonical[table_name] = canonical_name
+                        canonical_to_original[canonical_name] = table_name
+                else:
+                    # No normalization - identity mapping
+                    for table_name in base_tables:
+                        original_to_canonical[table_name] = table_name
+                        canonical_to_original[table_name] = table_name
                 
-                # If CTE is not included in any chain, add it as a separate chain
-                if not cte_included:
-                    chains[cte_name] = self._build_single_cte_chain(cte_name, ctes, execution_order, table_lineage_data, sql)
-        
-        else:  # upstream
-            # For upstream: start from final result, trace back through CTEs to base tables
+                # 2. For each canonical base table, build a single continuous dependency chain
+                # Use original names for CTE lookups but store with canonical names
+                canonical_base_tables = set(canonical_to_original.keys())
+                
+                for canonical_name in canonical_base_tables:
+                    original_name = canonical_to_original[canonical_name]
+                    # Build chain using original name for CTE lookups but canonical name for output
+                    chain = self._build_single_cte_chain(original_name, ctes, execution_order, table_lineage_data, sql, canonical_name)
+                    # Store with canonical name
+                    chains[canonical_name] = chain
+                
+                # 3. Handle any orphaned CTEs (CTEs that don't connect to base tables)
+                # This shouldn't happen in well-formed queries, but handle gracefully
+                for cte_name in execution_order:
+                    if cte_name not in ctes:
+                        continue
+                        
+                    # Check if this CTE is already included in any base table chain
+                    cte_included = False
+                    for canonical_name in canonical_base_tables:
+                        if self._cte_in_chain(cte_name, chains.get(canonical_name, {})):
+                            cte_included = True
+                            break
+                    
+                    # If CTE is not included in any chain, add it as a separate chain
+                    if not cte_included:
+                        chains[cte_name] = self._build_single_cte_chain(cte_name, ctes, execution_order, table_lineage_data, sql)
             
-            # 1. Add final result
-            final_result = cte_lineage.get('final_result', {})
-            if final_result:
-                chains['QUERY_RESULT'] = self._build_cte_final_result(final_result, ctes, execution_order, 0, table_lineage_data)
+            else:  # upstream
+                # For upstream: start from final result, trace back through CTEs to base tables
+                
+                # 1. Add final result
+                final_result = cte_lineage.get('final_result', {})
+                if final_result:
+                    chains['QUERY_RESULT'] = self._build_cte_final_result(final_result, ctes, execution_order, 0, table_lineage_data)
+                
+                # 2. Add CTE entities in reverse execution order
+                for i, cte_name in enumerate(reversed(execution_order)):
+                    if cte_name in ctes:
+                        cte_entity = self._build_cte_entity(cte_name, ctes[cte_name], ctes, execution_order, i + 1)
+                        chains[cte_name] = cte_entity
+                
+                # 3. Add base tables
+                base_tables = set()
+                for cte_name, cte_data in ctes.items():
+                    source_tables = cte_data.get('source_tables', [])
+                    for source in source_tables:
+                        table_name = source.get('name')
+                        if table_name and table_name not in ctes:  # Not a CTE
+                            base_tables.add(table_name)
+                
+                for table_name in base_tables:
+                    chains[table_name] = self._build_cte_table_entity(table_name, ctes, execution_order, len(execution_order) + len(base_tables))
             
-            # 2. Add CTE entities in reverse execution order
-            for i, cte_name in enumerate(reversed(execution_order)):
-                if cte_name in ctes:
-                    cte_entity = self._build_cte_entity(cte_name, ctes[cte_name], ctes, execution_order, i + 1)
-                    chains[cte_name] = cte_entity
+            # Build final result structure
+            actual_max_depth = max([entity.get('depth', 0) for entity in chains.values()]) if chains else 0
             
-            # 3. Add base tables
-            base_tables = set()
-            for cte_name, cte_data in ctes.items():
-                source_tables = cte_data.get('source_tables', [])
-                for source in source_tables:
-                    table_name = source.get('name')
-                    if table_name and table_name not in ctes:  # Not a CTE
-                        base_tables.add(table_name)
+            # Add missing column information to QUERY_RESULT entities  
+            column_lineage_data = result.column_lineage.upstream if chain_type == "upstream" else result.column_lineage.downstream
+            column_transformations_data = result.column_lineage.transformations if hasattr(result.column_lineage, 'transformations') else {}
             
-            for table_name in base_tables:
-                chains[table_name] = self._build_cte_table_entity(table_name, ctes, execution_order, len(execution_order) + len(base_tables))
+            # First call regular method for basic population
+            self.chain_builder_engine.add_missing_source_columns(chains, sql, column_lineage_data, column_transformations_data)
+            
+            # CTE-specific enhancements: populate both source tables AND QUERY_RESULTs
+            self._populate_cte_source_tables(chains, sql, result)
+            self._populate_cte_query_results(chains, sql, column_lineage_data, column_transformations_data)
+            
+            return {
+                "sql": sql,
+                "dialect": result.dialect,
+                "chain_type": chain_type,
+                "max_depth": depth if depth > 0 else "unlimited",
+                "actual_max_depth": actual_max_depth,
+                "target_entity": target_entity,
+                "chains": chains,
+                "summary": {
+                    "total_tables": len(set(table_lineage_data.keys()) | set().union(*table_lineage_data.values()) if table_lineage_data else set()),
+                    "total_columns": 0,  # CTE queries don't have column lineage in the same way
+                    "has_transformations": bool(cte_result.get('transformations')),
+                    "has_metadata": bool(result.metadata),
+                    "chain_count": len(chains)
+                },
+                "errors": result.errors,
+                "warnings": result.warnings
+            }
         
-        # Build final result structure
-        actual_max_depth = max([entity.get('depth', 0) for entity in chains.values()]) if chains else 0
-        
-        # Add missing column information to QUERY_RESULT entities  
-        column_lineage_data = result.column_lineage.upstream if chain_type == "upstream" else result.column_lineage.downstream
-        column_transformations_data = result.column_lineage.transformations if hasattr(result.column_lineage, 'transformations') else {}
-        
-        # First call regular method for basic population
-        self.chain_builder_engine.add_missing_source_columns(chains, sql, column_lineage_data, column_transformations_data)
-        
-        # CTE-specific enhancements: populate both source tables AND QUERY_RESULTs
-        self._populate_cte_source_tables(chains, sql, result)
-        self._populate_cte_query_results(chains, sql, column_lineage_data, column_transformations_data)
-        
-        return {
-            "sql": sql,
-            "dialect": result.dialect,
-            "chain_type": chain_type,
-            "max_depth": depth if depth > 0 else "unlimited",
-            "actual_max_depth": actual_max_depth,
-            "target_entity": target_entity,
-            "chains": chains,
-            "summary": {
-                "total_tables": len(set(table_lineage_data.keys()) | set().union(*table_lineage_data.values()) if table_lineage_data else set()),
-                "total_columns": 0,  # CTE queries don't have column lineage in the same way
-                "has_transformations": bool(cte_result.get('transformations')),
-                "has_metadata": bool(result.metadata),
-                "chain_count": len(chains)
-            },
-            "errors": result.errors,
-            "warnings": result.warnings
-        }
+        except Exception as e:
+            self.logger.error(f"CTE lineage chain building failed: {str(e)}", exc_info=True)
+            raise
     
     def _build_cte_entity(self, cte_name: str, cte_data: Dict, all_ctes: Dict, execution_order: List[str], depth: int) -> Dict[str, Any]:
         """Build entity data for a CTE."""

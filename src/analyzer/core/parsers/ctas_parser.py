@@ -5,6 +5,7 @@ import sqlglot
 from sqlglot import exp
 from .base_parser import BaseParser
 from .select_parser import SelectParser
+from ...utils.logging_config import get_logger
 
 
 class CTASParser(BaseParser):
@@ -13,20 +14,36 @@ class CTASParser(BaseParser):
     def __init__(self, dialect: str = "trino"):
         super().__init__(dialect)
         self.select_parser = SelectParser(dialect)
+        self.logger = get_logger('parsers.ctas')
     
     def parse(self, sql: str) -> Dict[str, Any]:
         """Parse CTAS statement structure."""
-        ast = self.parse_sql(sql)
+        self.logger.info(f"Parsing CTAS statement (length: {len(sql)})")
+        self.logger.debug(f"CTAS SQL: {sql[:200]}..." if len(sql) > 200 else f"CTAS SQL: {sql}")
         
-        if not isinstance(ast, exp.Create):
-            return {}
-        
-        return {
-            'target_table': self.parse_target_table(ast),
-            'select_query': self.parse_select_query(ast),
-            'table_properties': self.parse_table_properties(ast),
-            'column_definitions': self.parse_column_definitions(ast)
-        }
+        try:
+            ast = self.parse_sql(sql)
+            
+            if not isinstance(ast, exp.Create):
+                self.logger.warning("No CREATE statement found in CTAS SQL")
+                return {}
+            
+            self.logger.debug("CREATE statement found")
+            
+            result = {
+                'target_table': self.parse_target_table(ast),
+                'select_query': self.parse_select_query(ast),
+                'table_properties': self.parse_table_properties(ast),
+                'column_definitions': self.parse_column_definitions(ast)
+            }
+            
+            target_table = result.get('target_table', {}).get('name', 'unknown')
+            self.logger.info(f"CTAS parsing completed - target table: {target_table}")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"CTAS parsing failed: {str(e)}", exc_info=True)
+            raise
     
     def parse_target_table(self, create_stmt: exp.Create) -> Dict[str, Any]:
         """Parse target table information."""
