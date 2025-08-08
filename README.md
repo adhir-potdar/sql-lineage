@@ -242,6 +242,33 @@ limited_chain = analyzer.get_lineage_chain(sql, "upstream", depth=3)
 - `depth`: `0` (unlimited), or `1-N` (limited levels)
 - `target_entity`: Focus analysis on specific table/entity (optional)
 
+## Lineage Event Mapper
+
+Transform lineage chains into standardized events for integration with external systems:
+
+```python
+from src.analyzer.lineage_mapper import LineageEventMapper
+
+# Create mapper and transform lineage chain to events
+mapper = LineageEventMapper()
+events = mapper.map_lineage_chain_to_events(
+    lineage_json_string=lineage_json,
+    tenant_id="tenant-123",
+    association_type="DATAMAP", 
+    association_id="datamap-456",
+    query_id="query-789"
+)
+
+# Batch process all lineage files
+python test_lineage_mapper.py  # Processes all JSON files in output/
+```
+
+**Features:**
+- Converts nested lineage chains to flat event streams
+- Multi-path metadata merging for complex dependencies
+- Rich event metadata with source/target details and transformations
+- Built-in logging and error handling
+
 ### Traditional Lineage Chains
 
 Build separate table and column dependency chains:
