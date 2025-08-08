@@ -71,8 +71,10 @@ def main():
                 # Map lineage chain to events with default association parameters
                 events = mapper.map_lineage_chain_to_events(
                     json_content, 
+                    tenant_id=str(uuid.uuid4()),
                     association_type="DATAMAP",
-                    association_id=str(uuid.uuid4())
+                    association_id=str(uuid.uuid4()),
+                    query_id=str(uuid.uuid4())
                 )
                 
                 if events:

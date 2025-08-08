@@ -16,6 +16,7 @@ class LineageEventMapper:
     """Maps lineage chain data to lineage event format."""
     
     def __init__(self):
+        self.event_version = "1.0.0"
         self.processed_mappings: Set[str] = set()
         self.dialect: str = ""
         self.chain_type: str = ""
@@ -271,9 +272,10 @@ class LineageEventMapper:
         target_table: str, 
         target_type: str,
         metadata: Dict[str, Any],
-        query_id: Optional[str] = None,
+        tenant_id: str = "",
         association_type: str = "",
-        association_id: str = ""
+        association_id: str = "",
+        query_id: str = ""
     ) -> Dict[str, Any]:
         """Create a single lineage event."""
         self.logger.debug(f"Creating lineage event: {source_table} -> {target_table}")
@@ -283,13 +285,13 @@ class LineageEventMapper:
         
         event = {
             "event_id": event_id,
-            "event_version": "1.0",
+            "event_version": self.event_version,
             "timekey": timestamp[:10].replace("-", ""),  # YYYYMMDD format
             "timestamp": timestamp,
-            "query_id": "",
-            "tenant_id": "",
-            "workspace_id": "", 
+            "tenant_id": tenant_id,
+            "workspace_id": tenant_id, 
             "user_id": "",
+            "query_id": query_id,
             "source_table": source_table,
             "source_type": source_type,
             "source_id": f"{source_type.lower()}_{source_table.replace('.', '_')}",
@@ -313,11 +315,12 @@ class LineageEventMapper:
         parent_entity: str,
         parent_type: str,
         events: List[Dict[str, Any]],
+        tenant_id: str,
+        association_type: str,
+        association_id: str,
         query_id: str,
         chains: Dict[str, Any] = None,
-        visited: Set[str] = None,
-        association_type: str = "",
-        association_id: str = ""
+        visited: Set[str] = None
     ) -> None:
         """Recursively traverse dependency chains to create lineage events."""
         try:
@@ -406,9 +409,10 @@ class LineageEventMapper:
                     target_table=entity_name,
                     target_type=entity_type.upper(),
                     metadata=metadata,
-                    query_id=query_id,
+                    tenant_id=tenant_id,
                     association_type=association_type,
-                    association_id=association_id
+                    association_id=association_id,
+                    query_id=query_id
                 )
                 events.append(event)
                 self.logger.debug(f"Added lineage event: {parent_entity} -> {entity_name}")
@@ -423,11 +427,12 @@ class LineageEventMapper:
                     entity_name,
                     entity_type, 
                     events,
+                    tenant_id,
+                    association_type,  # Pass association parameters down
+                    association_id,
                     query_id,
                     chains,  # Pass chains down
-                    visited,  # Pass same visited set to prevent infinite loops
-                    association_type,  # Pass association parameters down
-                    association_id
+                    visited  # Pass same visited set to prevent infinite loops
                 )
                 
         except Exception as e:
@@ -437,16 +442,20 @@ class LineageEventMapper:
     def map_lineage_chain_to_events(
         self, 
         lineage_json_string: str, 
+        tenant_id: str = "",
         association_type: str = "", 
-        association_id: str = ""
+        association_id: str = "",
+        query_id: str = ""
     ) -> List[Dict[str, Any]]:
         """
         Map a lineage chain JSON string to lineage events.
         
         Args:
             lineage_json_string: JSON string containing lineage chain data
+            tenant_id: Tenant ID for the lineage events
             association_type: Type of association for the lineage events
             association_id: ID of association for the lineage events
+            query_id: Query ID for the lineage events
             
         Returns:
             List of lineage event dictionaries
@@ -457,7 +466,6 @@ class LineageEventMapper:
             lineage_data = json.loads(lineage_json_string)
             
             events = []
-            query_id = str(uuid.uuid4())
             chains = lineage_data.get("chains", {})
             
             self.logger.debug(f"Processing {len(chains)} chains with query_id: {query_id}")
@@ -479,11 +487,12 @@ class LineageEventMapper:
                     base_entity_name,
                     chain_data.get("entity_type", "table"),
                     events,
+                    tenant_id,
+                    association_type,  # Pass association parameters
+                    association_id,
                     query_id,
                     chains,  # Pass chains for source column lookup
-                    None,  # visited set (will be initialized in method)
-                    association_type,  # Pass association parameters
-                    association_id
+                    None  # visited set (will be initialized in method)
                 )
             
             self.logger.info(f"Successfully generated {len(events)} lineage events")
