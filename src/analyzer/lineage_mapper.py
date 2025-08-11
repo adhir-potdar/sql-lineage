@@ -20,8 +20,19 @@ class LineageEventMapper:
         self.processed_mappings: Set[str] = set()
         self.dialect: str = ""
         self.chain_type: str = ""
+        self.sql: str = ""
         self.entity_metadata_cache: Dict[str, Dict[str, Any]] = {}  # Track metadata for each entity across paths
         self.logger = get_logger("lineage_mapper")
+    
+    def _remove_quotes_from_table_name(self, table_name: str) -> str:
+        """Remove double quotes from table name and its parts separated by dots."""
+        if not table_name:
+            return table_name
+        
+        # Split by dots and remove quotes from each part
+        parts = table_name.split('.')
+        cleaned_parts = [part.strip('"') for part in parts]
+        return '.'.join(cleaned_parts)
     
     def _find_entity_metadata_in_chains(self, entity_name: str, chains: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Recursively search for entity metadata in nested dependency chains."""
@@ -283,6 +294,10 @@ class LineageEventMapper:
         event_id = str(uuid.uuid4())
         timestamp = datetime.now().isoformat()
         
+        # Clean table names by removing quotes before creating IDs
+        cleaned_source_table = self._remove_quotes_from_table_name(source_table)
+        cleaned_target_table = self._remove_quotes_from_table_name(target_table)
+        
         event = {
             "event_id": event_id,
             "event_version": self.event_version,
@@ -292,13 +307,13 @@ class LineageEventMapper:
             "workspace_id": tenant_id, 
             "user_id": "",
             "query_id": query_id,
-            "source_table": source_table,
+            "source_table": cleaned_source_table,
             "source_type": source_type,
-            "source_id": f"{source_type.lower()}_{source_table.replace('.', '_')}",
+            "source_id": f"{source_type.lower()}_{cleaned_source_table.replace('.', '_')}",
             "source_path": "",
-            "target_table": target_table,
+            "target_table": cleaned_target_table,
             "target_type": target_type,
-            "target_id": f"{target_type.lower()}_{target_table.replace('.', '_')}",
+            "target_id": f"{target_type.lower()}_{cleaned_target_table.replace('.', '_')}",
             "target_path": "",
             "metadata": metadata,
             "associated_type": association_type,
@@ -396,6 +411,7 @@ class LineageEventMapper:
                 "target_depth": target_depth,
                 "dialect": self.dialect,
                 "chain_type": self.chain_type,
+                "sql": getattr(self, 'sql', ''),
                 "source_metadata": source_metadata,
                 "target_metadata": target_metadata,
                 "transformations": merged_transformations
@@ -475,6 +491,7 @@ class LineageEventMapper:
             self.entity_metadata_cache.clear()
             self.dialect = lineage_data.get("dialect", "")
             self.chain_type = lineage_data.get("chain_type", "")
+            self.sql = lineage_data.get("sql", "")
             
             self.logger.debug(f"Set dialect: {self.dialect}, chain_type: {self.chain_type}")
             
