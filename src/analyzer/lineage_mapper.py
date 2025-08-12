@@ -286,7 +286,8 @@ class LineageEventMapper:
         tenant_id: str = "",
         association_type: str = "",
         association_id: str = "",
-        query_id: str = ""
+        query_id: str = "",
+        state: str = "PERSISTENT"
     ) -> Dict[str, Any]:
         """Create a single lineage event."""
         self.logger.debug(f"Creating lineage event: {source_table} -> {target_table}")
@@ -318,7 +319,7 @@ class LineageEventMapper:
             "metadata": metadata,
             "associated_type": association_type,
             "associated_id": association_id,
-            "state": "PERSISTENT"
+            "state": state
         }
         
         self.logger.debug(f"Successfully created lineage event with ID: {event_id}")
@@ -335,7 +336,8 @@ class LineageEventMapper:
         association_id: str,
         query_id: str,
         chains: Dict[str, Any] = None,
-        visited: Set[str] = None
+        visited: Set[str] = None,
+        state: str = "PERSISTENT"
     ) -> None:
         """Recursively traverse dependency chains to create lineage events."""
         try:
@@ -428,7 +430,8 @@ class LineageEventMapper:
                     tenant_id=tenant_id,
                     association_type=association_type,
                     association_id=association_id,
-                    query_id=query_id
+                    query_id=query_id,
+                    state=state
                 )
                 events.append(event)
                 self.logger.debug(f"Added lineage event: {parent_entity} -> {entity_name}")
@@ -448,7 +451,8 @@ class LineageEventMapper:
                     association_id,
                     query_id,
                     chains,  # Pass chains down
-                    visited  # Pass same visited set to prevent infinite loops
+                    visited,  # Pass same visited set to prevent infinite loops
+                    state  # Pass state down
                 )
                 
         except Exception as e:
@@ -461,7 +465,8 @@ class LineageEventMapper:
         tenant_id: str = "",
         association_type: str = "", 
         association_id: str = "",
-        query_id: str = ""
+        query_id: str = "",
+        state: str = "PERSISTENT"
     ) -> List[Dict[str, Any]]:
         """
         Map a lineage chain JSON string to lineage events.
@@ -472,6 +477,7 @@ class LineageEventMapper:
             association_type: Type of association for the lineage events
             association_id: ID of association for the lineage events
             query_id: Query ID for the lineage events
+            state: State of the lineage events (PERSISTENT or TRANSIENT)
             
         Returns:
             List of lineage event dictionaries
@@ -509,7 +515,8 @@ class LineageEventMapper:
                     association_id,
                     query_id,
                     chains,  # Pass chains for source column lookup
-                    None  # visited set (will be initialized in method)
+                    None,  # visited set (will be initialized in method)
+                    state  # Pass state parameter
                 )
             
             self.logger.info(f"Successfully generated {len(events)} lineage events")
