@@ -318,7 +318,7 @@ class LineageEventMapper:
             "metadata": metadata,
             "associated_type": association_type,
             "associated_id": association_id,
-            "state": "PERSISTSENT"
+            "state": "PERSISTENT"
         }
         
         self.logger.debug(f"Successfully created lineage event with ID: {event_id}")
