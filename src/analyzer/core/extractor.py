@@ -99,35 +99,42 @@ class LineageExtractor:
         
         # Process main query
         if isinstance(expression, exp.Select):
-            target_name = "QUERY_RESULT"
-            source_tables = self._get_source_tables_from_node(expression, alias_mappings, cte_mapping)
-            normalized_source_tables = self._normalize_table_names(source_tables)
+            # Check if this SELECT is part of a CTAS query by looking at the parent
+            parent = expression.parent if hasattr(expression, 'parent') else None
+            is_ctas_select = isinstance(parent, exp.Create)
             
-            # Check if this is a simple pass-through of a single CTE (SELECT * FROM cte [ORDER BY ...])
-            passthrough_cte = self._detect_main_query_passthrough(expression, normalized_source_tables, cte_mapping)
-            
-            for source in normalized_source_tables:
-                # If this source is a skipped CTE, replace it with its dependencies
-                if source in ctes_to_skip and source in skipped_cte_dependencies:
-                    # Add the dependencies of the skipped CTE instead
-                    for skipped_cte_dependency in skipped_cte_dependencies[source]:
-                        lineage.add_dependency(target_name, skipped_cte_dependency)
-                # If this is a pass-through CTE, connect directly to its dependencies
-                elif source == passthrough_cte and source in lineage.upstream:
-                    for cte_dependency in lineage.upstream[source]:
-                        lineage.add_dependency(target_name, cte_dependency)
-                    # Remove the pass-through CTE from lineage
-                    del lineage.upstream[source]
-                else:
-                    lineage.add_dependency(target_name, source)
-                    
-                    # Extract transformation details for main query (use original source for transformation analysis)
-                    original_source = next((orig for orig in source_tables if self._table_registry.get_canonical_name(orig) == source), source)
-                    transformation = self._extract_table_transformation(expression, original_source, target_name, alias_mappings)
-                    if transformation:
-                        # Update transformation to use canonical names
-                        transformation.source_table = source
-                        lineage.add_transformation(target_name, transformation)
+            # For regular SELECT queries, use QUERY_RESULT
+            # For CTAS queries, the target will be handled in the CREATE section
+            if not is_ctas_select:
+                target_name = "QUERY_RESULT"
+                source_tables = self._get_source_tables_from_node(expression, alias_mappings, cte_mapping)
+                normalized_source_tables = self._normalize_table_names(source_tables)
+                
+                # Check if this is a simple pass-through of a single CTE (SELECT * FROM cte [ORDER BY ...])
+                passthrough_cte = self._detect_main_query_passthrough(expression, normalized_source_tables, cte_mapping)
+                
+                for source in normalized_source_tables:
+                    # If this source is a skipped CTE, replace it with its dependencies
+                    if source in ctes_to_skip and source in skipped_cte_dependencies:
+                        # Add the dependencies of the skipped CTE instead
+                        for skipped_cte_dependency in skipped_cte_dependencies[source]:
+                            lineage.add_dependency(target_name, skipped_cte_dependency)
+                    # If this is a pass-through CTE, connect directly to its dependencies
+                    elif source == passthrough_cte and source in lineage.upstream:
+                        for cte_dependency in lineage.upstream[source]:
+                            lineage.add_dependency(target_name, cte_dependency)
+                        # Remove the pass-through CTE from lineage
+                        del lineage.upstream[source]
+                    else:
+                        lineage.add_dependency(target_name, source)
+                        
+                        # Extract transformation details for main query (use original source for transformation analysis)
+                        original_source = next((orig for orig in source_tables if self._table_registry.get_canonical_name(orig) == source), source)
+                        transformation = self._extract_table_transformation(expression, original_source, target_name, alias_mappings)
+                        if transformation:
+                            # Update transformation to use canonical names
+                            transformation.source_table = source
+                            lineage.add_transformation(target_name, transformation)
         
         # Handle UNION queries
         elif isinstance(expression, exp.Union):
@@ -158,30 +165,58 @@ class LineageExtractor:
             if hasattr(expression, 'this') and expression.this:
                 # For CREATE TABLE, use the raw table name without adding default schema
                 target_name = str(expression.this)
+                self.logger.debug(f"Processing CTAS with target table: {target_name}")
                 
-                # Find the SELECT part
-                for select in expression.find_all(exp.Select):
-                    source_tables = self._get_source_tables_from_node(select, alias_mappings, cte_mapping)
-                    normalized_source_tables = self._normalize_table_names(source_tables)
-                    for source in normalized_source_tables:
-                        # If this source is a skipped CTE, replace it with its dependencies
-                        if source in ctes_to_skip and source in skipped_cte_dependencies:
-                            # Add the dependencies of the skipped CTE instead
-                            for skipped_cte_dependency in skipped_cte_dependencies[source]:
-                                lineage.add_dependency(target_name, skipped_cte_dependency)
-                        else:
-                            lineage.add_dependency(target_name, source)
-                            
-                            # Extract transformation details for CREATE TABLE AS SELECT (use original source for transformation analysis)
-                            original_source = next((orig for orig in source_tables if self._table_registry.get_canonical_name(orig) == source), source)
-                            transformation = self._extract_table_transformation(select, original_source, target_name, alias_mappings)
-                            if transformation:
-                                # Update transformation to use canonical names
-                                transformation.source_table = source
-                                lineage.add_transformation(target_name, transformation)
+                # Find the SELECT part - handle both direct SELECT and CTE+SELECT patterns
+                select_statements = list(expression.find_all(exp.Select))
+                
+                if select_statements:
+                    # Process all CTEs first, then the main SELECT
+                    all_sources = set()
+                    
+                    # For CTAS with CTEs, we need to:
+                    # 1. Process all intermediate CTEs normally
+                    # 2. Connect the final SELECT to the target table instead of QUERY_RESULT
+                    
+                    for select in select_statements:
+                        source_tables = self._get_source_tables_from_node(select, alias_mappings, cte_mapping)
+                        normalized_source_tables = self._normalize_table_names(source_tables)
+                        all_sources.update(normalized_source_tables)
+                        
+                        # Only create dependencies from the FINAL SELECT to the target table
+                        # This is typically the last SELECT statement in the expression
+                        if select == select_statements[-1]:
+                            for source in normalized_source_tables:
+                                # If this source is a skipped CTE, replace it with its dependencies
+                                if source in ctes_to_skip and source in skipped_cte_dependencies:
+                                    # Add the dependencies of the skipped CTE instead
+                                    for skipped_cte_dependency in skipped_cte_dependencies[source]:
+                                        lineage.add_dependency(target_name, skipped_cte_dependency)
+                                else:
+                                    lineage.add_dependency(target_name, source)
+                                    
+                                    # Extract transformation details for CREATE TABLE AS SELECT (use original source for transformation analysis)
+                                    original_source = next((orig for orig in source_tables if self._table_registry.get_canonical_name(orig) == source), source)
+                                    transformation = self._extract_table_transformation(select, original_source, target_name, alias_mappings)
+                                    if transformation:
+                                        # Update transformation to use canonical names
+                                        transformation.source_table = source
+                                        lineage.add_transformation(target_name, transformation)
+                
+                self.logger.info(f"CTAS processing completed for target: {target_name}")
         
         self.logger.info(f"Table lineage extraction completed - upstream: {len(lineage.upstream)} entries, downstream: {len(lineage.downstream)} entries")
         return lineage
+    
+    def _is_ctas_query(self, expression: Expression) -> bool:
+        """Check if the expression represents a CTAS query."""
+        return isinstance(expression, exp.Create) and hasattr(expression, 'this') and expression.this
+    
+    def _get_ctas_target_table(self, expression: Expression) -> Optional[str]:
+        """Extract target table name from CTAS query."""
+        if self._is_ctas_query(expression):
+            return str(expression.this)
+        return None
     
     def _normalize_table_names(self, table_names: Set[str]) -> Set[str]:
         """Normalize table names using the registry to eliminate duplicates."""

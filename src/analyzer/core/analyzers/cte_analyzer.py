@@ -30,6 +30,27 @@ class CTEAnalyzer(BaseAnalyzer):
         self.chain_builder_engine = ChainBuilderEngine(dialect)
         self.logger = get_logger('analyzers.cte')
     
+    def _is_ctas_query(self, sql: str) -> bool:
+        """Check if the SQL query is a CREATE TABLE AS SELECT query."""
+        if not sql:
+            return False
+        return sql.strip().upper().startswith('CREATE TABLE')
+    
+    def _get_ctas_target_table(self, sql: str) -> Optional[str]:
+        """Extract target table name from CTAS query."""
+        if not self._is_ctas_query(sql):
+            return None
+        
+        try:
+            import sqlglot
+            parsed = sqlglot.parse_one(sql, dialect=self.dialect)
+            if isinstance(parsed, sqlglot.exp.Create) and hasattr(parsed, 'this') and parsed.this:
+                return str(parsed.this)
+        except Exception as e:
+            self.logger.debug(f"Failed to extract CTAS target table: {str(e)}")
+        
+        return None
+    
     def analyze_cte(self, sql: str) -> Dict[str, Any]:
         """Analyze CTE statement."""
         self.logger.info(f"Analyzing CTE statement (length: {len(sql)})")
@@ -465,19 +486,22 @@ class CTEAnalyzer(BaseAnalyzer):
                 current_entity_dict["dependencies"].append(entity_dict)
                 current_entity_dict = entity_dict
         
-        # Add QUERY_RESULT as final dependency
+        # Add final dependency - QUERY_RESULT for regular queries, target table for CTAS queries
+        ctas_target = self._get_ctas_target_table(sql) if sql else None
+        final_entity_name = ctas_target or "QUERY_RESULT"
+        
         query_result_entity = {
-            "entity": "QUERY_RESULT",
+            "entity": final_entity_name,
             "entity_type": "table", 
             "depth": len(chain),
             "dependencies": [],
             "metadata": {"table_columns": [], "is_cte": False}
         }
         
-        # Add transformations from last entity to QUERY_RESULT
+        # Add transformations from last entity to final entity
         if chain:
             last_entity = chain[-1]
-            transformations = self._get_final_transformations(last_entity, table_lineage_data, sql)
+            transformations = self._get_final_transformations(last_entity, table_lineage_data, sql, ctas_target)
             if transformations:
                 query_result_entity["transformations"] = transformations
         
@@ -626,12 +650,13 @@ class CTEAnalyzer(BaseAnalyzer):
                 }]
         return []
     
-    def _get_final_transformations(self, source_entity: str, table_lineage_data: dict, sql: str = None) -> list:
-        """Get transformations from final CTE/table to QUERY_RESULT."""
+    def _get_final_transformations(self, source_entity: str, table_lineage_data: dict, sql: str = None, ctas_target: str = None) -> list:
+        """Get transformations from final CTE/table to final target (QUERY_RESULT or CTAS target)."""
+        target_table = ctas_target or "QUERY_RESULT"
         transformation = {
             "type": "table_transformation",
             "source_table": source_entity,
-            "target_table": "QUERY_RESULT",
+            "target_table": target_table,
             "filter_conditions": [],
             "group_by_columns": [],
             "joins": []
