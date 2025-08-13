@@ -1,0 +1,428 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SQL Lineage Chain Schema",
+  "description": "JSON Schema for SQL lineage chain analysis results",
+  "type": "object",
+  "required": ["sql", "dialect", "chain_type", "max_depth", "actual_max_depth", "chains", "summary", "errors", "warnings"],
+  "properties": {
+    "sql": {
+      "type": "string",
+      "description": "The original SQL query that was analyzed"
+    },
+    "dialect": {
+      "type": "string",
+      "description": "SQL dialect used for parsing",
+      "enum": ["trino", "mysql", "postgresql", "bigquery", "snowflake", "redshift", "spark", "hive"]
+    },
+    "chain_type": {
+      "type": "string",
+      "description": "Type of lineage analysis performed",
+      "enum": ["downstream", "upstream", "bidirectional"]
+    },
+    "max_depth": {
+      "type": ["string", "integer"],
+      "description": "Maximum depth configured for analysis ('unlimited' or positive integer)"
+    },
+    "actual_max_depth": {
+      "type": "integer",
+      "description": "Actual maximum depth reached during analysis",
+      "minimum": 0
+    },
+    "target_entity": {
+      "type": ["string", "null"],
+      "description": "Specific target entity for focused lineage analysis"
+    },
+    "chains": {
+      "type": "object",
+      "description": "Collection of lineage chains for each source entity",
+      "patternProperties": {
+        ".*": {
+          "$ref": "#/definitions/lineage_chain"
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "description": "Summary statistics of the lineage analysis",
+      "required": ["total_tables", "total_columns", "has_transformations", "has_metadata", "chain_count"],
+      "properties": {
+        "total_tables": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_columns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "has_transformations": {
+          "type": "boolean"
+        },
+        "has_metadata": {
+          "type": "boolean"
+        },
+        "chain_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "errors": {
+      "type": "array",
+      "description": "List of errors encountered during analysis",
+      "items": {
+        "type": "string"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "description": "List of warnings encountered during analysis",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "lineage_chain": {
+      "type": "object",
+      "description": "A lineage chain representing dependencies for a single entity",
+      "required": ["entity", "entity_type", "depth", "dependencies", "metadata"],
+      "properties": {
+        "entity": {
+          "type": "string",
+          "description": "Name of the entity (table, view, CTE, etc.)"
+        },
+        "entity_type": {
+          "type": "string",
+          "description": "Type of the entity",
+          "enum": ["table", "view", "cte", "derived_table", "subquery"]
+        },
+        "depth": {
+          "type": "integer",
+          "description": "Depth level in the lineage chain",
+          "minimum": 0
+        },
+        "dependencies": {
+          "type": "array",
+          "description": "List of dependent entities",
+          "items": {
+            "$ref": "#/definitions/dependency"
+          }
+        },
+        "metadata": {
+          "$ref": "#/definitions/entity_metadata"
+        }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "description": "A dependency relationship between entities",
+      "required": ["entity", "entity_type", "depth", "dependencies"],
+      "properties": {
+        "entity": {
+          "type": "string",
+          "description": "Name of the dependent entity"
+        },
+        "entity_type": {
+          "type": "string",
+          "description": "Type of the dependent entity",
+          "enum": ["table", "view", "cte", "derived_table", "subquery"]
+        },
+        "depth": {
+          "type": "integer",
+          "description": "Depth level of this dependency",
+          "minimum": 0
+        },
+        "dependencies": {
+          "type": "array",
+          "description": "Nested dependencies of this entity",
+          "items": {
+            "$ref": "#/definitions/dependency"
+          }
+        },
+        "metadata": {
+          "$ref": "#/definitions/entity_metadata"
+        },
+        "transformations": {
+          "type": "array",
+          "description": "List of transformations applied to this entity",
+          "items": {
+            "$ref": "#/definitions/transformation"
+          }
+        }
+      }
+    },
+    "entity_metadata": {
+      "type": "object",
+      "description": "Metadata information for an entity",
+      "properties": {
+        "table_columns": {
+          "type": "array",
+          "description": "List of columns in the entity",
+          "items": {
+            "$ref": "#/definitions/column_metadata"
+          }
+        },
+        "table_type": {
+          "type": "string",
+          "description": "Type of table/entity",
+          "enum": ["TABLE", "VIEW", "CTE", "DERIVED_TABLE"]
+        },
+        "schema": {
+          "type": "string",
+          "description": "Schema name containing the entity"
+        },
+        "description": {
+          "type": "string",
+          "description": "Description of the entity"
+        },
+        "is_cte": {
+          "type": "boolean",
+          "description": "Whether this entity is a Common Table Expression"
+        }
+      }
+    },
+    "column_metadata": {
+      "type": "object",
+      "description": "Metadata for a single column",
+      "required": ["name", "upstream", "type"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Column name"
+        },
+        "upstream": {
+          "type": "array",
+          "description": "List of upstream column references",
+          "items": {
+            "type": "string"
+          }
+        },
+        "type": {
+          "type": "string",
+          "description": "Column type or data type",
+          "enum": ["SOURCE", "DIRECT", "DERIVED", "AGGREGATE", "VARCHAR", "RESULT", "CASE"]
+        },
+        "transformation": {
+          "$ref": "#/definitions/column_transformation"
+        }
+      }
+    },
+    "column_transformation": {
+      "type": "object",
+      "description": "Transformation applied to a column",
+      "properties": {
+        "column_name": {
+          "type": "string",
+          "description": "Name of the transformed column"
+        },
+        "source_expression": {
+          "type": "string",
+          "description": "Original expression or function"
+        },
+        "transformation_type": {
+          "type": "string",
+          "description": "Type of transformation applied",
+          "enum": ["AGGREGATE", "CASE", "CAST", "FUNCTION", "EXPRESSION", "COMPUTED", "SUBQUERY"]
+        },
+        "function_type": {
+          "type": "string",
+          "description": "Specific function used in transformation",
+          "enum": ["COUNT", "SUM", "AVG", "MIN", "MAX", "CASE", "CAST", "CONCAT", "SUBSTRING", "EXPRESSION", "ROW_NUMBER", "RANK", "SUBQUERY"]
+        },
+        "full_expression": {
+          "type": "string",
+          "description": "Complete transformation expression including alias"
+        }
+      }
+    },
+    "transformation": {
+      "type": "object",
+      "description": "Table-level transformation information",
+      "required": ["type", "source_table", "target_table"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Type of transformation",
+          "enum": ["table_transformation", "column_transformation", "derived_table_transformation"]
+        },
+        "source_table": {
+          "type": "string",
+          "description": "Source table name"
+        },
+        "target_table": {
+          "type": "string",
+          "description": "Target table name"
+        },
+        "filter_conditions": {
+          "type": "array",
+          "description": "Filter conditions applied during transformation",
+          "items": {
+            "$ref": "#/definitions/filter_condition"
+          }
+        },
+        "group_by_columns": {
+          "type": "array",
+          "description": "Columns used in GROUP BY clause",
+          "items": {
+            "type": "string"
+          }
+        },
+        "order_by_columns": {
+          "type": "array",
+          "description": "Columns used in ORDER BY clause",
+          "items": {
+            "type": "string"
+          }
+        },
+        "joins": {
+          "type": "array",
+          "description": "Join operations in the transformation",
+          "items": {
+            "$ref": "#/definitions/join_info"
+          }
+        },
+        "limiting": {
+          "type": "object",
+          "description": "LIMIT clause information",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "description": "Number of rows to limit",
+              "minimum": 1
+            }
+          }
+        },
+        "unions": {
+          "type": "array",
+          "description": "UNION operations in the transformation",
+          "items": {
+            "$ref": "#/definitions/union_info"
+          }
+        },
+        "having_conditions": {
+          "type": "array",
+          "description": "HAVING clause conditions for aggregated results",
+          "items": {
+            "$ref": "#/definitions/having_condition"
+          }
+        }
+      }
+    },
+    "filter_condition": {
+      "type": "object",
+      "description": "A filter or WHERE condition",
+      "properties": {
+        "column": {
+          "type": "string",
+          "description": "Column being filtered"
+        },
+        "operator": {
+          "type": "string",
+          "description": "Comparison operator",
+          "enum": ["=", "!=", "<>", "<", ">", "<=", ">=", "IN", "NOT IN", "LIKE", "NOT LIKE", "IS NULL", "IS NOT NULL"]
+        },
+        "value": {
+          "type": ["string", "array"],
+          "description": "Filter value, expression, or array of values for IN operator",
+          "items": {
+            "type": "string"
+          }
+        },
+        "type": {
+          "type": "string",
+          "description": "Type of filter condition",
+          "enum": ["FILTER", "GROUP_BY", "HAVING"]
+        },
+        "conditions": {
+          "type": "array",
+          "description": "Nested conditions for complex filters",
+          "items": {
+            "$ref": "#/definitions/filter_condition"
+          }
+        },
+        "columns": {
+          "type": "array",
+          "description": "List of columns for GROUP_BY type conditions",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "join_info": {
+      "type": "object",
+      "description": "Information about a join operation",
+      "required": ["join_type", "right_table", "conditions"],
+      "properties": {
+        "join_type": {
+          "type": "string",
+          "description": "Type of join operation",
+          "enum": ["INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "FULL JOIN", "CROSS JOIN", "LEFT OUTER JOIN", "RIGHT OUTER JOIN", "FULL OUTER JOIN", "INNER", "LEFT", "RIGHT"]
+        },
+        "right_table": {
+          "type": "string",
+          "description": "Right table in the join"
+        },
+        "conditions": {
+          "type": "array",
+          "description": "Join conditions",
+          "items": {
+            "type": "object",
+            "required": ["left_column", "operator", "right_column"],
+            "properties": {
+              "left_column": {
+                "type": "string",
+                "description": "Left column in join condition"
+              },
+              "operator": {
+                "type": "string",
+                "description": "Join operator",
+                "enum": ["=", "!=", "<>", "<", ">", "<=", ">="]
+              },
+              "right_column": {
+                "type": "string",
+                "description": "Right column in join condition"
+              }
+            }
+          }
+        }
+      }
+    },
+    "union_info": {
+      "type": "object",
+      "description": "Information about a union operation",
+      "required": ["union_type", "union_source"],
+      "properties": {
+        "union_type": {
+          "type": "string",
+          "description": "Type of union operation",
+          "enum": ["UNION", "UNION ALL", "UNION DISTINCT"]
+        },
+        "union_source": {
+          "type": "string",
+          "description": "Source table/entity in the union"
+        }
+      }
+    },
+    "having_condition": {
+      "type": "object",
+      "description": "A HAVING clause condition for aggregated results",
+      "required": ["column", "operator", "value"],
+      "properties": {
+        "column": {
+          "type": "string",
+          "description": "Aggregate function or column being filtered in HAVING clause"
+        },
+        "operator": {
+          "type": "string",
+          "description": "Comparison operator for HAVING condition",
+          "enum": ["=", "!=", "<>", "<", ">", "<=", ">=", "IN", "NOT IN", "LIKE", "NOT LIKE", "IS NULL", "IS NOT NULL"]
+        },
+        "value": {
+          "type": ["string", "number"],
+          "description": "Value to compare against in HAVING condition"
+        }
+      }
+    }
+  }
+}
