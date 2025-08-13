@@ -5,6 +5,17 @@ from typing import Dict, Optional, List
 import sqlglot
 
 
+def clean_table_name_quotes(table_name: str) -> str:
+    """Remove quotes from table name while preserving case and structure."""
+    if not table_name:
+        return table_name
+    
+    # Split by dots and remove quotes from each part
+    parts = table_name.split('.')
+    cleaned_parts = [part.strip('"').strip("'").strip('`') for part in parts]
+    return '.'.join(cleaned_parts)
+
+
 def normalize_table_name(table_name: str) -> str:
     """Normalize table name by removing quotes and standardizing format."""
     if not table_name:
@@ -491,17 +502,51 @@ def is_column_from_table(column_name: str, table_name: str, sql: str = None, dia
 
 
 def clean_source_expression(expression: str) -> str:
-    """Clean source expression by removing AS alias part."""
+    """Clean source expression by removing AS alias part and cleaning table name quotes."""
     if not expression:
         return ""
         
     clean_expr = expression
-    if ' AS ' in expression.upper():
-        clean_expr = expression.split(' AS ')[0].strip()
-    elif ' as ' in expression:
-        clean_expr = expression.split(' as ')[0].strip()
-        
+    
+    # Smart AS alias detection - only split on AS that's at the end (for column aliases)
+    # Don't split on AS within function calls like CAST(... AS DATE)
+    import re
+    # Pattern to match AS alias at the end of expression (after balanced parentheses)
+    # This matches: "expression AS alias" but not "CAST(value AS type)"
+    as_alias_pattern = r'^(.+?)\s+AS\s+(["\w]+)$'
+    match = re.match(as_alias_pattern, expression, re.IGNORECASE)
+    if match:
+        clean_expr = match.group(1).strip()
+    else:
+        # Check for lowercase 'as' at the end
+        as_alias_pattern_lower = r'^(.+?)\s+as\s+(["\w]+)$'
+        match = re.match(as_alias_pattern_lower, expression)
+        if match:
+            clean_expr = match.group(1).strip()
+    
+    # Also clean table name quotes within the expression
+    clean_expr = _clean_table_names_in_expression(clean_expr)
     return clean_expr
+
+
+def _clean_table_names_in_expression(expression: str) -> str:
+    """Clean quoted table names within SQL expressions."""
+    import re
+    
+    # Pattern to match quoted table references like "schema"."table"."column"
+    # This handles patterns like: "dbxadmin40test"."trino_demo"."orders"."o_orderkey"
+    pattern = r'"([^"]+)"\."([^"]+)"\."([^"]+)"\."([^"]+)"'
+    expression = re.sub(pattern, r'\1.\2.\3.\4', expression)
+    
+    # Pattern to match quoted table references like "schema"."table"."column" (3 parts)
+    pattern = r'"([^"]+)"\."([^"]+)"\."([^"]+)"'
+    expression = re.sub(pattern, r'\1.\2.\3', expression)
+    
+    # Pattern to match quoted table references like "schema"."table" (2 parts)
+    pattern = r'"([^"]+)"\."([^"]+)"'
+    expression = re.sub(pattern, r'\1.\2', expression)
+    
+    return expression
 
 
 def is_subquery_expression(expression: str, dialect: str = "trino") -> bool:

@@ -135,7 +135,7 @@ def create_result_column_metadata(column_name: str, source_expression: str,
         "source_expression": clean_source_expression(source_expression),
         "transformation_type": transformation_type,
         "function_type": function_type,
-        "full_expression": source_expression
+        "full_expression": clean_source_expression(source_expression)
     }
     
     return build_column_metadata(

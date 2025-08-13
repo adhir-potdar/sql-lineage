@@ -10,7 +10,7 @@ from ...utils.sqlglot_helpers import (
 )
 from ...utils.column_extraction_utils import extract_all_referenced_columns
 from ...utils.metadata_utils import create_cte_metadata, merge_metadata_entries
-from ...utils.sql_parsing_utils import extract_function_type, extract_alias_from_expression, TableNameRegistry, CompatibilityMode
+from ...utils.sql_parsing_utils import extract_function_type, extract_alias_from_expression, TableNameRegistry, CompatibilityMode, clean_table_name_quotes, clean_source_expression
 from ...utils.regex_patterns import is_aggregate_function
 from ..chain_builder_engine import ChainBuilderEngine
 from ...utils.logging_config import get_logger
@@ -214,7 +214,7 @@ class CTEAnalyzer(BaseAnalyzer):
                 "max_depth": depth if depth > 0 else "unlimited",
                 "actual_max_depth": actual_max_depth,
                 "target_entity": target_entity,
-                "chains": chains,
+                "chains": {clean_table_name_quotes(k): v for k, v in chains.items()},
                 "summary": {
                     "total_tables": len(set(table_lineage_data.keys()) | set().union(*table_lineage_data.values()) if table_lineage_data else set()),
                     "total_columns": 0,  # CTE queries don't have column lineage in the same way
@@ -233,7 +233,7 @@ class CTEAnalyzer(BaseAnalyzer):
     def _build_cte_entity(self, cte_name: str, cte_data: Dict, all_ctes: Dict, execution_order: List[str], depth: int) -> Dict[str, Any]:
         """Build entity data for a CTE."""
         entity = {
-            "entity": cte_name,
+            "entity": clean_table_name_quotes(cte_name),
             "entity_type": "cte",
             "depth": depth,
             "dependencies": [],
@@ -260,15 +260,15 @@ class CTEAnalyzer(BaseAnalyzer):
                         # This CTE should point to the next CTE in the chain
                         transformations = [{
                             'type': 'table_transformation',
-                            'source_table': cte_name,
-                            'target_table': next_cte_name,
+                            'source_table': clean_table_name_quotes(cte_name),
+                            'target_table': clean_table_name_quotes(next_cte_name),
                             'filter_conditions': [],
                             'group_by_columns': [],
                             'joins': []
                         }]
                         
                         cte_dependencies.append({
-                            "entity": next_cte_name,
+                            "entity": clean_table_name_quotes(next_cte_name),
                             "transformations": transformations
                         })
                         break
@@ -300,7 +300,7 @@ class CTEAnalyzer(BaseAnalyzer):
                     function_type = self._extract_function_type_generic(raw_expression)
                     
                     column_info["transformation"] = {
-                        "source_expression": source_expression,
+                        "source_expression": clean_source_expression(source_expression),
                         "transformation_type": transformation_type,
                         "function_type": function_type
                     }
@@ -312,7 +312,7 @@ class CTEAnalyzer(BaseAnalyzer):
     def _build_cte_table_entity(self, table_name: str, all_ctes: Dict, execution_order: List[str], depth: int) -> Dict[str, Any]:
         """Build entity data for a base table used by CTEs."""
         entity = {
-            "entity": table_name,
+            "entity": clean_table_name_quotes(table_name),
             "entity_type": "table",
             "depth": depth,
             "dependencies": [],
@@ -343,15 +343,15 @@ class CTEAnalyzer(BaseAnalyzer):
                         
                         transformations = [{
                             'type': 'table_transformation',
-                            'source_table': table_name,
-                            'target_table': cte_name,
+                            'source_table': clean_table_name_quotes(table_name),
+                            'target_table': clean_table_name_quotes(cte_name),
                             'filter_conditions': filtered_conditions,
                             'group_by_columns': [],
                             'joins': []
                         }]
                         
                         entity["dependencies"].append({
-                            "entity": cte_name,
+                            "entity": clean_table_name_quotes(cte_name),
                             "transformations": transformations
                         })
                         connected_to_cte = True
@@ -363,7 +363,7 @@ class CTEAnalyzer(BaseAnalyzer):
             # This base table is only referenced in the final SELECT, so add QUERY_RESULT dependency
             transformations = [{
                 'type': 'table_transformation',
-                'source_table': table_name,
+                'source_table': clean_table_name_quotes(table_name),
                 'target_table': 'QUERY_RESULT',
                 'filter_conditions': [],
                 'group_by_columns': [],
@@ -428,7 +428,7 @@ class CTEAnalyzer(BaseAnalyzer):
         for entity_name in referenced_entities:
             transformations = [{
                 'type': 'table_transformation',
-                'source_table': entity_name,
+                'source_table': clean_table_name_quotes(entity_name),
                 'target_table': 'QUERY_RESULT',
                 'filter_conditions': [],
                 'group_by_columns': [],
@@ -436,7 +436,7 @@ class CTEAnalyzer(BaseAnalyzer):
             }]
             
             entity["dependencies"].append({
-                "entity": entity_name,
+                "entity": clean_table_name_quotes(entity_name),
                 "transformations": transformations
             })
         
@@ -461,7 +461,7 @@ class CTEAnalyzer(BaseAnalyzer):
             display_name = canonical_name if (i == 0 and canonical_name) else entity_name
             
             entity_dict = {
-                "entity": display_name,
+                "entity": clean_table_name_quotes(display_name),
                 "entity_type": "cte" if entity_name in ctes else "table",
                 "depth": i,
                 "dependencies": [],
@@ -490,12 +490,36 @@ class CTEAnalyzer(BaseAnalyzer):
         ctas_target = self._get_ctas_target_table(sql) if sql else None
         final_entity_name = ctas_target or "QUERY_RESULT"
         
+        # Get columns from the final CTE if this is a CTAS query
+        final_columns = []
+        if ctas_target and chain:
+            final_cte_name = chain[-1]
+            if final_cte_name in ctes:
+                final_cte_data = ctes[final_cte_name]
+                final_columns = final_cte_data.get('columns', [])
+                # Convert CTE columns to table columns format
+                table_columns = []
+                for col in final_columns:
+                    if isinstance(col, dict):
+                        table_columns.append({
+                            "name": col.get('name', ''),
+                            "upstream": [],
+                            "type": col.get('data_type', 'VARCHAR')
+                        })
+                    else:
+                        table_columns.append({
+                            "name": str(col),
+                            "upstream": [],
+                            "type": "VARCHAR"
+                        })
+                final_columns = table_columns
+        
         query_result_entity = {
-            "entity": final_entity_name,
+            "entity": clean_table_name_quotes(final_entity_name) if final_entity_name != "QUERY_RESULT" else final_entity_name,
             "entity_type": "table", 
             "depth": len(chain),
             "dependencies": [],
-            "metadata": {"table_columns": [], "is_cte": False}
+            "metadata": {"table_columns": final_columns, "is_cte": False}
         }
         
         # Add transformations from last entity to final entity
@@ -642,8 +666,8 @@ class CTEAnalyzer(BaseAnalyzer):
             if transformations:
                 return [{
                     "type": "table_transformation",
-                    "source_table": source_entity,
-                    "target_table": target_entity,
+                    "source_table": clean_table_name_quotes(source_entity),
+                    "target_table": clean_table_name_quotes(target_entity),
                     "filter_conditions": self._filter_nested_conditions(transformations, source_entity),
                     "group_by_columns": [],
                     "joins": []
@@ -652,10 +676,10 @@ class CTEAnalyzer(BaseAnalyzer):
     
     def _get_final_transformations(self, source_entity: str, table_lineage_data: dict, sql: str = None, ctas_target: str = None) -> list:
         """Get transformations from final CTE/table to final target (QUERY_RESULT or CTAS target)."""
-        target_table = ctas_target or "QUERY_RESULT"
+        target_table = clean_table_name_quotes(ctas_target) if ctas_target else "QUERY_RESULT"
         transformation = {
             "type": "table_transformation",
-            "source_table": source_entity,
+            "source_table": clean_table_name_quotes(source_entity),
             "target_table": target_table,
             "filter_conditions": [],
             "group_by_columns": [],
@@ -868,10 +892,10 @@ class CTEAnalyzer(BaseAnalyzer):
                     
                     col_transformation = {
                         'column_name': target_column_name,
-                        'source_expression': source_expression,
+                        'source_expression': clean_source_expression(source_expression),
                         'transformation_type': self._get_cte_transformation_type(col, raw_expression),
                         'function_type': self._extract_function_type_generic(raw_expression),
-                        'full_expression': raw_expression
+                        'full_expression': clean_source_expression(raw_expression)
                     }
                     column_transformations.append(col_transformation)
                     

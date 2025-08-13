@@ -7,6 +7,7 @@ from .base_analyzer import BaseAnalyzer
 from ...utils.regex_patterns import is_ctas_query
 from ...utils.column_extraction_utils import extract_all_referenced_columns
 from ...utils.metadata_utils import create_table_metadata
+from ...utils.sql_parsing_utils import clean_table_name_quotes
 from ..transformation_engine import TransformationEngine
 from ...utils.logging_config import get_logger
 
@@ -191,14 +192,14 @@ class CTASAnalyzer(BaseAnalyzer):
     def _build_ctas_target_chain(self, target_table: str, depth: int, source_table: str) -> Dict[str, Any]:
         """Build a chain for CTAS target table."""
         return {
-            "entity": target_table,
+            "entity": clean_table_name_quotes(target_table),
             "entity_type": "table",
             "depth": depth,
             "dependencies": [],
             "transformations": [{
                 "type": "table_transformation",
-                "source_table": source_table,
-                "target_table": target_table,
+                "source_table": clean_table_name_quotes(source_table),
+                "target_table": clean_table_name_quotes(target_table),
                 "filter_conditions": [],
                 "group_by_columns": [],
                 "joins": []
@@ -287,7 +288,7 @@ class CTASAnalyzer(BaseAnalyzer):
         """Build comprehensive chain with CTAS-specific handling."""
         # Standard chain building
         chain = {
-            "entity": entity_name,
+            "entity": clean_table_name_quotes(entity_name),
             "entity_type": entity_type,
             "depth": current_depth - 1,
             "dependencies": [],

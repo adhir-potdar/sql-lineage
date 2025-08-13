@@ -10,6 +10,7 @@ This module provides utilities for:
 
 import re
 from typing import List, Dict, Any, Optional
+from .sql_parsing_utils import clean_source_expression
 
 
 def is_aggregate_function(expression: str) -> bool:
@@ -139,7 +140,7 @@ def extract_aggregate_result_columns(sql: str, table_name: str) -> List[Dict]:
                         "upstream": [f"{table_name}.{col_name}"],
                         "type": "DIRECT",
                         "transformation": {
-                            "source_expression": source_expr,
+                            "source_expression": clean_source_expression(source_expr),
                             "transformation_type": "AGGREGATE",
                             "function_type": func_type
                         }

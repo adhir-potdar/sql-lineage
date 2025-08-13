@@ -13,7 +13,7 @@ from .models import (
     JoinType, AggregateType, OperatorType, TransformationType
 )
 from ..utils.condition_utils import GenericConditionHandler
-from ..utils.sql_parsing_utils import TableNameRegistry, CompatibilityMode
+from ..utils.sql_parsing_utils import TableNameRegistry, CompatibilityMode, clean_table_name_quotes
 from ..utils.logging_config import get_logger
 
 
@@ -42,6 +42,8 @@ class LineageExtractor:
         for table in expression.find_all(exp.Table):
             table_name = str(table)
             clean_table_name = self._clean_table_reference(table_name)
+            # Remove quotes from table name for consistent formatting
+            clean_table_name = clean_table_name_quotes(clean_table_name)
             raw_table_names.add(clean_table_name)
         
         # Register all table names to get canonical mappings
@@ -215,7 +217,8 @@ class LineageExtractor:
     def _get_ctas_target_table(self, expression: Expression) -> Optional[str]:
         """Extract target table name from CTAS query."""
         if self._is_ctas_query(expression):
-            return str(expression.this)
+            target_table = str(expression.this)
+            return clean_table_name_quotes(target_table)
         return None
     
     def _normalize_table_names(self, table_names: Set[str]) -> Set[str]:

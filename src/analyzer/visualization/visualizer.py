@@ -447,7 +447,11 @@ class SQLLineageVisualizer:
             for entity_data in deduplicated_chains.values()
         )
         
-        if not has_query_result:
+        # Check if this is a CTAS query - skip result box entirely for CTAS
+        sql = chain_data.get('sql', '')
+        is_ctas = sql.strip().upper().startswith('CREATE TABLE')
+        
+        if not has_query_result and not is_ctas:
             self._add_final_result_box(dot, chain_data, node_config)
     
     def _add_entity_with_columns_improved(self, dot: Digraph, entity_name: str, entity_data: Dict, node_config: Dict, edge_config: Dict) -> None:
@@ -1202,6 +1206,17 @@ class SQLLineageVisualizer:
             order_by = transformation.get('order_by_columns', [])
             if order_by:
                 label_parts.append(f"Order By: {', '.join(order_by[:2])}")
+            
+            # Add limit information
+            limiting = transformation.get('limiting', {})
+            if limiting:
+                limit_value = limiting.get('limit')
+                offset_value = limiting.get('offset')
+                if limit_value is not None:
+                    if offset_value is not None:
+                        label_parts.append(f"Limit: {limit_value}, Offset: {offset_value}")
+                    else:
+                        label_parts.append(f"Limit: {limit_value}")
             
             # Connect multiple source tables to transformation (NEW LOGIC)
             source_tables = transformation_info.get('source_tables', [transformation.get('source_table')])
@@ -2045,8 +2060,9 @@ class SQLLineageVisualizer:
                         # Add edge to the combined result node
                         dot.edge(entity_name, new_node_id, color='#2E7D32', penwidth='3', arrowhead='vee')
         
-        # Add rank constraint
-        dot.body.append(f'{{rank=sink; {new_node_id}}}')
+        # Add rank constraint - escape quotes for Graphviz
+        escaped_node_id = new_node_id.replace('"', '\\"')
+        dot.body.append(f'{{rank=sink; "{escaped_node_id}"}}')
     
     def _extract_select_columns_from_sql(self, sql: str) -> List[str]:
         """Extract column names from SELECT clause for display in result box."""

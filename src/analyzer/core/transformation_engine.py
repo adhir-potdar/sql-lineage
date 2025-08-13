@@ -3,7 +3,7 @@
 import re
 from typing import Dict, List, Any, Optional, Set
 import sqlglot
-from ..utils.sql_parsing_utils import build_alias_to_table_mapping, extract_function_type, clean_source_expression
+from ..utils.sql_parsing_utils import build_alias_to_table_mapping, extract_function_type, clean_source_expression, clean_table_name_quotes
 from ..utils.column_extraction_utils import extract_all_referenced_columns, extract_aggregate_columns
 from ..utils.regex_patterns import is_aggregate_function
 from ..utils.metadata_utils import (
@@ -312,7 +312,7 @@ class TransformationEngine:
                 
                 transformation = {
                     "type": "table_transformation",
-                    "source_table": source_table,
+                    "source_table": clean_table_name_quotes(source_table),
                     "target_table": "QUERY_RESULT",
                     "filter_conditions": filter_conditions
                 }
@@ -344,8 +344,8 @@ class TransformationEngine:
                         # Direct column reference
                         column_name = str(expr.name)
                         transformation = {
-                            "source_column": f"{source_table}.{column_name}",
-                            "target_column": f"{target_table}.{column_name}",
+                            "source_column": f"{clean_table_name_quotes(source_table)}.{column_name}",
+                            "target_column": f"{clean_table_name_quotes(target_table)}.{column_name}",
                             "transformation_type": "DIRECT"
                         }
                         column_transformations.append(transformation)
@@ -367,8 +367,8 @@ class TransformationEngine:
                             transformation_type = "COMPUTED"
                         
                         transformation = {
-                            "source_expression": raw_expr,
-                            "target_column": f"{target_table}.{alias}",
+                            "source_expression": clean_source_expression(raw_expr),
+                            "target_column": f"{clean_table_name_quotes(target_table)}.{alias}",
                             "transformation_type": transformation_type,
                             "function_type": function_type
                         }

@@ -9,7 +9,7 @@ from .base_analyzer import BaseAnalyzer
 # Import new utility modules
 from ...utils.sql_parsing_utils import (
     build_alias_to_table_mapping, extract_function_type, is_column_from_table,
-    clean_source_expression, extract_table_references_from_sql,
+    clean_source_expression, extract_table_references_from_sql, clean_table_name_quotes,
     get_union_columns_for_table, collect_union_selects_helper,
     infer_query_result_columns_simple, extract_clean_column_name,
     infer_query_result_columns_simple_fallback, extract_table_columns_from_sql,
@@ -361,7 +361,7 @@ class LineageChainBuilder(BaseAnalyzer):
             """Build comprehensive chain with metadata and transformations."""
             # Standard chain building
             chain = {
-                "entity": entity_name,
+                "entity": clean_table_name_quotes(entity_name),
                 "entity_type": entity_type,
                 "depth": current_depth - 1,
                 "dependencies": [],
@@ -412,8 +412,8 @@ class LineageChainBuilder(BaseAnalyzer):
                                 # Create transformation data structure matching original format
                                 trans_data = {
                                     "type": "table_transformation",
-                                    "source_table": trans.source_table,
-                                    "target_table": trans.target_table
+                                    "source_table": clean_table_name_quotes(trans.source_table),
+                                    "target_table": clean_table_name_quotes(trans.target_table)
                                 }
                                 
                                 # Add join information if present - filter conditions relevant to this entity
@@ -599,14 +599,19 @@ class LineageChainBuilder(BaseAnalyzer):
                         # Filter transformations to only include those relevant to this entity
                         relevant_transformations = []
                         for trans in transformations:
+                            # Handle both quoted and unquoted table name forms for comparison
+                            trans_source = clean_table_name_quotes(str(trans.get("source_table", "")))
+                            trans_target = clean_table_name_quotes(str(trans.get("target_table", "")))
+                            entity_clean = clean_table_name_quotes(str(entity_name))
+                            dependent_clean = clean_table_name_quotes(str(dependent_table))
+                            
                             # Standard case: source_table matches entity, target_table matches dependent
-                            standard_match = (trans.get("source_table") == entity_name and 
-                                            trans.get("target_table") == dependent_table)
+                            standard_match = (trans_source == entity_clean and trans_target == dependent_clean)
                             
                             # UNION case: source_table matches dependent, target_table matches entity
                             # This handles UNION operations where multiple sources combine into one target
-                            union_match = (trans.get("source_table") == dependent_table and 
-                                         trans.get("target_table") == entity_name and
+                            union_match = (trans_source == dependent_clean and 
+                                         trans_target == entity_clean and
                                          trans.get("union_type") is not None)
                             
                             if standard_match or union_match:
@@ -724,7 +729,7 @@ class LineageChainBuilder(BaseAnalyzer):
             "max_depth": depth if depth > 0 else "unlimited",
             "actual_max_depth": actual_max_depth,
             "target_entity": target_entity,
-            "chains": chains,
+            "chains": {clean_table_name_quotes(k): v for k, v in chains.items()},
             "summary": {
                 "total_tables": len(set(table_lineage_data.keys()) | set().union(*table_lineage_data.values()) if table_lineage_data else set()),
                 "total_columns": len(used_columns),

@@ -3,7 +3,7 @@
 import re
 from typing import Set, List, Dict, Optional
 import sqlglot
-from .sql_parsing_utils import build_alias_to_table_mapping
+from .sql_parsing_utils import build_alias_to_table_mapping, clean_source_expression
 
 
 def extract_all_referenced_columns(sql: str, table_name: str, dialect: str = "trino") -> Set[str]:
@@ -443,7 +443,7 @@ def process_select_expression(expr, sql: str, dialect: str = "trino") -> Dict:
                 
                 result["type"] = "DIRECT"
                 result["transformation"] = {
-                    "source_expression": source_expr,
+                    "source_expression": clean_source_expression(source_expr),
                     "transformation_type": "AGGREGATE", 
                     "function_type": func_type
                 }

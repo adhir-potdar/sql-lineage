@@ -9,6 +9,7 @@ from typing import Dict, List, Any, Optional, Tuple
 import sqlglot
 from sqlglot import exp
 from ...utils.logging_config import get_logger
+from ...utils.sql_parsing_utils import clean_table_name_quotes
 
 
 class DerivedTableAnalyzer:
@@ -256,8 +257,8 @@ class DerivedTableAnalyzer:
         # Base transformation
         trans = {
             "type": "derived_table_transformation",
-            "source_table": source_table,
-            "target_table": derived_table_entity
+            "source_table": clean_table_name_quotes(source_table),
+            "target_table": clean_table_name_quotes(derived_table_entity)
         }
         
         # Add GROUP BY if present
@@ -279,7 +280,7 @@ class DerivedTableAnalyzer:
         # Base transformation
         trans = {
             "type": "table_transformation",
-            "source_table": derived_table_entity,
+            "source_table": clean_table_name_quotes(derived_table_entity),
             "target_table": "QUERY_RESULT"
         }
         
@@ -324,8 +325,8 @@ class DerivedTableAnalyzer:
         
         # Build the nested structure: source → derived → result
         return {
-            source_table: {
-                "entity": source_table,
+            clean_table_name_quotes(source_table): {
+                "entity": clean_table_name_quotes(source_table),
                 "entity_type": "table",
                 "depth": 0,
                 "dependencies": [{

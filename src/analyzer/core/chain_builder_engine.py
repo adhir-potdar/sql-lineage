@@ -2,7 +2,7 @@
 
 from typing import Dict, List, Any, Optional, Set
 import sqlglot
-from ..utils.sql_parsing_utils import is_column_from_table, extract_function_type, extract_clean_column_name, is_subquery_expression, is_subquery_relevant_to_table, extract_columns_referenced_by_table_in_union
+from ..utils.sql_parsing_utils import is_column_from_table, extract_function_type, extract_clean_column_name, is_subquery_expression, is_subquery_relevant_to_table, extract_columns_referenced_by_table_in_union, clean_table_name_quotes
 from ..utils.metadata_utils import create_metadata_entry
 from ..utils.regex_patterns import is_aggregate_function
 from ..utils.aggregate_utils import is_aggregate_function_for_table, extract_alias_from_expression
@@ -93,8 +93,8 @@ class ChainBuilderEngine:
                     # Create transformation data structure matching original format
                     trans_data = {
                         "type": "table_transformation",
-                        "source_table": trans.source_table,
-                        "target_table": trans.target_table
+                        "source_table": str(trans.source_table) if trans.source_table else trans.source_table,
+                        "target_table": str(trans.target_table) if trans.target_table else trans.target_table
                     }
                     
                     # Add join information if present
