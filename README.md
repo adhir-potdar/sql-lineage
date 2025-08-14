@@ -242,6 +242,29 @@ limited_chain = analyzer.get_lineage_chain(sql, "upstream", depth=3)
 - `depth`: `0` (unlimited), or `1-N` (limited levels)
 - `target_entity`: Focus analysis on specific table/entity (optional)
 
+## Lineage Chain Combiner
+
+Combine individual lineage JSON files into consolidated chains for multi-query workflow analysis:
+
+```python
+from src.analyzer.lineage_chain_combiner import LineageChainCombiner
+
+# Load individual lineage JSON files and combine them
+lineage_data_list = [...]  # List of loaded JSON dictionaries
+combined_lineages = LineageChainCombiner.process_lineage_data_complete(lineage_data_list)
+
+# Process complete multi-query workflow
+python test_multiple_queries_lineage.py
+```
+
+**Key Features:**
+- **Producer-Consumer Analysis**: Identifies which queries produce tables consumed by others
+- **Chain Building**: Constructs flowing dependency chains from individual query lineages
+- **Connection Point Merging**: Intelligently merges metadata at table connection points
+- **Visualization Support**: Generates combined lineage visualizations as JPEG files
+
+**📖 For detailed documentation, see [Lineage Chain Combiner Guide](docs/LINEAGE_COMBINER.md)**
+
 ## Lineage Event Mapper
 
 Transform lineage chains into standardized events for integration with external systems:
