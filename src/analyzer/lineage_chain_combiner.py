@@ -5,7 +5,11 @@ This module provides functionality for combining individual JSON lineage files i
 
 import json
 import os
+import logging
 from typing import Dict, List, Tuple, Optional
+
+# Setup logger for this module
+logger = logging.getLogger(__name__)
 
 class LineageChainCombiner:
     """Class for combining individual JSON lineage files into consolidated chains."""
@@ -22,26 +26,39 @@ class LineageChainCombiner:
         Returns:
             (query_name, complete_chain_flow_in_depth_order)
         """
-        # Generate query name using sequence number
-        query_name = f"query_{seq_no}"
-        
-        chains = lineage_data.get('chains', {})
-        
-        # Get the complete flow sorted by depth
-        depth_flow = []
-        
-        for chain_key, chain_data in chains.items():
-            # Start with depth 0 (source table)
-            depth_flow.append((0, chain_key))
+        try:
+            # Generate query name using sequence number
+            query_name = f"query_{seq_no}"
+            logger.debug(f"Extracting table chain for {query_name}")
             
-            # Traverse dependencies to collect entities by depth
-            cls.collect_entities_by_depth(chain_data.get('dependencies', []), depth_flow)
-        
-        # Sort by depth and extract just the entity names
-        depth_flow.sort(key=lambda x: x[0])  # Sort by depth
-        complete_flow = [entity for depth, entity in depth_flow]
-        
-        return query_name, complete_flow
+            chains = lineage_data.get('chains', {})
+            
+            if not chains:
+                logger.warning(f"No chains found in lineage data for {query_name}")
+                return query_name, []
+            
+            # Get the complete flow sorted by depth
+            depth_flow = []
+            
+            for chain_key, chain_data in chains.items():
+                # Start with depth 0 (source table)
+                depth_flow.append((0, chain_key))
+                
+                # Traverse dependencies to collect entities by depth
+                cls.collect_entities_by_depth(chain_data.get('dependencies', []), depth_flow)
+            
+            # Sort by depth and extract just the entity names
+            depth_flow.sort(key=lambda x: x[0])  # Sort by depth
+            complete_flow = [entity for depth, entity in depth_flow]
+            
+            logger.info(f"Successfully extracted table chain for {query_name}: {len(complete_flow)} entities")
+            logger.debug(f"Complete flow for {query_name}: {' → '.join(complete_flow)}")
+            
+            return query_name, complete_flow
+            
+        except Exception as e:
+            logger.error(f"Failed to extract table chain from JSON for query_{seq_no}: {str(e)}", exc_info=True)
+            return f"query_{seq_no}", []
 
     @classmethod
     def collect_entities_by_depth(cls, dependencies: List[Dict], depth_flow: List[Tuple[int, str]]) -> None:
@@ -73,24 +90,43 @@ class LineageChainCombiner:
             - table_chains: {query_name: complete_chain_flow}  
             - chains_data: {query_name: original_lineage_json_data}
         """
+        logger.info(f"Starting analysis of {len(lineage_data_list)} lineage data files")
+        
+        if not lineage_data_list:
+            logger.warning("No lineage data provided for analysis")
+            return {}, {}
+        
         table_chains = {}
         chains_data = {}
         
-        print("🔍 STEP 1: Extracting Complete Table Chains from Each JSON")
-        print("=" * 70)
+        logger.info("STEP 1: Extracting Complete Table Chains from Each JSON")
         
-        for seq_no, data in enumerate(lineage_data_list, start=1):
-            query_name, complete_flow = cls.extract_table_chain_from_json(data, seq_no)
+        try:
+            for seq_no, data in enumerate(lineage_data_list, start=1):
+                if not isinstance(data, dict):
+                    logger.error(f"Invalid data type for sequence {seq_no}: expected dict, got {type(data)}")
+                    continue
+                
+                query_name, complete_flow = cls.extract_table_chain_from_json(data, seq_no)
+                
+                # Store both the table chain flow and original data
+                table_chains[query_name] = complete_flow
+                chains_data[query_name] = data  # Store complete original JSON data
+                
+                logger.info(f"Processed {query_name}: {' → '.join(complete_flow)}")
             
-            # Store both the table chain flow and original data
-            table_chains[query_name] = complete_flow
-            chains_data[query_name] = data  # Store complete original JSON data
+            logger.info(f"Successfully analyzed {len(table_chains)} table chains")
             
-            print(f"📄 {query_name}")
-            print(f"   Complete Flow: {' → '.join(complete_flow)}")
-            print()
-        
-        return table_chains, chains_data
+            # Warn about empty chains
+            empty_chains = [name for name, flow in table_chains.items() if not flow]
+            if empty_chains:
+                logger.warning(f"Found {len(empty_chains)} empty chains: {empty_chains}")
+            
+            return table_chains, chains_data
+            
+        except Exception as e:
+            logger.error(f"Failed to analyze table chains: {str(e)}", exc_info=True)
+            return table_chains, chains_data  # Return partial results
 
     @classmethod
     def identify_joinable_tables(cls, table_chains: Dict[str, List[str]]) -> Dict[str, Dict[str, List[str]]]:
@@ -103,44 +139,63 @@ class LineageChainCombiner:
         Returns:
             joinable_connections: {table_name: {"producer": query, "consumers": [queries]}}
         """
-        print("🔗 STEP 2 - Part 1: Identifying Joinable Tables (Producer→Consumer)")
-        print("=" * 70)
+        logger.info(f"Identifying joinable tables from {len(table_chains)} table chains")
         
-        # Separate producers and consumers for each table
-        table_producers = {}  # {table_name: query_that_produces_it}
-        table_consumers = {}  # {table_name: [queries_that_consume_it]}
+        if not table_chains:
+            logger.warning("No table chains provided for joinable table identification")
+            return {}
         
-        print("📊 Analyzing Producer-Consumer Relationships:")
+        logger.info("STEP 2 - Part 1: Identifying Joinable Tables (Producer→Consumer)")
         
-        for query_name, chain_flow in table_chains.items():
-            if not chain_flow:
-                continue
-                
-            # Source table (first in chain) - this query consumes it
-            source_table = chain_flow[0] 
-            if source_table != "QUERY_RESULT":
-                if source_table not in table_consumers:
-                    table_consumers[source_table] = []
-                table_consumers[source_table].append(query_name)
-                
-            # Target table (last in chain) - this query produces it  
-            target_table = chain_flow[-1]
-            if target_table != "QUERY_RESULT":
-                table_producers[target_table] = query_name
+        try:
+            # Separate producers and consumers for each table
+            table_producers = {}  # {table_name: query_that_produces_it}
+            table_consumers = {}  # {table_name: [queries_that_consume_it]}
             
-            print(f"📄 {query_name}: consumes '{source_table}' → produces '{target_table}'")
-        
-        # Build the data structure for Part 2 (but don't print connection analysis here)
-        joinable_connections = {}
-        for table_name, producer_query in table_producers.items():
-            if table_name in table_consumers:
-                consumer_queries = table_consumers[table_name]
-                joinable_connections[table_name] = {
-                    "producer": producer_query,
-                    "consumers": consumer_queries
-                }
-        
-        return joinable_connections
+            logger.info("Analyzing Producer-Consumer Relationships")
+            
+            for query_name, chain_flow in table_chains.items():
+                if not chain_flow:
+                    logger.warning(f"Empty chain flow for query: {query_name}")
+                    continue
+                    
+                # Source table (first in chain) - this query consumes it
+                source_table = chain_flow[0] 
+                if source_table != "QUERY_RESULT":
+                    if source_table not in table_consumers:
+                        table_consumers[source_table] = []
+                    table_consumers[source_table].append(query_name)
+                    
+                # Target table (last in chain) - this query produces it  
+                target_table = chain_flow[-1]
+                if target_table != "QUERY_RESULT":
+                    if target_table in table_producers:
+                        logger.warning(f"Table '{target_table}' is produced by multiple queries: {table_producers[target_table]} and {query_name}")
+                    table_producers[target_table] = query_name
+                
+                logger.debug(f"{query_name}: consumes '{source_table}' → produces '{target_table}'")
+            
+            # Build the data structure for Part 2 (but don't print connection analysis here)
+            joinable_connections = {}
+            for table_name, producer_query in table_producers.items():
+                if table_name in table_consumers:
+                    consumer_queries = table_consumers[table_name]
+                    joinable_connections[table_name] = {
+                        "producer": producer_query,
+                        "consumers": consumer_queries
+                    }
+                    logger.debug(f"Joinable connection found: {table_name} (producer: {producer_query}, consumers: {consumer_queries})")
+            
+            logger.info(f"Successfully identified {len(joinable_connections)} joinable connections")
+            
+            if not joinable_connections:
+                logger.warning("No joinable connections found - all queries may be independent")
+            
+            return joinable_connections
+            
+        except Exception as e:
+            logger.error(f"Failed to identify joinable tables: {str(e)}", exc_info=True)
+            return {}
 
     @classmethod
     def identify_joinable_query_chains(cls, joinable_connections: Dict[str, Dict[str, List[str]]], all_queries: List[str]) -> List[List[str]]:
@@ -155,44 +210,65 @@ class LineageChainCombiner:
         Returns:
             List of query chains
         """
-        print(f"\n🔗 STEP 2 - Part 2: Building Joinable Query Chains")
-        print("=" * 60)
+        logger.info(f"Building query chains from {len(joinable_connections)} joinable connections and {len(all_queries)} total queries")
         
-        chains = []
-        processed_edges = set()
+        logger.info("STEP 2 - Part 2: Building Joinable Query Chains")
         
-        # Process all producer-consumer relationships  
-        for table_name, connection in joinable_connections.items():
-            producer = connection["producer"]
-            consumers = connection["consumers"]
+        try:
+            chains = []
+            processed_edges = set()
             
-            for consumer in consumers:
-                edge_key = f"{producer}→{consumer}"
-                if edge_key not in processed_edges:
-                    # Build a complete chain through this specific producer-consumer connection
-                    chain = cls.build_chain_through_connection(producer, consumer, joinable_connections)
-                    chains.append(chain)
-                    
-                    # Mark all edges in this chain as processed
-                    for i in range(len(chain) - 1):
-                        processed_edges.add(f"{chain[i]}→{chain[i+1]}")
-                    
-                    print(f"📋 Chain: {' → '.join(chain)}")
-        
-        # Find unconnected queries
-        all_connected = set()
-        for connection in joinable_connections.values():
-            all_connected.add(connection["producer"])
-            all_connected.update(connection["consumers"])
-        
-        unconnected_queries = set(all_queries) - all_connected
-        
-        # Add unconnected queries as single-query chains
-        for query in sorted(unconnected_queries):
-            chains.append([query])
-            print(f"📋 Chain: {query}")
-        
-        return chains
+            # Process all producer-consumer relationships  
+            for table_name, connection in joinable_connections.items():
+                producer = connection["producer"]
+                consumers = connection["consumers"]
+                
+                for consumer in consumers:
+                    edge_key = f"{producer}→{consumer}"
+                    if edge_key not in processed_edges:
+                        try:
+                            # Build a complete chain through this specific producer-consumer connection
+                            chain = cls.build_chain_through_connection(producer, consumer, joinable_connections)
+                            chains.append(chain)
+                            
+                            # Mark all edges in this chain as processed
+                            for i in range(len(chain) - 1):
+                                processed_edges.add(f"{chain[i]}→{chain[i+1]}")
+                            
+                            logger.info(f"Chain: {' → '.join(chain)}")
+                            logger.debug(f"Built chain with {len(chain)} queries: {chain}")
+                            
+                        except Exception as e:
+                            logger.error(f"Failed to build chain through connection {producer}→{consumer}: {str(e)}")
+            
+            # Find unconnected queries
+            all_connected = set()
+            for connection in joinable_connections.values():
+                all_connected.add(connection["producer"])
+                all_connected.update(connection["consumers"])
+            
+            unconnected_queries = set(all_queries) - all_connected
+            
+            if unconnected_queries:
+                logger.info(f"Found {len(unconnected_queries)} unconnected queries: {sorted(unconnected_queries)}")
+            
+            # Add unconnected queries as single-query chains
+            for query in sorted(unconnected_queries):
+                chains.append([query])
+                logger.info(f"Chain: {query}")
+            
+            logger.info(f"Successfully built {len(chains)} query chains")
+            
+            # Log chain statistics
+            chain_lengths = [len(chain) for chain in chains]
+            if chain_lengths:
+                logger.info(f"Chain statistics: min={min(chain_lengths)}, max={max(chain_lengths)}, avg={sum(chain_lengths)/len(chain_lengths):.1f}")
+            
+            return chains
+            
+        except Exception as e:
+            logger.error(f"Failed to identify joinable query chains: {str(e)}", exc_info=True)
+            return []
 
     @classmethod
     def build_chain_through_connection(cls, producer: str, consumer: str, joinable_connections: Dict[str, Dict[str, List[str]]]) -> List[str]:
@@ -299,21 +375,48 @@ class LineageChainCombiner:
         Returns:
             List of combined lineage JSON objects
         """
-        print(f"\n🔗 STEP 3: Creating Combined Lineage JSON with Connection Point Merging")
-        print("=" * 60)
+        logger.info(f"Creating combined lineage JSON for {len(query_chains)} query chains")
+        
+        if not query_chains:
+            logger.warning("No query chains provided for combined lineage creation")
+            return []
+        
+        logger.info("STEP 3: Creating Combined Lineage JSON with Connection Point Merging")
         
         combined_lineages = []
         
-        for chain_idx, chain in enumerate(query_chains, 1):
-            print(f"📋 Processing Chain {chain_idx}: {' → '.join(chain)}")
+        try:
+            for chain_idx, chain in enumerate(query_chains, 1):
+                if not chain:
+                    logger.warning(f"Empty chain at index {chain_idx}, skipping")
+                    continue
+                
+                logger.info(f"Processing Chain {chain_idx}: {' → '.join(chain)}")
+                logger.debug(f"Processing chain {chain_idx} with {len(chain)} queries: {chain}")
+                
+                try:
+                    # Create combined lineage for this chain with proper merging
+                    combined_lineage = cls.create_chain_lineage(chain, chains_data, table_chains, chain_idx, joinable_connections)
+                    combined_lineages.append(combined_lineage)
+                    
+                    entities_count = len(combined_lineage.get('chains', {}))
+                    logger.info(f"Combined lineage created with {entities_count} entities")
+                    logger.debug(f"Successfully created combined lineage for chain {chain_idx} with {entities_count} entities")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to create combined lineage for chain {chain_idx}: {str(e)}", exc_info=True)
+                    continue
             
-            # Create combined lineage for this chain with proper merging
-            combined_lineage = cls.create_chain_lineage(chain, chains_data, table_chains, chain_idx, joinable_connections)
-            combined_lineages.append(combined_lineage)
+            logger.info(f"Successfully created {len(combined_lineages)} combined lineage objects")
             
-            print(f"   ✅ Combined lineage created with {len(combined_lineage['chains'])} entities")
-        
-        return combined_lineages
+            if len(combined_lineages) < len(query_chains):
+                logger.warning(f"Created fewer combined lineages ({len(combined_lineages)}) than input chains ({len(query_chains)})")
+            
+            return combined_lineages
+            
+        except Exception as e:
+            logger.error(f"Failed to create combined lineage JSON: {str(e)}", exc_info=True)
+            return combined_lineages  # Return partial results
 
     @classmethod
     def create_chain_lineage(cls, query_chain: List[str], chains_data: Dict[str, Dict], table_chains: Dict[str, List[str]], chain_idx: int, joinable_connections: Dict[str, Dict] = None) -> Dict:
@@ -480,7 +583,7 @@ class LineageChainCombiner:
             consumer_query = connection_info.get("consumer_query")
             
             if producer_query and consumer_query and consumer_query in chains_data:
-                print(f"      🔀 Merging connection point: {dep_entity} ({producer_query} → {consumer_query})")
+                logger.debug(f"Merging connection point: {dep_entity} ({producer_query} → {consumer_query})")
                 
                 # Get the consumer query's processing chain for this connection point
                 consumer_data = chains_data[consumer_query]
@@ -494,7 +597,7 @@ class LineageChainCombiner:
                     for consumer_dep in consumer_dependencies:
                         if consumer_dep.get("entity") != dep_entity:
                             # This is the processing step - extend the connection point
-                            print(f"        Extending connection {dep_entity} with 1 consumer dependencies")
+                            logger.debug(f"Extending connection {dep_entity} with 1 consumer dependencies")
                             
                             # Add merged metadata markers
                             merged_metadata = copy.deepcopy(dependency.get("metadata", {}))
@@ -547,7 +650,7 @@ class LineageChainCombiner:
         if not joinable_connections:
             return connection_points
         
-        print(f"    Analyzing connection points for chain: {' → '.join(query_chain)}")
+        logger.debug(f"Analyzing connection points for chain: {' → '.join(query_chain)}")
         
         # Check each consecutive pair of queries in the chain
         for i in range(len(query_chain) - 1):
@@ -575,10 +678,10 @@ class LineageChainCombiner:
                             "consumer_query": next_query,
                             "connection_table": table_name
                         }
-                        print(f"      ✅ Found connection point: {table_name} ({producer} → {next_query})")
+                        logger.debug(f"Found connection point: {table_name} ({producer} → {next_query})")
                         break
         
-        print(f"    Found {len(connection_points)} connection points: {list(connection_points.keys())}")
+        logger.debug(f"Found {len(connection_points)} connection points: {list(connection_points.keys())}")
         return connection_points
 
     @classmethod
@@ -615,30 +718,49 @@ class LineageChainCombiner:
         Returns:
             List of combined lineage JSON objects
         """
-        # Step 1: Extract complete table chains and store original data
-        table_chains, chains_data = cls.analyze_all_table_chains(lineage_data_list)
+        logger.info("=== Starting complete lineage data processing ===")
+        logger.info(f"Processing {len(lineage_data_list)} lineage data files")
         
-        if not table_chains:
-            print("❌ No table chains found.")
+        if not lineage_data_list:
+            logger.error("No lineage data provided for processing")
             return []
         
-        print("\n📋 STEP 1 SUMMARY:")
-        print("=" * 70)
-        print(f"Total queries analyzed: {len(table_chains)}")
-        print("\nComplete flows extracted:")
-        for query_name, flow in table_chains.items():
-            print(f"   {query_name}: {' → '.join(flow)}")
-        
-        print(f"\n📦 Original chains data stored for {len(chains_data)} queries")
-        
-        # Step 2 - Part 1: Identify joinable tables (producer→consumer relationships)
-        joinable_connections = cls.identify_joinable_tables(table_chains)
-        
-        # Step 2 - Part 2: Build joinable query chains
-        all_queries = list(table_chains.keys())  # Get all query names dynamically
-        joinable_query_chains = cls.identify_joinable_query_chains(joinable_connections, all_queries)
-        
-        # Step 3: Create combined lineage JSON for each query chain with proper merging
-        combined_lineages = cls.create_combined_lineage_json(joinable_query_chains, chains_data, table_chains, joinable_connections)
-        
-        return combined_lineages
+        try:
+            # Step 1: Extract complete table chains and store original data
+            logger.info("Step 1: Analyzing table chains")
+            table_chains, chains_data = cls.analyze_all_table_chains(lineage_data_list)
+            
+            if not table_chains:
+                logger.error("No table chains found after analysis")
+                return []
+            
+            logger.info(f"STEP 1 SUMMARY: Total queries analyzed: {len(table_chains)}")
+            logger.info("Complete flows extracted:")
+            for query_name, flow in table_chains.items():
+                logger.info(f"   {query_name}: {' → '.join(flow)}")
+            
+            logger.info(f"Original chains data stored for {len(chains_data)} queries")
+            
+            # Step 2 - Part 1: Identify joinable tables (producer→consumer relationships)
+            logger.info("Step 2 Part 1: Identifying joinable tables")
+            joinable_connections = cls.identify_joinable_tables(table_chains)
+            
+            # Step 2 - Part 2: Build joinable query chains
+            logger.info("Step 2 Part 2: Building joinable query chains")
+            all_queries = list(table_chains.keys())  # Get all query names dynamically
+            joinable_query_chains = cls.identify_joinable_query_chains(joinable_connections, all_queries)
+            
+            if not joinable_query_chains:
+                logger.warning("No joinable query chains found")
+                return []
+            
+            # Step 3: Create combined lineage JSON for each query chain with proper merging
+            logger.info("Step 3: Creating combined lineage JSON")
+            combined_lineages = cls.create_combined_lineage_json(joinable_query_chains, chains_data, table_chains, joinable_connections)
+            
+            logger.info(f"=== Successfully completed lineage processing: {len(combined_lineages)} combined lineages created ===")
+            return combined_lineages
+            
+        except Exception as e:
+            logger.error(f"Critical failure in complete lineage processing: {str(e)}", exc_info=True)
+            return []

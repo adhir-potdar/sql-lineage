@@ -53,8 +53,10 @@ class SQLLineageLogger:
         log_level = level or os.getenv('SQL_LINEAGE_LOG_LEVEL', 'DEBUG').upper()
         
         # Get log file from environment variable or parameter, default to /tmp/sql_lineage.log
-        if not log_file:
-            log_file = os.getenv('SQL_LINEAGE_LOG_FILE', '/tmp/sql_lineage.log')
+        #if not log_file:
+        #    log_file = os.getenv('SQL_LINEAGE_LOG_FILE', '/tmp/sql_lineage.log')
+        #always want to log at the standarad out so that it can be streamed to the logging tools & modules.
+        log_file =  None
         
         # Default format string
         if not format_string:
