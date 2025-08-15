@@ -295,7 +295,14 @@ def parse_qualified_name(qualified_name: str) -> Dict[str, Optional[str]]:
     
     parts = qualified_name.split('.')
     
-    if len(parts) == 3:
+    if len(parts) == 4:
+        # Handle catalog.schema.table.column format
+        return {
+            "schema": f"{clean_column_name(parts[0])}.{clean_column_name(parts[1])}",
+            "table": clean_column_name(parts[2]), 
+            "column": clean_column_name(parts[3])
+        }
+    elif len(parts) == 3:
         return {
             "schema": clean_column_name(parts[0]),
             "table": clean_column_name(parts[1]), 
@@ -457,6 +464,12 @@ def is_column_from_table(column_name: str, table_name: str, sql: str = None, dia
             table_name_clean = table_name_base.strip('"').strip("'")
             
             if column_table_clean.lower() == table_name_clean.lower():
+                return True
+            
+            # Also handle cases where table_name contains full qualified name
+            # and column_table is an alias (e.g. pmf vs ins_sql.ins_fin.policy_monthly_financials)
+            if table_name.lower().endswith('.' + column_table_clean.lower()) or \
+               column_table_clean.lower() in table_name.lower():
                 return True
     
     # For unqualified column names, we need to check if they're in subqueries
@@ -772,11 +785,17 @@ def extract_table_columns_from_sql(sql: str, table_name: str, dialect: str = "tr
                     # Check if it's an alias
                     alias_mapping = build_alias_to_table_mapping(sql, dialect)
                     actual_table = alias_mapping.get(table_ref.lower())
-                    if actual_table == table_name:
-                        columns.add(column_name)
+                    if actual_table:
+                        # Remove quotes from actual_table for comparison
+                        actual_table_clean = actual_table.strip('"').replace('".', '.').replace('"', '')
+                        if actual_table_clean == table_name or actual_table == table_name:
+                            columns.add(column_name)
                     else:
                         # Handle three-part table names: if table_name ends with table_ref, it's a match
                         # Example: table_name="dbxadmin40test"."trino_demo"."orders" and table_ref="orders"
+                        # Also handle cases like ins_sql.ins_fin.policy_monthly_financials matching pmf
+                        if table_name.lower().endswith('.' + table_ref.lower()) or table_name.lower().endswith(table_ref.lower()):
+                            columns.add(column_name)
                         if table_name.endswith(f'"."{table_ref}"') or table_name.endswith(f'.{table_ref}'):
                             columns.add(column_name)
     

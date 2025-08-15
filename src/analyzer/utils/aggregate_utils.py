@@ -219,16 +219,53 @@ def extract_upstream_from_aggregate(aggregate_expr: str, sql: str) -> List[str]:
     matches = re.findall(func_pattern, aggregate_expr, re.IGNORECASE)
     
     for match in matches:
+        # For simple expressions like "column" or "table.column", use original logic
         col_ref = match.strip()
         if col_ref == '*':
             # COUNT(*) - doesn't reference specific columns
             continue
-        elif '.' in col_ref:
-            # Qualified column reference (table.column)
-            upstream.append(col_ref)
+        elif _is_simple_column_reference(col_ref):
+            # Simple column reference - use original logic
+            if '.' in col_ref:
+                # Qualified column reference (table.column)
+                upstream.append(col_ref)
+            else:
+                # Unqualified column - try to infer table from SQL context
+                # For now, just use the column name
+                upstream.append(col_ref)
         else:
-            # Unqualified column - try to infer table from SQL context
-            # For now, just use the column name
-            upstream.append(col_ref)
+            # Complex expression like "a - b + c" - extract individual columns
+            col_refs = _extract_columns_from_complex_expression(col_ref)
+            upstream.extend(col_refs)
     
     return upstream if upstream else [f"QUERY_RESULT.{aggregate_expr}"]
+
+
+def _is_simple_column_reference(expression: str) -> bool:
+    """Check if expression is a simple column reference without operators."""
+    # Simple column reference has no operators like +, -, *, /, etc.
+    operators = ['+', '-', '*', '/', '(', ')', ' ']
+    return not any(op in expression for op in operators)
+
+
+def _extract_columns_from_complex_expression(expression: str) -> List[str]:
+    """Extract column references from complex expressions like 'a - b + c * d'."""
+    columns = []
+    
+    # Pattern to match column references (with optional table prefix)
+    # Handles: table.column, alias.column, column
+    col_pattern = r'\b([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)\b'
+    potential_cols = re.findall(col_pattern, expression)
+    
+    for col_ref in potential_cols:
+        # Apply the same logic as original: add qualified and unqualified columns
+        if '.' in col_ref:
+            # Qualified column reference (table.column)
+            columns.append(col_ref)
+        else:
+            # Unqualified column - add directly (same as original logic)
+            # Filter out obvious non-columns (pure numbers)
+            if not col_ref.isdigit():
+                columns.append(col_ref)
+    
+    return columns

@@ -419,7 +419,6 @@ class ChainBuilderEngine:
             
             # Get select columns from parsing - handle all SELECT statements including UNIONs
             select_columns = []
-            
             # Collect all SELECT statements (handles UNION queries properly)
             select_stmts = list(parsed.find_all(sqlglot.exp.Select))
             
@@ -470,6 +469,7 @@ class ChainBuilderEngine:
         except:
             select_columns = []
             alias_to_table = {}
+        
         
         # Import required utility functions
         from ..utils.sql_parsing_utils import extract_clean_column_name
@@ -601,7 +601,9 @@ class ChainBuilderEngine:
                                             
                                             # Check if this column expression references this entity's table alias
                                             for alias, table in alias_to_table.items():
-                                                if table == entity_name and f'{alias}.' in raw_expression:
+                                                # Remove quotes from table name for comparison
+                                                table_clean = table.strip('"').replace('".', '.').replace('"', '')
+                                                if (table_clean == entity_name or table == entity_name) and f'{alias}.' in raw_expression:
                                                     column_belongs_to_this_table = True
                                                     break
                                             
@@ -704,12 +706,42 @@ class ChainBuilderEngine:
                                                 }
                                             # Check if this is an aggregate function and add transformation details
                                             elif is_aggregate_function(raw_expression):
+                                                from ..utils.aggregate_utils import extract_upstream_from_aggregate
+                                                
                                                 function_type = extract_function_type(raw_expression)
                                                 # Clean source expression: remove AS clause
                                                 source_expr = raw_expression.split(' AS ')[0].strip() if ' AS ' in raw_expression.upper() else raw_expression
+                                                
+                                                # Extract actual upstream columns from the aggregate expression
+                                                upstream_cols = extract_upstream_from_aggregate(raw_expression, sql)
+                                                # Convert alias references to full table names
+                                                resolved_upstream = []
+                                                for upstream_col in upstream_cols:
+                                                    if '.' in upstream_col:
+                                                        # Extract alias and column parts
+                                                        parts = upstream_col.split('.')
+                                                        if len(parts) == 2:
+                                                            alias, col = parts
+                                                            # Resolve alias to full table name
+                                                            if alias in alias_to_table:
+                                                                table_clean = alias_to_table[alias].strip('"').replace('".', '.').replace('"', '')
+                                                                resolved_upstream.append(f"{table_clean}.{col}")
+                                                            else:
+                                                                resolved_upstream.append(upstream_col)
+                                                        else:
+                                                            resolved_upstream.append(upstream_col)
+                                                    else:
+                                                        # Unqualified column - use current entity
+                                                        resolved_upstream.append(f"{entity_name}.{upstream_col}")
+                                                
+                                                # Update upstream with actual source columns instead of calculated column
+                                                if resolved_upstream:
+                                                    column_info["upstream"] = resolved_upstream
+                                                    column_info["type"] = "CALCULATED"  # More accurate than DIRECT
+                                                
                                                 column_info["transformation"] = {
                                                     "source_expression": source_expr,
-                                                    "transformation_type": "AGGREGATE",
+                                                    "transformation_type": "AGGREGATE", 
                                                     "function_type": function_type
                                                 }
                                             
@@ -902,8 +934,9 @@ class ChainBuilderEngine:
                                                     clean_col = col_ref.split('.')[-1] if '.' in col_ref else col_ref
                                                     source_columns.add(clean_col)
                 
-                # If no columns found in transformations, extract from SELECT columns  
-                if not source_columns and sql:
+                # Always extract columns from SELECT expressions (including aggregate expressions)
+                # This ensures columns used in complex expressions like SUM(a - b + c) are captured
+                if sql:
                     # Extract columns that belong to this source table from SELECT statement
                     from ..utils.sql_parsing_utils import extract_table_columns_from_sql
                     table_columns_in_select = extract_table_columns_from_sql(sql, entity_name, self.dialect)
