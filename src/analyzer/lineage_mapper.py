@@ -421,11 +421,23 @@ class LineageEventMapper:
             
             # Create lineage event from parent to current entity
             if parent_entity != entity_name:  # Avoid self-references
+                # Convert all non-standard types to TABLE for Beanstalk API compatibility
+                def normalize_entity_type(entity_type_str: str) -> str:
+                    """Convert entity types to Beanstalk API compatible types."""
+                    entity_type_lower = entity_type_str.lower()
+                    if entity_type_lower in ["cte", "query_result", "derived_table"]:
+                        return "TABLE"
+                    else:
+                        return entity_type_str.upper()
+                
+                normalized_parent_type = normalize_entity_type(parent_type)
+                normalized_entity_type = normalize_entity_type(entity_type)
+                
                 event = self.create_lineage_event(
                     source_table=parent_entity,
-                    source_type=parent_type.upper(),
+                    source_type=normalized_parent_type,
                     target_table=entity_name,
-                    target_type=entity_type.upper(),
+                    target_type=normalized_entity_type,
                     metadata=metadata,
                     tenant_id=tenant_id,
                     association_type=association_type,
