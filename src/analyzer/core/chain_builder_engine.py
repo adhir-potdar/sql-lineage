@@ -511,8 +511,11 @@ class ChainBuilderEngine:
             if batch_cache_key not in self._column_cache:
                 all_table_columns_batch = extract_table_columns_from_sql_batch(sql, entity_names, self.dialect)
                 self._column_cache[batch_cache_key] = all_table_columns_batch
+                # Cache for later source column extraction
+                self._cached_table_columns_batch = all_table_columns_batch
             else:
                 all_table_columns_batch = self._column_cache[batch_cache_key]
+                self._cached_table_columns_batch = all_table_columns_batch
             
             parse_time = time.time() - parse_start
             self.logger.debug(f"SQL parsing and batch preprocessing completed in {parse_time:.3f} seconds")
@@ -602,12 +605,19 @@ class ChainBuilderEngine:
         # PERFORMANCE OPTIMIZATION: Pre-compute expensive operations once
         main_processing_start = time.time()
         
+        # PERFORMANCE OPTIMIZATION: Pre-compute ALL expensive operations once
+        precompute_start = time.time()
+        
         # Pre-compute query characteristics to avoid repeated analysis
         is_union_query = 'UNION' in sql.upper()
         needs_aggregate_processing = False
         unique_source_tables = set()
         is_join_query = False
         primary_table = None
+        
+        # Pre-compute SQL parsing results (avoid repeated parsing in entity loop)
+        cached_parsed_sql = None
+        cached_primary_table_extraction = None
         
         try:
             # Extract query characteristics once
@@ -619,8 +629,9 @@ class ChainBuilderEngine:
             from ..utils.aggregate_utils import query_has_aggregates
             needs_aggregate_processing = query_has_aggregates(sql)
             
-            # Determine primary table once
+            # MAJOR OPTIMIZATION: Pre-parse SQL once for primary table extraction (eliminating repeated parsing)
             if parsed:
+                cached_parsed_sql = parsed  # Use already parsed SQL
                 from_clause = parsed.find(sqlglot.exp.From)
                 if from_clause and hasattr(from_clause.this, 'name'):
                     table = from_clause.this
@@ -630,17 +641,62 @@ class ChainBuilderEngine:
                         primary_table = f"{table.catalog}.{table.db}.{table.name}"
                     else:
                         primary_table = str(table.name)
+                
+                # Cache the primary table extraction result
+                cached_primary_table_extraction = primary_table
         except Exception as e:
             self.logger.debug(f"Query characteristic analysis failed: {e}")
         
+        # PERFORMANCE OPTIMIZATION: Pre-analyze select columns for expensive operations
+        preanalyzed_columns = {}
+        if select_columns:
+            for i, sel_col in enumerate(select_columns):
+                raw_expression = sel_col.get('raw_expression', '')
+                preanalyzed_columns[i] = {
+                    'is_subquery': is_subquery_expression(raw_expression, self.dialect),
+                    'is_aggregate': is_aggregate_function(raw_expression),
+                    'raw_expression': raw_expression,
+                    'column_name': sel_col.get('column_name'),
+                    'source_table': sel_col.get('source_table')
+                }
+        
+        precompute_time = time.time() - precompute_start
+        self.logger.debug(f"Pre-computation completed in {precompute_time:.3f} seconds")
+        
         processed_entities = 0
+        
+        # PERFORMANCE OPTIMIZATION: Step 2 - Batch Processing
+        # Instead of nested entity->dependency loops, batch process all QUERY_RESULT dependencies
+        batch_start = time.time()
+        
+        # Collect all QUERY_RESULT and CTAS dependencies for batch processing
+        query_result_deps = []
+        ctas_deps = []
+        entity_to_deps = {}  # Map entity to its dependencies for efficient lookup
+        
         for entity_name, entity_data in chains.items():
             if not isinstance(entity_data, dict):
                 continue
-            
-            # Handle QUERY_RESULT and CTAS dependencies specially
+                
+            entity_to_deps[entity_name] = []
             for dep in entity_data.get('dependencies', []):
                 dep_entity = dep.get('entity')
+                if dep_entity == 'QUERY_RESULT':
+                    query_result_deps.append((entity_name, dep))
+                    entity_to_deps[entity_name].append(dep)
+                elif is_ctas_target_table(sql, dep_entity):
+                    ctas_deps.append((entity_name, dep))
+                    entity_to_deps[entity_name].append(dep)
+        
+        self.logger.debug(f"Batch processing: {len(query_result_deps)} QUERY_RESULT deps, {len(ctas_deps)} CTAS deps")
+        
+        # BATCH PROCESS: Handle all QUERY_RESULT dependencies together
+        if query_result_deps or ctas_deps:
+            # Process all dependencies in batches
+            for entity_name, dep in query_result_deps + ctas_deps:
+                dep_entity = dep.get('entity')
+                
+                # Use existing logic but without the nested loop overhead
                 if dep_entity == 'QUERY_RESULT' or is_ctas_target_table(sql, dep_entity):
                     # Get existing columns to avoid duplication
                     existing_metadata = dep.get('metadata', {})
@@ -669,38 +725,28 @@ class ChainBuilderEngine:
                         needs_aggregate_processing = query_has_aggregates(sql)
                         
                         if needs_aggregate_processing or is_join_query or is_union_query:
-                            # Use same logic as original analyzer
-                            inferred_columns = infer_query_result_columns_simple(sql, select_columns)
-                            has_table_prefixes = any('.' in col.get('name', '') for col in inferred_columns)
+                            # PERFORMANCE OPTIMIZATION: Batch compute inferred columns once
+                            if not hasattr(self, '_cached_inferred_columns'):
+                                self._cached_inferred_columns = infer_query_result_columns_simple(sql, select_columns)
+                                self._cached_has_table_prefixes = any('.' in col.get('name', '') for col in self._cached_inferred_columns)
+                            
+                            inferred_columns = self._cached_inferred_columns
+                            has_table_prefixes = self._cached_has_table_prefixes
                             
                             # Special handling for QUERY_RESULT: Add all SELECT columns with transformation details
                             # Only add to the primary table (FROM clause) or the table that most SELECT expressions reference
                             if dep_entity == 'QUERY_RESULT':
-                                # For UNION queries, filter select_columns to only those from this entity
+                                # PERFORMANCE OPTIMIZATION: Pre-filter select columns by entity
                                 if is_union_query:
-                                    entity_select_columns = [col for col in select_columns if col.get('source_table') == entity_name]
+                                    entity_cache_key = f"union_cols_{entity_name}"
+                                    if entity_cache_key not in self._expression_analysis_cache:
+                                        self._expression_analysis_cache[entity_cache_key] = [col for col in select_columns if col.get('source_table') == entity_name]
+                                    entity_select_columns = self._expression_analysis_cache[entity_cache_key]
                                 else:
                                     entity_select_columns = select_columns
                                 
-                                # Determine primary table from FROM clause
-                                primary_table = None
-                                try:
-                                    parsed_sql = sqlglot.parse_one(sql, dialect=self.dialect)
-                                    from_clause = parsed_sql.find(sqlglot.exp.From)
-                                    if from_clause and hasattr(from_clause.this, 'name'):
-                                        # Extract full qualified table name including database part
-                                        table = from_clause.this
-                                        if table.db:
-                                            # Handle database.table naming (e.g., "ecommerce.users")
-                                            primary_table = f"{table.db}.{table.name}"
-                                        elif table.catalog and table.db:
-                                            # Handle three-part naming (e.g., "catalog.schema.table") 
-                                            primary_table = f"{table.catalog}.{table.db}.{table.name}"
-                                        else:
-                                            # Handle simple table naming (e.g., "users")
-                                            primary_table = str(table.name)
-                                except:
-                                    pass
+                                # PERFORMANCE OPTIMIZATION: Use pre-computed primary table (avoid repeated SQL parsing)
+                                primary_table = cached_primary_table_extraction
                                 
                                 # For aggregate queries, process columns for all tables but filter correctly later
                                 # For JOIN/UNION queries, add to the main table that most SELECT expressions reference
@@ -717,27 +763,54 @@ class ChainBuilderEngine:
                                     should_add_columns = (entity_name == primary_table)
                                 
                                 if should_add_columns:
-                                    for sel_col in entity_select_columns:
-                                        raw_expression = sel_col.get('raw_expression')
-                                        column_name = sel_col.get('column_name')
-                                        source_table = sel_col.get('source_table')
+                                    # PERFORMANCE OPTIMIZATION: Batch process columns instead of individual processing
+                                    batch_cache_key = f"batch_columns_{entity_name}_{hash(tuple(sel_col.get('raw_expression', '') for sel_col in entity_select_columns))}"
+                                    
+                                    if batch_cache_key not in self._column_cache:
+                                        # Batch process all columns for this entity at once
+                                        batch_processed_columns = []
                                         
+                                        for i, sel_col in enumerate(entity_select_columns):
+                                            # Get pre-analyzed data to avoid expensive function calls
+                                            preanalyzed = preanalyzed_columns.get(i, {})
+                                            raw_expression = preanalyzed.get('raw_expression', sel_col.get('raw_expression'))
+                                            column_name = preanalyzed.get('column_name', sel_col.get('column_name'))
+                                            source_table = preanalyzed.get('source_table', sel_col.get('source_table'))
+                                            is_subquery_expr = preanalyzed.get('is_subquery', False)
+                                            is_aggregate_expr = preanalyzed.get('is_aggregate', False)
+                                            
+                                            batch_processed_columns.append({
+                                                'raw_expression': raw_expression,
+                                                'column_name': column_name,
+                                                'source_table': source_table,
+                                                'is_subquery': is_subquery_expr,
+                                                'is_aggregate': is_aggregate_expr,
+                                                'index': i
+                                            })
+                                        
+                                        self._column_cache[batch_cache_key] = batch_processed_columns
+                                    
+                                    # Use batch processed columns
+                                    for col_data in self._column_cache[batch_cache_key]:
+                                        raw_expression = col_data['raw_expression']
+                                        column_name = col_data['column_name']
+                                        source_table = col_data['source_table']
+                                        is_subquery_expr = col_data['is_subquery']
+                                        is_aggregate_expr = col_data['is_aggregate']
                                         
                                         # Skip subquery columns for entities that don't match the subquery's source table
-                                        if (is_subquery_expression(raw_expression, self.dialect) and 
-                                            source_table != entity_name):
+                                        if (is_subquery_expr and source_table != entity_name):
                                             continue
                                         
                                         # Skip individual aggregate functions that are part of subqueries
-                                        if (is_aggregate_function(raw_expression) and 
-                                            not is_subquery_expression(raw_expression, self.dialect) and
-                                            source_table != entity_name):
+                                        if (is_aggregate_expr and not is_subquery_expr and source_table != entity_name):
                                             # Check if this aggregate function is part of a subquery by looking at other columns
                                             skip_aggregate = False
-                                            for other_col in entity_select_columns:
-                                                other_expr = other_col.get('raw_expression', '')
-                                                if (is_subquery_expression(other_expr, self.dialect) and 
-                                                    raw_expression in other_expr):
+                                            for j, other_col in enumerate(entity_select_columns):
+                                                other_preanalyzed = preanalyzed_columns.get(j, {})
+                                                other_expr = other_preanalyzed.get('raw_expression', other_col.get('raw_expression', ''))
+                                                other_is_subquery = other_preanalyzed.get('is_subquery', False)
+                                                if (other_is_subquery and raw_expression in other_expr):
                                                     skip_aggregate = True
                                                     print(f"DEBUG: Skipping aggregate '{raw_expression}' as it's part of subquery '{other_expr[:50]}...'")
                                                     break
@@ -754,23 +827,24 @@ class ChainBuilderEngine:
                                             # Check if this column expression references this entity's table alias (optimized)
                                             column_belongs_to_this_table = self._optimize_alias_matching(raw_expression, alias_to_table, entity_name)
                                             
+                                            # PERFORMANCE OPTIMIZATION: Use pre-analyzed aggregate detection
                                             # Special handling for aggregate functions without table prefixes (like COUNT(*))
                                             # These should belong to the primary table
-                                            if not column_belongs_to_this_table and is_aggregate_function(raw_expression):
+                                            if not column_belongs_to_this_table and is_aggregate_expr:
                                                 # Check if no specific table alias is referenced (like COUNT(*))
                                                 has_table_reference = any(f'{alias}.' in raw_expression for alias in alias_to_table.keys())
                                                 if not has_table_reference and entity_name == primary_table:
                                                     column_belongs_to_this_table = True
                                                     
                                             # Handle direct column references (non-aggregate) (optimized)
-                                            if not column_belongs_to_this_table and not is_aggregate_function(raw_expression):
+                                            if not column_belongs_to_this_table and not is_aggregate_expr:
                                                 # For columns like "u.user_id", assign to the table whose alias is referenced
                                                 column_belongs_to_this_table = self._optimize_alias_matching(raw_expression, alias_to_table, entity_name)
                                         
                                         elif is_join_query or is_union_query:
                                             # For JOIN/UNION queries without aggregates
                                             # FIRST: Check if this is a subquery expression - these should only belong to their source table
-                                            if is_subquery_expression(raw_expression, self.dialect):
+                                            if is_subquery_expr:
                                                 from ..utils.sql_parsing_utils import extract_tables_from_subquery
                                                 subquery_tables = extract_tables_from_subquery(raw_expression, self.dialect)
                                                 column_belongs_to_this_table = entity_name in subquery_tables
@@ -778,9 +852,10 @@ class ChainBuilderEngine:
                                                 # SECOND: Check if this column expression references this entity's table alias (optimized)
                                                 column_belongs_to_this_table = self._optimize_alias_matching(raw_expression, alias_to_table, entity_name)
                                             
+                                            # PERFORMANCE OPTIMIZATION: Use pre-analyzed aggregate detection
                                             # Special handling for aggregate functions without table prefixes (like COUNT(*))
                                             # These should belong to the primary table
-                                            if not column_belongs_to_this_table and is_aggregate_function(raw_expression):
+                                            if not column_belongs_to_this_table and is_aggregate_expr:
                                                 if entity_name == primary_table:
                                                     column_belongs_to_this_table = True
                                             
@@ -806,10 +881,11 @@ class ChainBuilderEngine:
                                         # Extract clean name (prefer alias over raw column name)
                                         clean_name = extract_clean_column_name(raw_expression, column_name)
                                         
+                                        # PERFORMANCE OPTIMIZATION: Use pre-analyzed aggregate detection
                                         # For non-aggregate columns, use the raw expression format (e.g., "u.department")
                                         # For aggregate columns, use clean name (e.g., "employee_count")
                                         # For UNION queries, use the output column names (aliases)
-                                        if is_aggregate_function(raw_expression):
+                                        if is_aggregate_expr:
                                             display_name = clean_name
                                         elif is_union_query:
                                             # For UNION queries, use the output column name (alias)
@@ -833,8 +909,9 @@ class ChainBuilderEngine:
                                                 "type": "DIRECT"
                                             }
                                             
+                                            # PERFORMANCE OPTIMIZATION: Use pre-analyzed column type detection
                                             # Check if this is a subquery first (before checking for aggregates)
-                                            if is_subquery_expression(raw_expression, self.dialect):
+                                            if is_subquery_expr:
                                                 from ..utils.sql_parsing_utils import extract_tables_from_subquery
                                                 subquery_tables = extract_tables_from_subquery(raw_expression, self.dialect)
                                                 if subquery_tables:
@@ -846,7 +923,7 @@ class ChainBuilderEngine:
                                                     "function_type": "SUBQUERY"
                                                 }
                                             # Check if this is an aggregate function and add transformation details
-                                            elif is_aggregate_function(raw_expression):
+                                            elif is_aggregate_expr:
                                                 from ..utils.aggregate_utils import extract_upstream_from_aggregate
                                                 
                                                 function_type = extract_function_type(raw_expression)
@@ -916,7 +993,7 @@ class ChainBuilderEngine:
                                             if col_name and col_name not in existing_column_names:
                                                 table_columns.append(subquery_col)
                                                 existing_column_names.add(col_name)
-                                    elif source_table is None and is_aggregate_function(raw_expression):
+                                    elif source_table is None and is_aggregate_expr:
                                         # Aggregate function column - only add if relevant to this entity
                                         if is_aggregate_function_for_table(raw_expression, entity_name, sql):
                                             alias = extract_alias_from_expression(raw_expression)
@@ -953,24 +1030,30 @@ class ChainBuilderEngine:
                         else:
                             # Simple query: Add ALL columns from SELECT statement to QUERY_RESULT
                             # For simple queries, QUERY_RESULT should contain all SELECT columns
-                            for sel_col in select_columns:
-                                raw_expression = sel_col.get('raw_expression')
-                                column_name = sel_col.get('column_name')
+                            # PERFORMANCE OPTIMIZATION: Use pre-analyzed column data
+                            for i, sel_col in enumerate(select_columns):
+                                # Get pre-analyzed data to avoid expensive function calls
+                                preanalyzed = preanalyzed_columns.get(i, {})
+                                raw_expression = preanalyzed.get('raw_expression', sel_col.get('raw_expression'))
+                                column_name = preanalyzed.get('column_name', sel_col.get('column_name'))
+                                is_subquery_expr = preanalyzed.get('is_subquery', False)
+                                is_aggregate_expr = preanalyzed.get('is_aggregate', False)
                                 
                                 # Extract clean name (prefer alias over raw column name)
                                 clean_name = extract_clean_column_name(raw_expression, column_name)
                                 
                                 if clean_name not in existing_column_names:
                                     # Get source table for proper upstream reference
-                                    source_table = sel_col.get('source_table', entity_name)
+                                    source_table = preanalyzed.get('source_table', sel_col.get('source_table', entity_name))
                                     column_info = {
                                         "name": clean_name,
                                         "upstream": [f"{source_table}.{clean_name}"],
                                         "type": "DIRECT"
                                     }
                                     
+                                    # PERFORMANCE OPTIMIZATION: Use pre-analyzed column type detection
                                     # Check if this is a subquery first (before checking for aggregates)
-                                    if is_subquery_expression(raw_expression, self.dialect):
+                                    if is_subquery_expr:
                                         # Use transformation engine for subquery handling
                                         from ..utils.sql_parsing_utils import extract_tables_from_subquery
                                         subquery_tables = extract_tables_from_subquery(raw_expression, self.dialect)
@@ -983,7 +1066,7 @@ class ChainBuilderEngine:
                                             "function_type": "SUBQUERY"
                                         }
                                     # Check if this is an aggregate function and add transformation details
-                                    elif is_aggregate_function(raw_expression):
+                                    elif is_aggregate_expr:
                                         function_type = extract_function_type(raw_expression)
                                         column_info["transformation"] = {
                                             "source_expression": raw_expression,
@@ -1101,11 +1184,71 @@ class ChainBuilderEngine:
                     if 'metadata' not in entity_data:
                         entity_data['metadata'] = {}
                     entity_data['metadata']['table_columns'] = table_columns
+                    
+                    processed_entities += 1
+        
+        # Complete batch processing timing
+        batch_time = time.time() - batch_start
+        self.logger.debug(f"Batch processing completed {len(query_result_deps + ctas_deps)} dependencies in {batch_time:.3f} seconds")
+        
+        # CRITICAL FIX: Add missing source column extraction phase
+        # This was missing from batch processing and caused data loss
+        source_columns_start = time.time()
+        
+        self.logger.debug("Adding missing source columns to all entities")
+        
+        # PERFORMANCE OPTIMIZATION: Use cached batch column extraction from preprocessing
+        entity_names = list(chains.keys())
+        
+        # Use the batch column extraction we already computed in preprocessing
+        if hasattr(self, '_cached_table_columns_batch') and self._cached_table_columns_batch:
+            all_referenced_columns = self._cached_table_columns_batch
+        else:
+            # Fall back to batch extraction if not cached
+            from ..utils.sql_parsing_utils import extract_table_columns_from_sql_batch
+            self.logger.debug(f"Batch extracting columns for {len(entity_names)} entities")
+            all_referenced_columns = extract_table_columns_from_sql_batch(sql, entity_names, self.dialect)
+            self._cached_table_columns_batch = all_referenced_columns
+        
+        # Add missing source columns to each entity
+        for entity_name, entity_data in chains.items():
+            if not isinstance(entity_data, dict):
+                continue
             
-            processed_entities += 1
+            # Ensure metadata exists
+            if 'metadata' not in entity_data:
+                entity_data['metadata'] = {}
+            if 'table_columns' not in entity_data['metadata']:
+                entity_data['metadata']['table_columns'] = []
+            
+            # Get existing column names
+            existing_columns = entity_data['metadata']['table_columns']
+            existing_column_names = {col.get('name', '') for col in existing_columns}
+            
+            # Add referenced columns that are missing
+            referenced_columns = all_referenced_columns.get(entity_name, [])
+            # Convert to set if it's a list for consistent handling
+            if isinstance(referenced_columns, list):
+                referenced_columns = set(referenced_columns)
+            elif not isinstance(referenced_columns, set):
+                referenced_columns = set()
+                
+            for column_name in referenced_columns:
+                if column_name and column_name not in existing_column_names:
+                    entity_data['metadata']['table_columns'].append({
+                        'name': column_name,
+                        'upstream': [],
+                        'type': 'SOURCE'
+                    })
+        
+        source_columns_time = time.time() - source_columns_start
+        self.logger.debug(f"Source column extraction completed in {source_columns_time:.3f} seconds")
         
         main_processing_time = time.time() - main_processing_start
-        self.logger.info(f"Main entity processing loop completed {processed_entities} entities in {main_processing_time:.3f} seconds")
+        total_entities = len(chains)
+        self.logger.info(f"Batch processing completed {total_entities} total entities in {main_processing_time:.3f} seconds")
+        self.logger.info(f"  - Batch processed: {processed_entities} entities with QUERY_RESULT/CTAS dependencies")
+        self.logger.info(f"  - Source columns: Added to all {total_entities} entities")
         
         # PERFORMANCE OPTIMIZATION: Cache the processed data for future use
         try:
