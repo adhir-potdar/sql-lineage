@@ -23,6 +23,10 @@ class ChainBuilderEngine:
         self._column_cache = {}
         self._metadata_cache = {}
         self._alias_cache = {}  # Cache alias lookups
+        # SURGICAL PERFORMANCE OPTIMIZATION: Add more granular caches
+        self._sql_parse_cache = {}  # Cache SQL parsing results
+        self._regex_cache = {}  # Cache compiled regex patterns
+        self._expression_analysis_cache = {}  # Cache expensive expression analysis
     
     def build_chain_from_dependencies(self, entity_name: str, entity_type: str, 
                                     table_lineage_data: Dict, column_lineage_data: Dict,
@@ -421,13 +425,14 @@ class ChainBuilderEngine:
     
     def _optimize_alias_matching(self, raw_expression: str, alias_to_table: Dict, entity_name: str) -> bool:
         """Optimized alias matching using cached lookups and pre-compiled patterns."""
-        # Cache key for this expression
-        cache_key = f"{raw_expression}_{entity_name}"
+        # PERFORMANCE OPTIMIZATION: Use more efficient caching strategy
+        cache_key = f"{hash(raw_expression)}_{hash(entity_name)}"
         if cache_key in self._alias_cache:
             return self._alias_cache[cache_key]
         
         # Build reverse lookup: table -> aliases for faster matching
-        if 'table_to_aliases' not in self._alias_cache:
+        table_aliases_key = f"table_to_aliases_{hash(tuple(sorted(alias_to_table.items())))}"
+        if table_aliases_key not in self._alias_cache:
             table_to_aliases = {}
             for alias, table in alias_to_table.items():
                 table_clean = table.strip('"').replace('".', '.').replace('"', '')
@@ -438,17 +443,16 @@ class ChainBuilderEngine:
                     if table not in table_to_aliases:
                         table_to_aliases[table] = []
                     table_to_aliases[table].append(alias)
-            self._alias_cache['table_to_aliases'] = table_to_aliases
+            self._alias_cache[table_aliases_key] = table_to_aliases
         
-        table_to_aliases = self._alias_cache['table_to_aliases']
+        table_to_aliases = self._alias_cache[table_aliases_key]
         result = False
         
-        # Fast path: check if any alias for this table is in the expression
+        # PERFORMANCE OPTIMIZATION: Use string containment check instead of regex
         if entity_name in table_to_aliases:
-            for alias in table_to_aliases[entity_name]:
-                if f'{alias}.' in raw_expression:
-                    result = True
-                    break
+            aliases = table_to_aliases[entity_name]
+            # Use any() for short-circuit evaluation
+            result = any(f'{alias}.' in raw_expression for alias in aliases)
         
         # Cache the result
         self._alias_cache[cache_key] = result
@@ -456,6 +460,8 @@ class ChainBuilderEngine:
     
     def add_missing_source_columns(self, chains: Dict, sql: str = None, column_lineage_data: Dict = None, column_transformations_data: Dict = None) -> None:
         """Add missing source columns and handle QUERY_RESULT dependencies - moved from LineageChainBuilder."""
+        import time
+        start_time = time.time()
         self.logger.info(f"Adding missing source columns for {len(chains)} chain entities")
         
         # PERFORMANCE OPTIMIZATION: Create cache key for expensive operations
@@ -463,31 +469,66 @@ class ChainBuilderEngine:
         if cache_key in self._column_cache:
             self.logger.debug("Using cached column data for performance")
             cached_data = self._column_cache[cache_key]
-            return self._apply_cached_column_data(chains, cached_data)
+            self._apply_cached_column_data(chains, cached_data)
+            cache_time = time.time() - start_time
+            self.logger.info(f"add_missing_source_columns completed (cached) in {cache_time:.3f} seconds")
+            return
         
         if not sql:
             self.logger.warning("No SQL provided for source column addition")
             return 
             
         try:
+            parse_start = time.time()
             # Parse SQL to get select columns and alias mapping for QUERY_RESULT columns
             import sqlglot
             from ..utils.sql_parsing_utils import is_subquery_expression
-            parsed = sqlglot.parse_one(sql, dialect='trino')
+            
+            # PERFORMANCE OPTIMIZATION: Cache SQL parsing results
+            sql_hash = hash(sql)
+            if sql_hash not in self._sql_parse_cache:
+                parsed = sqlglot.parse_one(sql, dialect='trino')
+                self._sql_parse_cache[sql_hash] = parsed
+            else:
+                parsed = self._sql_parse_cache[sql_hash]
             
             # Build alias to table mapping using the proper utility function
             from ..utils.sql_parsing_utils import build_alias_to_table_mapping
-            alias_to_table = build_alias_to_table_mapping(sql, self.dialect)
+            
+            # PERFORMANCE OPTIMIZATION: Cache alias to table mapping
+            alias_cache_key = f"alias_{sql_hash}"
+            if alias_cache_key not in self._alias_cache:
+                alias_to_table = build_alias_to_table_mapping(sql, self.dialect)
+                self._alias_cache[alias_cache_key] = alias_to_table
+            else:
+                alias_to_table = self._alias_cache[alias_cache_key]
             
             # PERFORMANCE OPTIMIZATION: Extract columns for all tables at once
             from ..utils.sql_parsing_utils import extract_table_columns_from_sql_batch
             entity_names = list(chains.keys())
-            all_table_columns_batch = extract_table_columns_from_sql_batch(sql, entity_names, self.dialect)
+            
+            batch_cache_key = f"batch_{sql_hash}_{hash(tuple(sorted(entity_names)))}"
+            if batch_cache_key not in self._column_cache:
+                all_table_columns_batch = extract_table_columns_from_sql_batch(sql, entity_names, self.dialect)
+                self._column_cache[batch_cache_key] = all_table_columns_batch
+            else:
+                all_table_columns_batch = self._column_cache[batch_cache_key]
+            
+            parse_time = time.time() - parse_start
+            self.logger.debug(f"SQL parsing and batch preprocessing completed in {parse_time:.3f} seconds")
             
             # Get select columns from parsing - handle all SELECT statements including UNIONs
+            select_start = time.time()
             select_columns = []
-            # Collect all SELECT statements (handles UNION queries properly)
-            select_stmts = list(parsed.find_all(sqlglot.exp.Select))
+            
+            # PERFORMANCE OPTIMIZATION: Cache SELECT column extraction  
+            select_cache_key = f"select_{sql_hash}"
+            if select_cache_key not in self._expression_analysis_cache:
+                # Collect all SELECT statements (handles UNION queries properly)
+                select_stmts = list(parsed.find_all(sqlglot.exp.Select))
+            else:
+                select_columns = self._expression_analysis_cache[select_cache_key]
+                select_stmts = []  # Skip processing if cached
             
             # Process each SELECT statement
             for select_stmt in select_stmts:
@@ -533,7 +574,16 @@ class ChainBuilderEngine:
                             'source_table': source_table_for_expr,
                             'from_table': stmt_source_table  # Track which table this SELECT is from
                         })
-        except:
+            
+            # Cache the processed select columns for next time
+            if select_cache_key not in self._expression_analysis_cache:
+                self._expression_analysis_cache[select_cache_key] = select_columns
+                
+            select_time = time.time() - select_start
+            self.logger.debug(f"SELECT column extraction completed in {select_time:.3f} seconds")
+            
+        except Exception as e:
+            self.logger.warning(f"SQL parsing failed: {e}")
             select_columns = []
             alias_to_table = {}
         
@@ -549,6 +599,41 @@ class ChainBuilderEngine:
             is_ctas_target_table, build_ctas_target_columns, add_group_by_to_ctas_transformations
         )
         
+        # PERFORMANCE OPTIMIZATION: Pre-compute expensive operations once
+        main_processing_start = time.time()
+        
+        # Pre-compute query characteristics to avoid repeated analysis
+        is_union_query = 'UNION' in sql.upper()
+        needs_aggregate_processing = False
+        unique_source_tables = set()
+        is_join_query = False
+        primary_table = None
+        
+        try:
+            # Extract query characteristics once
+            if select_columns:
+                unique_source_tables = set(sel_col.get('source_table') for sel_col in select_columns if sel_col.get('source_table'))
+                is_join_query = len(unique_source_tables) > 1 or 'JOIN' in sql.upper()
+            
+            # Check for aggregates once
+            from ..utils.aggregate_utils import query_has_aggregates
+            needs_aggregate_processing = query_has_aggregates(sql)
+            
+            # Determine primary table once
+            if parsed:
+                from_clause = parsed.find(sqlglot.exp.From)
+                if from_clause and hasattr(from_clause.this, 'name'):
+                    table = from_clause.this
+                    if table.db:
+                        primary_table = f"{table.db}.{table.name}"
+                    elif table.catalog and table.db:
+                        primary_table = f"{table.catalog}.{table.db}.{table.name}"
+                    else:
+                        primary_table = str(table.name)
+        except Exception as e:
+            self.logger.debug(f"Query characteristic analysis failed: {e}")
+        
+        processed_entities = 0
         for entity_name, entity_data in chains.items():
             if not isinstance(entity_data, dict):
                 continue
@@ -1016,6 +1101,11 @@ class ChainBuilderEngine:
                     if 'metadata' not in entity_data:
                         entity_data['metadata'] = {}
                     entity_data['metadata']['table_columns'] = table_columns
+            
+            processed_entities += 1
+        
+        main_processing_time = time.time() - main_processing_start
+        self.logger.info(f"Main entity processing loop completed {processed_entities} entities in {main_processing_time:.3f} seconds")
         
         # PERFORMANCE OPTIMIZATION: Cache the processed data for future use
         try:
@@ -1029,3 +1119,6 @@ class ChainBuilderEngine:
             self.logger.debug(f"Cached column data for key: {cache_key}")
         except Exception as cache_error:
             self.logger.warning(f"Failed to cache column data: {cache_error}")
+        
+        total_time = time.time() - start_time
+        self.logger.info(f"add_missing_source_columns completed in {total_time:.3f} seconds")
