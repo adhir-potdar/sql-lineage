@@ -417,6 +417,11 @@ class ChainBuilderEngine:
             from ..utils.sql_parsing_utils import build_alias_to_table_mapping
             alias_to_table = build_alias_to_table_mapping(sql, self.dialect)
             
+            # PERFORMANCE OPTIMIZATION: Extract columns for all tables at once
+            from ..utils.sql_parsing_utils import extract_table_columns_from_sql_batch
+            entity_names = list(chains.keys())
+            all_table_columns_batch = extract_table_columns_from_sql_batch(sql, entity_names, self.dialect)
+            
             # Get select columns from parsing - handle all SELECT statements including UNIONs
             select_columns = []
             # Collect all SELECT statements (handles UNION queries properly)
@@ -937,9 +942,8 @@ class ChainBuilderEngine:
                 # Always extract columns from SELECT expressions (including aggregate expressions)
                 # This ensures columns used in complex expressions like SUM(a - b + c) are captured
                 if sql:
-                    # Extract columns that belong to this source table from SELECT statement
-                    from ..utils.sql_parsing_utils import extract_table_columns_from_sql
-                    table_columns_in_select = extract_table_columns_from_sql(sql, entity_name, self.dialect)
+                    # PERFORMANCE OPTIMIZATION: Use pre-computed batch results instead of parsing again
+                    table_columns_in_select = all_table_columns_batch.get(entity_name, set())
                     source_columns.update(table_columns_in_select)
                 
                 # Add the columns found in transformations, merging with existing

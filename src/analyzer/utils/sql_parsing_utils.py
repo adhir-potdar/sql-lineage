@@ -1,7 +1,7 @@
 """SQL parsing utility functions."""
 
 import re
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Set
 import sqlglot
 
 
@@ -806,6 +806,66 @@ def extract_table_columns_from_sql(sql: str, table_name: str, dialect: str = "tr
         columns.update(matches)
     
     return columns
+
+
+def extract_table_columns_from_sql_batch(sql: str, table_names: List[str], dialect: str = "trino") -> Dict[str, Set[str]]:
+    """
+    Extract columns for MULTIPLE tables from SQL in one parse.
+    More efficient version of extract_table_columns_from_sql() for batch processing.
+    
+    Args:
+        sql: SQL query to analyze
+        table_names: List of table names to extract columns for
+        dialect: SQL dialect (default: trino)
+        
+    Returns:
+        Dict mapping table_name -> set of column names
+    """
+    all_columns = {table_name: set() for table_name in table_names}
+    
+    try:
+        # Parse SQL once (instead of once per table)
+        parsed = sqlglot.parse_one(sql, dialect=dialect)
+        
+        # Build alias mapping once (instead of once per table) 
+        alias_mapping = build_alias_to_table_mapping(sql, dialect)
+        
+        # Extract columns for ALL tables in one pass
+        for column in parsed.find_all(sqlglot.exp.Column):
+            if column.table:
+                table_ref = str(column.table)
+                column_name = str(column.name)
+                
+                # Check against ALL target tables (reusing existing logic)
+                for table_name in table_names:
+                    # Direct table name match or alias resolution
+                    if table_ref == table_name:
+                        all_columns[table_name].add(column_name)
+                    else:
+                        # Check if it's an alias (same logic as original function)
+                        actual_table = alias_mapping.get(table_ref.lower())
+                        if actual_table:
+                            # Remove quotes from actual_table for comparison
+                            actual_table_clean = actual_table.strip('"').replace('".', '.').replace('"', '')
+                            if actual_table_clean == table_name or actual_table == table_name:
+                                all_columns[table_name].add(column_name)
+                        else:
+                            # Handle three-part table names: if table_name ends with table_ref, it's a match
+                            # Example: table_name="dbxadmin40test"."trino_demo"."orders" and table_ref="orders"
+                            # Also handle cases like ins_sql.ins_fin.policy_monthly_financials matching pmf
+                            if table_name.lower().endswith('.' + table_ref.lower()) or table_name.lower().endswith(table_ref.lower()):
+                                all_columns[table_name].add(column_name)
+                            if table_name.endswith(f'"."{table_ref}"') or table_name.endswith(f'.{table_ref}'):
+                                all_columns[table_name].add(column_name)
+                                        
+    except Exception:
+        # Fallback to regex-based extraction for each table
+        for table_name in table_names:
+            pattern = rf'\b{re.escape(table_name)}\.(\w+)'
+            matches = re.findall(pattern, sql, re.IGNORECASE)
+            all_columns[table_name].update(matches)
+    
+    return all_columns
 
 
 def extract_join_columns_from_sql(sql: str, table_name: str, dialect: str = "trino") -> set:
