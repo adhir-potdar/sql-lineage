@@ -19,6 +19,10 @@ class ChainBuilderEngine:
         self.derived_table_analyzer = DerivedTableAnalyzer(dialect)
         self.transformation_engine = TransformationEngine(dialect)
         self.logger = get_logger('core.chain_builder_engine')
+        # Performance optimization: cache expensive operations
+        self._column_cache = {}
+        self._metadata_cache = {}
+        self._alias_cache = {}  # Cache alias lookups
     
     def build_chain_from_dependencies(self, entity_name: str, entity_type: str, 
                                     table_lineage_data: Dict, column_lineage_data: Dict,
@@ -399,9 +403,67 @@ class ChainBuilderEngine:
         
         return merged
     
+    def _apply_cached_column_data(self, chains: Dict, cached_data: Dict) -> None:
+        """Apply cached column data to chains for performance."""
+        try:
+            chain_metadata = cached_data.get('chain_metadata', {})
+            for entity_name, entity_data in chains.items():
+                if entity_name in chain_metadata:
+                    if 'metadata' not in entity_data:
+                        entity_data['metadata'] = {}
+                    # Apply cached metadata including table_columns
+                    entity_data['metadata'].update(chain_metadata[entity_name])
+            self.logger.debug(f"Applied cached column data to {len(chain_metadata)} entities")
+        except Exception as e:
+            self.logger.warning(f"Failed to apply cached column data: {e}")
+            # Fallback: continue without cache
+            pass
+    
+    def _optimize_alias_matching(self, raw_expression: str, alias_to_table: Dict, entity_name: str) -> bool:
+        """Optimized alias matching using cached lookups and pre-compiled patterns."""
+        # Cache key for this expression
+        cache_key = f"{raw_expression}_{entity_name}"
+        if cache_key in self._alias_cache:
+            return self._alias_cache[cache_key]
+        
+        # Build reverse lookup: table -> aliases for faster matching
+        if 'table_to_aliases' not in self._alias_cache:
+            table_to_aliases = {}
+            for alias, table in alias_to_table.items():
+                table_clean = table.strip('"').replace('".', '.').replace('"', '')
+                if table_clean not in table_to_aliases:
+                    table_to_aliases[table_clean] = []
+                table_to_aliases[table_clean].append(alias)
+                if table != table_clean:  # Also add original table name
+                    if table not in table_to_aliases:
+                        table_to_aliases[table] = []
+                    table_to_aliases[table].append(alias)
+            self._alias_cache['table_to_aliases'] = table_to_aliases
+        
+        table_to_aliases = self._alias_cache['table_to_aliases']
+        result = False
+        
+        # Fast path: check if any alias for this table is in the expression
+        if entity_name in table_to_aliases:
+            for alias in table_to_aliases[entity_name]:
+                if f'{alias}.' in raw_expression:
+                    result = True
+                    break
+        
+        # Cache the result
+        self._alias_cache[cache_key] = result
+        return result
+    
     def add_missing_source_columns(self, chains: Dict, sql: str = None, column_lineage_data: Dict = None, column_transformations_data: Dict = None) -> None:
         """Add missing source columns and handle QUERY_RESULT dependencies - moved from LineageChainBuilder."""
         self.logger.info(f"Adding missing source columns for {len(chains)} chain entities")
+        
+        # PERFORMANCE OPTIMIZATION: Create cache key for expensive operations
+        cache_key = f"{hash(sql)}_{len(chains)}"
+        if cache_key in self._column_cache:
+            self.logger.debug("Using cached column data for performance")
+            cached_data = self._column_cache[cache_key]
+            return self._apply_cached_column_data(chains, cached_data)
         
         if not sql:
             self.logger.warning("No SQL provided for source column addition")
@@ -604,13 +666,8 @@ class ChainBuilderEngine:
                                         if needs_aggregate_processing:
                                             # For aggregate queries (including those with JOINs), assign columns based on their source tables
                                             
-                                            # Check if this column expression references this entity's table alias
-                                            for alias, table in alias_to_table.items():
-                                                # Remove quotes from table name for comparison
-                                                table_clean = table.strip('"').replace('".', '.').replace('"', '')
-                                                if (table_clean == entity_name or table == entity_name) and f'{alias}.' in raw_expression:
-                                                    column_belongs_to_this_table = True
-                                                    break
+                                            # Check if this column expression references this entity's table alias (optimized)
+                                            column_belongs_to_this_table = self._optimize_alias_matching(raw_expression, alias_to_table, entity_name)
                                             
                                             # Special handling for aggregate functions without table prefixes (like COUNT(*))
                                             # These should belong to the primary table
@@ -620,13 +677,10 @@ class ChainBuilderEngine:
                                                 if not has_table_reference and entity_name == primary_table:
                                                     column_belongs_to_this_table = True
                                                     
-                                            # Handle direct column references (non-aggregate)
+                                            # Handle direct column references (non-aggregate) (optimized)
                                             if not column_belongs_to_this_table and not is_aggregate_function(raw_expression):
                                                 # For columns like "u.user_id", assign to the table whose alias is referenced
-                                                for alias, table in alias_to_table.items():
-                                                    if table == entity_name and f'{alias}.' in raw_expression:
-                                                        column_belongs_to_this_table = True
-                                                        break
+                                                column_belongs_to_this_table = self._optimize_alias_matching(raw_expression, alias_to_table, entity_name)
                                         
                                         elif is_join_query or is_union_query:
                                             # For JOIN/UNION queries without aggregates
@@ -636,11 +690,8 @@ class ChainBuilderEngine:
                                                 subquery_tables = extract_tables_from_subquery(raw_expression, self.dialect)
                                                 column_belongs_to_this_table = entity_name in subquery_tables
                                             else:
-                                                # SECOND: Check if this column expression references this entity's table alias
-                                                for alias, table in alias_to_table.items():
-                                                    if table == entity_name and f'{alias}.' in raw_expression:
-                                                        column_belongs_to_this_table = True
-                                                        break
+                                                # SECOND: Check if this column expression references this entity's table alias (optimized)
+                                                column_belongs_to_this_table = self._optimize_alias_matching(raw_expression, alias_to_table, entity_name)
                                             
                                             # Special handling for aggregate functions without table prefixes (like COUNT(*))
                                             # These should belong to the primary table
@@ -965,3 +1016,16 @@ class ChainBuilderEngine:
                     if 'metadata' not in entity_data:
                         entity_data['metadata'] = {}
                     entity_data['metadata']['table_columns'] = table_columns
+        
+        # PERFORMANCE OPTIMIZATION: Cache the processed data for future use
+        try:
+            cached_data = {
+                'select_columns': select_columns,
+                'alias_to_table': alias_to_table,
+                'all_table_columns_batch': all_table_columns_batch,
+                'chain_metadata': {entity_name: entity_data.get('metadata', {}) for entity_name, entity_data in chains.items()}
+            }
+            self._column_cache[cache_key] = cached_data
+            self.logger.debug(f"Cached column data for key: {cache_key}")
+        except Exception as cache_error:
+            self.logger.warning(f"Failed to cache column data: {cache_error}")
