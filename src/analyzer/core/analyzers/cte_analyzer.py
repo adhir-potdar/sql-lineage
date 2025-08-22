@@ -1433,37 +1433,61 @@ class CTEAnalyzer(BaseAnalyzer):
         self.logger.debug("Starting direct column inheritance from final CTE to QUERY_RESULT")
         
         try:
-            # Find the final CTE that the main SELECT uses (e.g., join_step2 in our case)
-            final_cte_name = self._find_final_cte_reference(parsed)
-            if not final_cte_name:
-                self.logger.debug("No final CTE reference found")
-                return
+            # HYBRID APPROACH: Extract SELECT columns and merge with transformation metadata
+            main_select_columns = self._extract_main_select_columns(parsed, sql)
+            if not main_select_columns:
+                self.logger.debug("No main SELECT columns found, falling back to CTE column approach")
                 
-            self.logger.debug(f"Found final CTE reference: {final_cte_name}")
-            
-            # Find the final CTE entity in chains to get its columns
-            final_cte_columns = self._find_cte_columns_in_chains(chains, final_cte_name)
-            if not final_cte_columns:
-                self.logger.debug(f"No columns found for final CTE: {final_cte_name}")
-                return
-                
-            self.logger.debug(f"Found {len(final_cte_columns)} columns in final CTE")
-            
-            # Find all QUERY_RESULT entities and populate them with final CTE columns
-            query_result_count = 0
-            for chain_data in chains.values():
-                query_result_entities = self._find_query_result_entity(chain_data)
-                for query_result in query_result_entities:
-                    self._populate_query_result_with_cte_columns(query_result, final_cte_columns)
-                    query_result_count += 1
+                # FALLBACK: Use original CTE column logic if SELECT extraction fails
+                final_cte_name = self._find_final_cte_reference(parsed)
+                if not final_cte_name:
+                    self.logger.debug("No final CTE reference found")
+                    return
                     
-            self.logger.debug(f"Populated {query_result_count} QUERY_RESULT entities with CTE columns")
+                self.logger.debug(f"Found final CTE reference: {final_cte_name}")
+                
+                final_cte_columns = self._find_cte_columns_in_chains(chains, final_cte_name)
+                if not final_cte_columns:
+                    self.logger.debug(f"No columns found for final CTE: {final_cte_name}")
+                    return
+                    
+                self.logger.debug(f"Found {len(final_cte_columns)} columns in final CTE")
+                
+                # Use CTE columns as fallback
+                query_result_count = 0
+                for chain_data in chains.values():
+                    query_result_entities = self._find_query_result_entity(chain_data)
+                    for query_result in query_result_entities:
+                        self._populate_query_result_with_cte_columns(query_result, final_cte_columns)
+                        query_result_count += 1
+                        
+                self.logger.debug(f"Populated {query_result_count} QUERY_RESULT entities with CTE columns (fallback)")
+            else:
+                # HYBRID APPROACH: Extract transformations and merge with SELECT columns
+                self.logger.debug(f"Found {len(main_select_columns)} columns in main SELECT")
+                
+                # Extract transformation metadata from existing CTE chain data
+                transformations_map = self._extract_transformations_from_chain_data(chains)
+                self.logger.debug(f"Found {len(transformations_map)} column transformations from chain data")
+                
+                # Merge SELECT columns with transformation metadata
+                enhanced_columns = self._merge_select_columns_with_transformations(main_select_columns, transformations_map)
+                self.logger.debug(f"Enhanced {len(enhanced_columns)} columns with transformations")
+                
+                query_result_count = 0
+                for chain_data in chains.values():
+                    query_result_entities = self._find_query_result_entity(chain_data)
+                    for query_result in query_result_entities:
+                        self._populate_query_result_with_select_columns(query_result, enhanced_columns)
+                        query_result_count += 1
+                        
+                self.logger.debug(f"Populated {query_result_count} QUERY_RESULT entities with enhanced SELECT columns")
             
         except Exception as e:
             self.logger.warning(f"Column inheritance from final CTE failed: {str(e)}")
     
     def _find_final_cte_reference(self, parsed) -> str:
-        """Find the final CTE that the main SELECT references."""
+        """Find the final CTE that the main SELECT references, including in nested subqueries."""
         try:
             import sqlglot
             
@@ -1476,16 +1500,301 @@ class CTEAnalyzer(BaseAnalyzer):
             # Look for table references in main SELECT
             from_clause = main_select.find(sqlglot.exp.From)
             if from_clause and from_clause.this:
-                # Check if it's a simple table reference (CTE name)
-                if hasattr(from_clause.this, 'name'):
-                    return str(from_clause.this.name)
+                # Check if it's explicitly a subquery or derived table first
+                if isinstance(from_clause.this, (sqlglot.exp.Subquery, sqlglot.exp.Select)):
+                    # It's definitely a subquery, search inside it
+                    self.logger.debug(f"Found subquery in FROM clause, searching for CTE references")
+                    cte_name = self._search_cte_in_subquery(from_clause.this, parsed)
+                    if cte_name:
+                        self.logger.debug(f"Found CTE reference in subquery: {cte_name}")
+                        return cte_name
+                        
+                # PRESERVE ORIGINAL LOGIC EXACTLY - Check if it's a simple table reference (CTE name)
+                elif hasattr(from_clause.this, 'name'):
+                    cte_name = str(from_clause.this.name)
+                    # Only return non-empty names to avoid the original issue
+                    if cte_name.strip():
+                        self.logger.debug(f"Found direct CTE reference: {cte_name}")
+                        return cte_name
+                    else:
+                        self.logger.debug(f"Found empty CTE name, trying subquery search")
+                        
+                # Fallback: Try subquery search for any unrecognized patterns  
+                self.logger.debug(f"No direct CTE reference found, searching subqueries. FROM clause type: {type(from_clause.this).__name__}")
+                cte_name = self._search_cte_in_subquery(from_clause.this, parsed)
+                if cte_name:
+                    self.logger.debug(f"Found CTE reference in subquery: {cte_name}")
+                    return cte_name
                     
-            self.logger.debug("Could not find final CTE reference in main SELECT")
+            self.logger.debug("Could not find final CTE reference in main SELECT or subqueries")
             return None
             
         except Exception as e:
             self.logger.debug(f"Exception in _find_final_cte_reference: {str(e)}")
             return None
+    
+    def _search_cte_in_subquery(self, subquery_node, parsed) -> str:
+        """Search for CTE references inside subquery - only called when direct method fails."""
+        try:
+            import sqlglot
+            
+            # Get available CTE names from parsed query for validation
+            cte_names = {str(c.alias) for c in parsed.find_all(sqlglot.exp.CTE)}
+            if not cte_names:
+                self.logger.debug("No CTEs found in parsed query")
+                return None
+                
+            self.logger.debug(f"Searching for CTE references from: {cte_names}")
+            
+            # Search all table references in the subquery node
+            table_references = []
+            for table in subquery_node.find_all(sqlglot.exp.Table):
+                if hasattr(table, 'this') and table.this:
+                    table_name = str(table.this)
+                    table_references.append(table_name)
+                elif hasattr(table, 'name') and table.name:
+                    table_name = str(table.name)
+                    table_references.append(table_name)
+            
+            self.logger.debug(f"Found table references in subquery: {table_references}")
+            
+            # Find the first table reference that matches a CTE name
+            for table_name in table_references:
+                # Clean table name (remove quotes, schema prefixes for comparison)
+                clean_table = table_name.split('.')[-1].strip('"\'')
+                
+                # Check if this table name matches any CTE
+                if clean_table in cte_names:
+                    self.logger.debug(f"Matched CTE '{clean_table}' from table reference '{table_name}'")
+                    return clean_table
+                    
+                # Also check direct name match
+                if table_name in cte_names:
+                    self.logger.debug(f"Direct CTE match: {table_name}")
+                    return table_name
+            
+            self.logger.debug(f"No CTE matches found among table references: {table_references}")
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"Exception in _search_cte_in_subquery: {str(e)}")
+            return None
+    
+    def _extract_main_select_columns(self, parsed, sql: str) -> list:
+        """Extract actual SELECT clause columns from the main query (not CTE columns)."""
+        try:
+            import sqlglot
+            
+            # Get the main SELECT statement (not in CTE)
+            main_select = self._get_main_select_from_cte(parsed)
+            if not main_select:
+                self.logger.debug("Could not find main SELECT for column extraction")
+                return []
+            
+            # For nested subquery patterns like National Grid, get the inner SELECT
+            inner_select = main_select
+            if isinstance(main_select.find(sqlglot.exp.From), sqlglot.exp.From):
+                from_clause = main_select.find(sqlglot.exp.From)
+                if from_clause and isinstance(from_clause.this, (sqlglot.exp.Subquery, sqlglot.exp.Select)):
+                    # It's a subquery pattern like "SELECT * FROM (...)"
+                    if hasattr(from_clause.this, 'this') and isinstance(from_clause.this.this, sqlglot.exp.Select):
+                        inner_select = from_clause.this.this  # Get the inner SELECT
+                        self.logger.debug("Found nested subquery, extracting inner SELECT columns")
+                    elif isinstance(from_clause.this, sqlglot.exp.Select):
+                        inner_select = from_clause.this  # Direct SELECT subquery
+                        self.logger.debug("Found direct SELECT subquery, extracting columns")
+            
+            # Extract columns from the appropriate SELECT statement
+            columns = []
+            if hasattr(inner_select, 'expressions') and inner_select.expressions:
+                for expr in inner_select.expressions:
+                    column_info = self._parse_select_expression(expr)
+                    if column_info:
+                        columns.append(column_info)
+                        
+                self.logger.debug(f"Extracted {len(columns)} columns from main SELECT")
+            else:
+                self.logger.debug("No expressions found in main SELECT")
+                
+            return columns
+            
+        except Exception as e:
+            self.logger.debug(f"Exception in _extract_main_select_columns: {str(e)}")
+            return []
+    
+    def _parse_select_expression(self, expr) -> dict:
+        """Parse a single SELECT expression into column metadata."""
+        try:
+            import sqlglot
+            
+            # Get column name (with alias if present and non-empty)
+            column_name = str(expr.alias) if (expr.alias and str(expr.alias).strip()) else str(expr)
+            
+            # Basic column metadata
+            column_info = {
+                "name": column_name.strip(),
+                "upstream": [],
+                "type": "VARCHAR"  # Default type, can be enhanced later
+            }
+            
+            # Handle different expression types
+            if isinstance(expr, sqlglot.exp.Star):
+                # SELECT * case - this is handled at higher level
+                return None
+            elif isinstance(expr, sqlglot.exp.Column):
+                # Simple column reference
+                column_info["type"] = "DIRECT"
+            elif hasattr(expr, 'this') and isinstance(expr.this, sqlglot.exp.Column):
+                # Column with alias
+                column_info["type"] = "DIRECT"
+            else:
+                # Complex expression, function, etc.
+                column_info["type"] = "DIRECT"  # Will be enhanced by transformation metadata
+                
+            return column_info
+            
+        except Exception as e:
+            self.logger.debug(f"Error parsing SELECT expression {expr}: {str(e)}")
+            return None
+    
+    
+    def _extract_transformations_from_chain_data(self, chains: dict) -> dict:
+        """Extract transformation metadata from existing CTE chain data."""
+        try:
+            transformations_map = {}
+            
+            for chain_name, chain_data in chains.items():
+                # Look for transformation metadata in CTE entities within the chain
+                self._extract_transformations_from_entity(chain_data, transformations_map)
+            
+            return transformations_map
+            
+        except Exception as e:
+            self.logger.debug(f"Exception in _extract_transformations_from_chain_data: {str(e)}")
+            return {}
+    
+    def _extract_transformations_from_entity(self, entity: dict, transformations_map: dict):
+        """Recursively extract transformation metadata from an entity and its dependencies."""
+        try:
+            # Check if this entity has transformation metadata
+            metadata = entity.get("metadata", {})
+            if metadata.get("is_cte", False):  # Only extract from CTE entities
+                table_columns = metadata.get("table_columns", [])
+                for column in table_columns:
+                    col_name = column.get("name")
+                    transformation = column.get("transformation")
+                    if col_name and transformation:
+                        transformations_map[col_name] = transformation
+                        self.logger.debug(f"Found transformation for column: {col_name} from CTE {entity.get('entity', 'unknown')}")
+            
+            # Recursively check dependencies
+            dependencies = entity.get("dependencies", [])
+            for dep in dependencies:
+                self._extract_transformations_from_entity(dep, transformations_map)
+                
+        except Exception as e:
+            self.logger.debug(f"Exception in _extract_transformations_from_entity: {str(e)}")
+    
+    def _merge_select_columns_with_transformations(self, select_columns: list, transformations_map: dict) -> list:
+        """Merge SELECT column info with transformation metadata."""
+        try:
+            enhanced_columns = []
+            
+            for col_info in select_columns:
+                col_name = col_info.get("name")
+                if not col_name:
+                    continue
+                    
+                # Start with the SELECT column info
+                enhanced_col = col_info.copy()
+                
+                # Look for transformation metadata with smart matching
+                transformation = self._find_matching_transformation(col_name, transformations_map)
+                if transformation:
+                    enhanced_col["transformation"] = transformation
+                    # Update type based on transformation
+                    trans_type = transformation.get('transformation_type')
+                    if trans_type == 'AGGREGATE':
+                        enhanced_col["type"] = "VARCHAR"  # Keep existing behavior for aggregates
+                    elif trans_type in ['CASE', 'WINDOW', 'COMPUTED']:
+                        enhanced_col["type"] = "VARCHAR"  # Keep existing behavior for computed
+                    # Keep "DIRECT" for simple column references
+                
+                enhanced_columns.append(enhanced_col)
+            
+            return enhanced_columns
+            
+        except Exception as e:
+            self.logger.debug(f"Exception in _merge_select_columns_with_transformations: {str(e)}")
+            return select_columns  # Return original on error
+    
+    def _find_matching_transformation(self, col_name: str, transformations_map: dict):
+        """Find matching transformation for a column name, supporting both qualified and clean names."""
+        try:
+            # 1. Direct match (exact name match) - handles clean names
+            if col_name in transformations_map:
+                return transformations_map[col_name]
+            
+            # 2. Qualified name match - extract clean name from qualified name
+            # Examples: ts.customer_count -> customer_count, u.username -> username
+            if '.' in col_name:
+                parts = col_name.split('.')
+                if len(parts) >= 2:
+                    clean_name = parts[-1]  # Get the last part (column name)
+                    if clean_name in transformations_map:
+                        return transformations_map[clean_name]
+            
+            # 3. Reverse match - find qualified names that end with our clean name
+            # Example: if col_name is "customer_count", match "ts.customer_count" in transformations
+            for trans_key in transformations_map.keys():
+                if '.' in trans_key:
+                    trans_parts = trans_key.split('.')
+                    if len(trans_parts) >= 2 and trans_parts[-1] == col_name:
+                        return transformations_map[trans_key]
+            
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"Error in _find_matching_transformation for {col_name}: {str(e)}")
+            return None
+    
+    def _populate_query_result_with_select_columns(self, query_result_entity: dict, select_columns: list):
+        """Populate QUERY_RESULT entity with actual SELECT clause columns."""
+        try:
+            if not select_columns:
+                self.logger.debug("No SELECT columns to populate")
+                return
+                
+            metadata = query_result_entity.get("metadata", {})
+            current_columns = metadata.get("table_columns", [])
+            
+            # Count additions for logging
+            added_count = 0
+            skipped_count = 0
+            existing_names = {col.get("name") for col in current_columns if col.get("name")}
+            
+            # Add SELECT columns (replace existing columns entirely for correct behavior)
+            new_columns = []
+            for col in select_columns:
+                col_name = col.get("name")
+                if col_name and col_name not in {new_col.get("name") for new_col in new_columns}:
+                    new_columns.append(col)
+                    if col_name in existing_names:
+                        skipped_count += 1
+                    else:
+                        added_count += 1
+                else:
+                    skipped_count += 1
+            
+            # Replace table_columns entirely with SELECT columns
+            metadata["table_columns"] = new_columns
+            query_result_entity["metadata"] = metadata
+            
+            total_count = len(new_columns)
+            self.logger.debug(f"QUERY_RESULT column update: {added_count} added, {skipped_count} skipped, {len(existing_names)} existing, {total_count} total")
+            
+        except Exception as e:
+            self.logger.debug(f"Error populating QUERY_RESULT with SELECT columns: {str(e)}")
     
     def _find_cte_columns_in_chains(self, chains: dict, cte_name: str) -> list:
         """Find columns for a specific CTE in the chains structure."""
