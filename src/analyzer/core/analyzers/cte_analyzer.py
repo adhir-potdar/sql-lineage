@@ -19,6 +19,13 @@ from ...utils.logging_config import get_logger
 class CTEAnalyzer(BaseAnalyzer):
     """Analyzer for CTE statements."""
     
+    # Transformation type constants
+    TRANSFORMATION_TYPE_AGGREGATE = 'AGGREGATE'
+    TRANSFORMATION_TYPE_CASE = 'CASE'
+    TRANSFORMATION_TYPE_WINDOW = 'WINDOW'
+    TRANSFORMATION_TYPE_COMPUTED = 'COMPUTED'
+    TRANSFORMATION_TYPE_DIRECT = 'DIRECT'
+    
     def __init__(self, dialect: str = "trino", main_analyzer=None, table_registry: TableNameRegistry = None):
         """Initialize CTE analyzer with chain builder engine."""
         # Get compatibility mode from main analyzer if available
@@ -207,6 +214,14 @@ class CTEAnalyzer(BaseAnalyzer):
             self._populate_cte_source_tables(chains, sql, result)
             self._populate_cte_query_results(chains, sql, column_lineage_data, column_transformations_data)
             
+            # Count actual columns from chains metadata instead of hardcoded 0
+            total_columns = sum(
+                len([col for col in entity_data.get('metadata', {}).get('table_columns', []) 
+                     if col.get('type') == 'SOURCE'])
+                for entity_data in chains.values()
+                if isinstance(entity_data, dict) and entity_data.get('entity_type') == 'table'
+            )
+            
             return {
                 "sql": sql,
                 "dialect": result.dialect,
@@ -217,7 +232,7 @@ class CTEAnalyzer(BaseAnalyzer):
                 "chains": {clean_table_name_quotes(k): v for k, v in chains.items()},
                 "summary": {
                     "total_tables": len(set(table_lineage_data.keys()) | set().union(*table_lineage_data.values()) if table_lineage_data else set()),
-                    "total_columns": 0,  # CTE queries don't have column lineage in the same way
+                    "total_columns": total_columns,
                     "has_transformations": bool(cte_result.get('transformations')),
                     "has_metadata": bool(result.metadata),
                     "chain_count": len(chains)
@@ -1591,7 +1606,7 @@ class CTEAnalyzer(BaseAnalyzer):
                 self.logger.debug("Could not find main SELECT for column extraction")
                 return []
             
-            # For nested subquery patterns like National Grid, get the inner SELECT
+            # For nested subquery patterns, get the inner SELECT
             inner_select = main_select
             if isinstance(main_select.find(sqlglot.exp.From), sqlglot.exp.From):
                 from_clause = main_select.find(sqlglot.exp.From)
@@ -1714,11 +1729,17 @@ class CTEAnalyzer(BaseAnalyzer):
                     enhanced_col["transformation"] = transformation
                     # Update type based on transformation
                     trans_type = transformation.get('transformation_type')
-                    if trans_type == 'AGGREGATE':
-                        enhanced_col["type"] = "VARCHAR"  # Keep existing behavior for aggregates
-                    elif trans_type in ['CASE', 'WINDOW', 'COMPUTED']:
-                        enhanced_col["type"] = "VARCHAR"  # Keep existing behavior for computed
-                    # Keep "DIRECT" for simple column references
+                    if trans_type in [
+                        self.TRANSFORMATION_TYPE_AGGREGATE,
+                        self.TRANSFORMATION_TYPE_CASE,
+                        self.TRANSFORMATION_TYPE_WINDOW,
+                        self.TRANSFORMATION_TYPE_COMPUTED
+                    ]:
+                        # Set all transformed columns to VARCHAR for consistency and downstream compatibility.
+                        # This ensures uniform string handling across different transformation types,
+                        # avoiding type conflicts in complex queries with mixed data types.
+                        enhanced_col["type"] = "VARCHAR"
+                    # Keep "DIRECT" for simple column references (preserves original type)
                 
                 enhanced_columns.append(enhanced_col)
             
