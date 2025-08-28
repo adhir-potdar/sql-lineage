@@ -1250,6 +1250,12 @@ class ChainBuilderEngine:
         self.logger.info(f"  - Batch processed: {processed_entities} entities with QUERY_RESULT/CTAS dependencies")
         self.logger.info(f"  - Source columns: Added to all {total_entities} entities")
         
+        # Step 4: Handle subquery-specific column detection
+        subquery_start = time.time()
+        self._add_subquery_columns(chains, sql, select_columns, alias_to_table)
+        subquery_time = time.time() - subquery_start
+        self.logger.debug(f"Subquery column detection completed in {subquery_time:.3f} seconds")
+        
         # PERFORMANCE OPTIMIZATION: Cache the processed data for future use
         try:
             cached_data = {
@@ -1265,3 +1271,137 @@ class ChainBuilderEngine:
         
         total_time = time.time() - start_time
         self.logger.info(f"add_missing_source_columns completed in {total_time:.3f} seconds")
+
+    def _add_subquery_columns(self, chains, sql, select_columns, alias_to_table):
+        """
+        Detect and add columns referenced in nested subquery WHERE clauses.
+        This fixes the regression where subquery filter columns were missed.
+        """
+        try:
+            # Enhanced subquery pattern detection - handles all subquery types
+            sql_upper = sql.upper()
+            has_subquery = (
+                # Standard subquery patterns
+                'WHERE' in sql_upper and 'SELECT' in sql_upper and (
+                    'IN (' in sql_upper or          # WHERE col IN (SELECT...)
+                    'EXISTS (' in sql_upper or      # WHERE EXISTS (SELECT...)
+                    'NOT EXISTS (' in sql_upper or # WHERE NOT EXISTS (SELECT...)
+                    'ANY (' in sql_upper or         # WHERE col = ANY (SELECT...)
+                    'ALL (' in sql_upper or         # WHERE col = ALL (SELECT...)
+                    'SOME (' in sql_upper           # WHERE col = SOME (SELECT...)
+                ) or
+                # SELECT clause subqueries  
+                ('SELECT' in sql_upper and '(' in sql_upper and 'SELECT' in sql_upper[sql_upper.find('('):]) or
+                # FROM clause subqueries (derived tables)
+                ('FROM (' in sql_upper and 'SELECT' in sql_upper) or
+                # JOIN subqueries
+                ('JOIN (' in sql_upper and 'SELECT' in sql_upper) or
+                # WITH clause (CTE) - also contains subquery-like structures
+                'WITH ' in sql_upper
+            )
+            
+            if not has_subquery:
+                self.logger.debug("No subqueries detected, skipping subquery column detection")
+                return
+                
+            self.logger.debug("Subqueries detected, parsing WHERE clause columns")
+            
+            # Extract subquery WHERE clause column references
+            subquery_columns = self._extract_subquery_where_columns(sql)
+            
+            if not subquery_columns:
+                self.logger.debug("No subquery WHERE clause columns found")
+                return
+            
+            # Add detected columns to appropriate table entities
+            added_columns_count = 0
+            for table_name, column_names in subquery_columns.items():
+                # Find the table entity in chains
+                table_entity = None
+                for entity_name, entity_data in chains.items():
+                    if (entity_data.get('entity_type') == 'table' and 
+                        (entity_name == table_name or entity_name.endswith(f'.{table_name}'))):
+                        table_entity = entity_data
+                        break
+                
+                if table_entity:
+                    existing_columns = {col.get('name') for col in 
+                                      table_entity.get('metadata', {}).get('table_columns', [])}
+                    
+                    for col_name in column_names:
+                        if col_name not in existing_columns:
+                            # Add the missing column
+                            table_entity.setdefault('metadata', {}).setdefault('table_columns', []).append({
+                                "name": col_name,
+                                "upstream": [],
+                                "type": "SOURCE"
+                            })
+                            added_columns_count += 1
+                            self.logger.debug(f"Added missing subquery column: {table_name}.{col_name}")
+            
+            if added_columns_count > 0:
+                self.logger.info(f"Added {added_columns_count} missing subquery columns")
+            else:
+                self.logger.debug("No missing subquery columns to add")
+                        
+        except Exception as e:
+            # Graceful degradation - log and continue
+            self.logger.debug(f"Subquery column detection failed: {e}")
+            return
+
+    def _extract_subquery_where_columns(self, sql):
+        """
+        Parse SQL to find column references in subquery WHERE clauses.
+        
+        Example:
+        WHERE u.id IN (SELECT customer_id FROM orders WHERE order_date >= '2023-01-01')
+        Returns: {'orders': {'order_date'}}
+        """
+        import sqlglot
+        from sqlglot import expressions as exp
+        
+        subquery_columns = {}
+        
+        try:
+            parsed = sqlglot.parse_one(sql, dialect='trino')
+            
+            # Find all subqueries
+            for subquery in parsed.find_all(exp.Subquery):
+                # Get the SELECT statement within subquery  
+                select_stmt = subquery.this
+                if not select_stmt:
+                    continue
+                    
+                # Find WHERE clause in the subquery
+                where_clause = select_stmt.find(exp.Where)
+                if not where_clause:
+                    continue
+                    
+                # Extract table name from FROM clause
+                from_clause = select_stmt.find(exp.From)
+                if not from_clause:
+                    continue
+                    
+                table_name = str(from_clause.this.name) if from_clause.this else None
+                if not table_name:
+                    continue
+                    
+                # Extract column references from WHERE clause
+                columns = set()
+                for column in where_clause.find_all(exp.Column):
+                    # Only include columns that don't have a table qualifier or match the current table
+                    if not column.table or str(column.table) in (table_name, table_name.split('.')[-1]):
+                        columns.add(str(column.name))
+                
+                if columns:
+                    # Handle fully qualified table names
+                    clean_table_name = table_name.split('.')[-1] if '.' in table_name else table_name
+                    # Try to find the full qualified name in chains first, fallback to clean name
+                    final_table_name = table_name
+                    subquery_columns[final_table_name] = columns
+                    self.logger.debug(f"Found subquery WHERE columns for {final_table_name}: {columns}")
+                    
+        except Exception as e:
+            self.logger.debug(f"Subquery parsing error: {e}")
+            
+        return subquery_columns
