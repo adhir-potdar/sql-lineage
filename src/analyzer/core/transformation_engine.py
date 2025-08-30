@@ -28,6 +28,9 @@ class TransformationEngine:
         """
         self.logger.info(f"Integrating column transformations for {len(chains)} chain entities")
         
+        # Store SQL for entity type detection
+        self.current_sql = sql
+        
         if not sql or not main_analyzer:
             self.logger.warning("Missing SQL or main_analyzer for column transformation integration")
             return
@@ -132,7 +135,24 @@ class TransformationEngine:
     def _create_ordered_metadata(self, metadata: Dict, entity_name: str, main_analyzer) -> Dict:
         """Create ordered metadata for source tables."""
         ordered_metadata = {}
-        ordered_metadata["table_type"] = metadata.get("table_type", "TABLE")
+        
+        # Detect if this is a CREATE VIEW target
+        default_table_type = "TABLE"
+        if hasattr(self, 'current_sql') and self.current_sql:
+            if self.current_sql.strip().upper().startswith('CREATE VIEW'):
+                # Check if entity_name matches the CREATE VIEW target
+                try:
+                    import sqlglot
+                    parsed = sqlglot.parse_one(self.current_sql, dialect=getattr(main_analyzer, 'dialect', 'trino'))
+                    if isinstance(parsed, sqlglot.exp.Create) and hasattr(parsed, 'this') and parsed.this:
+                        target_name = str(parsed.this).strip('"')
+                        entity_name_clean = entity_name.strip('"')
+                        if target_name == entity_name_clean:
+                            default_table_type = "VIEW"
+                except Exception:
+                    pass
+        
+        ordered_metadata["table_type"] = metadata.get("table_type", default_table_type)
         ordered_metadata["schema"] = metadata.get("schema", "default")
         
         # Use generic description since no external metadata
@@ -142,7 +162,24 @@ class TransformationEngine:
     
     def _ensure_basic_metadata(self, metadata: Dict, entity_name: str, main_analyzer) -> Dict:
         """Ensure basic metadata fields for source tables."""
-        metadata.setdefault("table_type", "TABLE")
+        
+        # Detect if this is a CREATE VIEW target
+        default_table_type = "TABLE"
+        if hasattr(self, 'current_sql') and self.current_sql:
+            if self.current_sql.strip().upper().startswith('CREATE VIEW'):
+                # Check if entity_name matches the CREATE VIEW target
+                try:
+                    import sqlglot
+                    parsed = sqlglot.parse_one(self.current_sql, dialect=getattr(main_analyzer, 'dialect', 'trino'))
+                    if isinstance(parsed, sqlglot.exp.Create) and hasattr(parsed, 'this') and parsed.this:
+                        target_name = str(parsed.this).strip('"')
+                        entity_name_clean = entity_name.strip('"')
+                        if target_name == entity_name_clean:
+                            default_table_type = "VIEW"
+                except Exception:
+                    pass
+        
+        metadata.setdefault("table_type", default_table_type)
         metadata.setdefault("schema", "default")
         
         # Use generic description since no external metadata

@@ -38,13 +38,14 @@ class CTEAnalyzer(BaseAnalyzer):
         self.logger = get_logger('analyzers.cte')
     
     def _is_ctas_query(self, sql: str) -> bool:
-        """Check if the SQL query is a CREATE TABLE AS SELECT query."""
+        """Check if the SQL query is a CREATE TABLE AS SELECT or CREATE VIEW AS SELECT query."""
         if not sql:
             return False
-        return sql.strip().upper().startswith('CREATE TABLE')
+        sql_upper = sql.strip().upper()
+        return sql_upper.startswith('CREATE TABLE') or sql_upper.startswith('CREATE VIEW')
     
     def _get_ctas_target_table(self, sql: str) -> Optional[str]:
-        """Extract target table name from CTAS query."""
+        """Extract target table/view name from CTAS/CREATE VIEW AS query."""
         if not self._is_ctas_query(sql):
             return None
         
@@ -54,9 +55,21 @@ class CTEAnalyzer(BaseAnalyzer):
             if isinstance(parsed, sqlglot.exp.Create) and hasattr(parsed, 'this') and parsed.this:
                 return str(parsed.this)
         except Exception as e:
-            self.logger.debug(f"Failed to extract CTAS target table: {str(e)}")
+            self.logger.debug(f"Failed to extract CTAS/CREATE VIEW target: {str(e)}")
         
         return None
+    
+    def _is_create_view_query(self, sql: str) -> bool:
+        """Check if the SQL query is a CREATE VIEW query."""
+        if not sql:
+            return False
+        return sql.strip().upper().startswith('CREATE VIEW')
+    
+    def _get_target_entity_type(self, sql: str) -> str:
+        """Get the appropriate entity type based on the SQL query type."""
+        if self._is_create_view_query(sql):
+            return "view"
+        return "table"
     
     def analyze_cte(self, sql: str) -> Dict[str, Any]:
         """Analyze CTE statement."""
@@ -531,7 +544,7 @@ class CTEAnalyzer(BaseAnalyzer):
         
         query_result_entity = {
             "entity": clean_table_name_quotes(final_entity_name) if final_entity_name != "QUERY_RESULT" else final_entity_name,
-            "entity_type": "table", 
+            "entity_type": self._get_target_entity_type(sql) if final_entity_name != "QUERY_RESULT" else "table", 
             "depth": len(chain),
             "dependencies": [],
             "metadata": {"table_columns": final_columns, "is_cte": False}

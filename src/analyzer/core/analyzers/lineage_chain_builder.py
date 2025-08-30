@@ -381,8 +381,10 @@ class LineageChainBuilder(BaseAnalyzer):
                     metadata["description"] = table_meta.description
             else:
                 # No external metadata - use basic defaults
+                # Use entity_type to determine table_type
+                table_type_value = "VIEW" if entity_type == "view" else "TABLE"
                 metadata = {
-                    "table_type": "TABLE",
+                    "table_type": table_type_value,
                     "schema": "default", 
                     "description": "Table information"
                 }
@@ -399,8 +401,25 @@ class LineageChainBuilder(BaseAnalyzer):
                     
                     # Build dependency chain
                     visited_in_path_new = visited_in_path | {entity_name}
+                    
+                    # Determine entity type for the dependency - check if it's a CREATE VIEW target
+                    dep_entity_type = "table"
+                    if sql and sql.strip().upper().startswith('CREATE VIEW'):
+                        try:
+                            import sqlglot
+                            parsed_sql = sqlglot.parse_one(sql, dialect=self.dialect)
+                            if isinstance(parsed_sql, sqlglot.exp.Create) and hasattr(parsed_sql, 'this') and parsed_sql.this:
+                                target_name = str(parsed_sql.this).strip('"')
+                                # Clean dependent_table name for comparison
+                                dependent_table_clean = dependent_table.strip('"')
+                                if target_name == dependent_table_clean:
+                                    dep_entity_type = "view"
+                        except Exception:
+                            # If parsing fails, default to "table"
+                            pass
+                    
                     dep_chain = build_comprehensive_chain(
-                        dependent_table, "table", current_depth + 1, 
+                        dependent_table, dep_entity_type, current_depth + 1, 
                         visited_in_path_new, entity_name
                     )
                     
