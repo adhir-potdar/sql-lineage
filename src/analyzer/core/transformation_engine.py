@@ -132,15 +132,10 @@ class TransformationEngine:
         if table_columns:
             entity_data['metadata']['table_columns'] = table_columns
     
-    def _create_ordered_metadata(self, metadata: Dict, entity_name: str, main_analyzer) -> Dict:
-        """Create ordered metadata for source tables."""
-        ordered_metadata = {}
-        
-        # Detect if this is a CREATE VIEW target
-        default_table_type = "TABLE"
+    def _detect_view_table_type(self, entity_name: str, main_analyzer) -> str:
+        """Detect if entity is a CREATE VIEW target, return 'VIEW' or 'TABLE'."""
         if hasattr(self, 'current_sql') and self.current_sql:
             if self.current_sql.strip().upper().startswith('CREATE VIEW'):
-                # Check if entity_name matches the CREATE VIEW target
                 try:
                     import sqlglot
                     parsed = sqlglot.parse_one(self.current_sql, dialect=getattr(main_analyzer, 'dialect', 'trino'))
@@ -148,9 +143,17 @@ class TransformationEngine:
                         target_name = str(parsed.this).strip('"')
                         entity_name_clean = entity_name.strip('"')
                         if target_name == entity_name_clean:
-                            default_table_type = "VIEW"
+                            return "VIEW"
                 except Exception:
                     pass
+        return "TABLE"
+
+    def _create_ordered_metadata(self, metadata: Dict, entity_name: str, main_analyzer) -> Dict:
+        """Create ordered metadata for source tables."""
+        ordered_metadata = {}
+        
+        # Detect if this is a CREATE VIEW target
+        default_table_type = self._detect_view_table_type(entity_name, main_analyzer)
         
         ordered_metadata["table_type"] = metadata.get("table_type", default_table_type)
         ordered_metadata["schema"] = metadata.get("schema", "default")
@@ -164,20 +167,7 @@ class TransformationEngine:
         """Ensure basic metadata fields for source tables."""
         
         # Detect if this is a CREATE VIEW target
-        default_table_type = "TABLE"
-        if hasattr(self, 'current_sql') and self.current_sql:
-            if self.current_sql.strip().upper().startswith('CREATE VIEW'):
-                # Check if entity_name matches the CREATE VIEW target
-                try:
-                    import sqlglot
-                    parsed = sqlglot.parse_one(self.current_sql, dialect=getattr(main_analyzer, 'dialect', 'trino'))
-                    if isinstance(parsed, sqlglot.exp.Create) and hasattr(parsed, 'this') and parsed.this:
-                        target_name = str(parsed.this).strip('"')
-                        entity_name_clean = entity_name.strip('"')
-                        if target_name == entity_name_clean:
-                            default_table_type = "VIEW"
-                except Exception:
-                    pass
+        default_table_type = self._detect_view_table_type(entity_name, main_analyzer)
         
         metadata.setdefault("table_type", default_table_type)
         metadata.setdefault("schema", "default")
