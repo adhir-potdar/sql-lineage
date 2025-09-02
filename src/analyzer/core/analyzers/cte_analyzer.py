@@ -10,7 +10,7 @@ from ...utils.sqlglot_helpers import (
 )
 from ...utils.column_extraction_utils import extract_all_referenced_columns
 from ...utils.metadata_utils import create_cte_metadata, merge_metadata_entries
-from ...utils.sql_parsing_utils import extract_function_type, extract_alias_from_expression, TableNameRegistry, CompatibilityMode, clean_table_name_quotes, clean_source_expression
+from ...utils.sql_parsing_utils import extract_function_type, extract_alias_from_expression, TableNameRegistry, CompatibilityMode, clean_table_name_quotes, clean_source_expression, validate_cte_dependencies, CircularDependencyError
 from ...utils.regex_patterns import is_aggregate_function
 from ..chain_builder_engine import ChainBuilderEngine
 from ...utils.logging_config import get_logger
@@ -75,6 +75,13 @@ class CTEAnalyzer(BaseAnalyzer):
         """Analyze CTE statement."""
         self.logger.info(f"Analyzing CTE statement (length: {len(sql)})")
         self.logger.debug(f"CTE SQL: {sql[:200]}..." if len(sql) > 200 else f"CTE SQL: {sql}")
+        
+        # Validate CTE dependencies for circular references
+        try:
+            validate_cte_dependencies(sql, self.dialect)
+        except CircularDependencyError as e:
+            self.logger.error(f"Circular dependency validation failed: {str(e)}")
+            raise
         
         try:
             self.logger.debug("Parsing CTE structure")

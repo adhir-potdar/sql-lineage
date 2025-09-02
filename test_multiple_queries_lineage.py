@@ -641,7 +641,9 @@ def analyze_lineage_chains():
         return False
     
     # Process lineage data through all steps using the wrapper method
+    print(f"🔍 Processing {len(lineage_data_list)} lineage data files through combiner...")
     combined_lineages = LineageChainCombiner.process_lineage_data_complete(lineage_data_list)
+    print(f"🔍 Combiner created {len(combined_lineages)} combined lineage chains")
     
     if not combined_lineages:
         print("❌ No combined lineages created.")

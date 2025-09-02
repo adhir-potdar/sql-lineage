@@ -335,6 +335,21 @@ class CTASParser(BaseParser):
                 'columns': group_by
             })
         
+        # Always add a passthrough transformation for CREATE TABLE AS SELECT to maintain connection
+        # This ensures even simple queries have transformation metadata for visualization
+        if not transformations:
+            # Get source and target table info
+            target_table = ctas_data.get('target_table', {}).get('name', 'unknown')
+            source_tables = [table.get('name', 'unknown') for table in select_data.get('from_tables', [])]
+            
+            # Create basic passthrough transformation
+            transformations.append({
+                'type': 'PASSTHROUGH',
+                'source_tables': source_tables,
+                'target_table': target_table,
+                'description': 'Direct table creation from source'
+            })
+        
         return transformations
     
     def _analyze_column_lineage(self, ctas_data: Dict[str, Any]) -> Dict[str, Any]:

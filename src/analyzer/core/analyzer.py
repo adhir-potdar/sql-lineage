@@ -9,7 +9,7 @@ from .models import LineageResult, TableMetadata
 from .extractor import LineageExtractor
 from .parsers import SelectParser, TransformationParser, CTEParser, CTASParser, InsertParser, UpdateParser
 from ..utils.validation import validate_sql_input
-from ..utils.sql_parsing_utils import TableNameRegistry, CompatibilityMode
+from ..utils.sql_parsing_utils import TableNameRegistry, CompatibilityMode, validate_cte_dependencies, CircularDependencyError
 from ..utils.logging_config import get_logger
 
 # Import the new modular analyzers
@@ -164,6 +164,21 @@ class SQLLineageAnalyzer:
                 table_lineage=self.extractor.extract_table_lineage(sqlglot.expressions.Anonymous()),
                 column_lineage=self.extractor.extract_column_lineage(sqlglot.expressions.Anonymous()),
                 errors=[validation_error]
+            )
+        
+        # Validate CTE dependencies for circular references
+        try:
+            validate_cte_dependencies(sql, self.dialect)
+        except CircularDependencyError as e:
+            self.logger.error(f"Circular dependency validation failed: {str(e)}")
+            return LineageResult(
+                sql=sql,
+                dialect=self.dialect,
+                table_lineage={},
+                column_lineage={},
+                metadata={},
+                errors=[str(e)],
+                warnings=[]
             )
         
         try:

@@ -1071,4 +1071,70 @@ def extract_columns_referenced_by_table_in_union(sql: str, table_name: str, dial
         return columns
         
     except Exception:
-        return []
+        return []# CTE validation functions
+
+
+
+class CircularDependencyError(ValueError):
+    """Exception raised when circular dependencies are detected in lineage analysis."""
+    
+    def __init__(self, cycle_path, dependency_type="CTE"):
+        self.cycle_path = cycle_path
+        self.dependency_type = dependency_type
+        cycle_str = " -> ".join(cycle_path + [cycle_path[0]])
+        super().__init__(f"CircularDependencyError: Circular {dependency_type} dependency detected: {cycle_str}")
+
+
+def validate_cte_dependencies(sql, dialect="trino"):
+    """Validate that CTEs do not have circular dependencies."""
+    if not sql or "WITH" not in sql.upper():
+        return True
+    
+    try:
+        import sqlglot
+        parsed = sqlglot.parse_one(sql, dialect=dialect)
+        cte_deps = {}
+        
+        for with_stmt in parsed.find_all(sqlglot.exp.With):
+            for cte in with_stmt.expressions:
+                if not isinstance(cte, sqlglot.exp.CTE) or not cte.alias:
+                    continue
+                
+                cte_name = str(cte.alias)
+                defined_ctes = {str(c.alias) for c in with_stmt.expressions 
+                               if isinstance(c, sqlglot.exp.CTE) and c.alias}
+                
+                referenced = []
+                if cte.this:
+                    for table_ref in cte.this.find_all(sqlglot.exp.Table):
+                        table_name = str(table_ref.name) if table_ref.name else None
+                        if table_name and table_name in defined_ctes:
+                            referenced.append(table_name)
+                
+                if referenced:
+                    cte_deps[cte_name] = referenced
+        
+        # Simple cycle detection
+        def has_cycle(node, visited, path):
+            if node in path:
+                cycle_start = path.index(node)
+                raise CircularDependencyError(path[cycle_start:], "CTE")
+            if node in visited:
+                return False
+            visited.add(node)
+            path.append(node)
+            for dep in cte_deps.get(node, []):
+                has_cycle(dep, visited, path)
+            path.pop()
+            return False
+        
+        visited = set()
+        for node in cte_deps:
+            if node not in visited:
+                has_cycle(node, visited, [])
+        
+        return True
+    except CircularDependencyError:
+        raise
+    except:
+        return True

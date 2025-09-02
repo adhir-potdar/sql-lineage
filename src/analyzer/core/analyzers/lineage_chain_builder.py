@@ -14,7 +14,7 @@ from ...utils.sql_parsing_utils import (
     infer_query_result_columns_simple, extract_clean_column_name,
     infer_query_result_columns_simple_fallback, extract_table_columns_from_sql,
     extract_join_columns_from_sql, extract_all_referenced_columns,
-    extract_qualified_filter_columns
+    extract_qualified_filter_columns, CircularDependencyError
 )
 from ...utils.column_extraction_utils import (
     extract_aggregate_columns, choose_best_column, process_select_expression
@@ -137,8 +137,17 @@ class LineageChainBuilder(BaseAnalyzer):
                 visited_in_path = set()
             
             # Stop if we've exceeded max depth or if we have a circular dependency
-            if current_depth > depth or table_name in visited_in_path:
+            if current_depth > depth:
                 return {"table": table_name, "depth": current_depth - 1, "dependencies": []}
+            if table_name in visited_in_path:
+                # Create cycle path for error reporting
+                visited_list = list(visited_in_path)
+                if table_name in visited_list:
+                    cycle_start = visited_list.index(table_name)
+                    cycle_path = visited_list[cycle_start:] + [table_name]
+                else:
+                    cycle_path = visited_list + [table_name]
+                raise CircularDependencyError(cycle_path, "table lineage")
             
             # Add current table to the path to prevent cycles
             visited_in_path = visited_in_path | {table_name}
@@ -255,8 +264,17 @@ class LineageChainBuilder(BaseAnalyzer):
                 visited_in_path = set()
             
             # Stop if we've exceeded max depth or if we have a circular dependency
-            if current_depth > depth or column_ref in visited_in_path:
+            if current_depth > depth:
                 return {"column": column_ref, "depth": current_depth - 1, "dependencies": []}
+            if column_ref in visited_in_path:
+                # Create cycle path for error reporting
+                visited_list = list(visited_in_path)
+                if column_ref in visited_list:
+                    cycle_start = visited_list.index(column_ref)
+                    cycle_path = visited_list[cycle_start:] + [column_ref]
+                else:
+                    cycle_path = visited_list + [column_ref]
+                raise CircularDependencyError(cycle_path, "column lineage")
             
             # Add current column to the path to prevent cycles
             visited_in_path = visited_in_path | {column_ref}
@@ -624,6 +642,10 @@ class LineageChainBuilder(BaseAnalyzer):
                             entity_clean = clean_table_name_quotes(str(entity_name))
                             dependent_clean = clean_table_name_quotes(str(dependent_table))
                             
+                            # For CTAS queries: source_table matches dependent, target_table matches entity
+                            # This is because entity is the result table, dependent is the source table
+                            ctas_match = (trans_source == dependent_clean and trans_target == entity_clean)
+                            
                             # Standard case: source_table matches entity, target_table matches dependent
                             standard_match = (trans_source == entity_clean and trans_target == dependent_clean)
                             
@@ -633,11 +655,23 @@ class LineageChainBuilder(BaseAnalyzer):
                                          trans_target == entity_clean and
                                          trans.get("union_type") is not None)
                             
-                            if standard_match or union_match:
+                            if ctas_match or standard_match or union_match:
                                 relevant_transformations.append(trans)
                         
                         if relevant_transformations:
                             dep_chain["transformations"] = relevant_transformations
+                        else:
+                            # For CREATE TABLE AS SELECT operations with no explicit transformations,
+                            # add a PASSTHROUGH transformation to maintain connection visibility
+                            if is_ctas_query(sql):
+                                passthrough_transformation = {
+                                    "type": "table_transformation",
+                                    "source_table": dependent_clean,
+                                    "target_table": entity_clean,
+                                    "transformation_type": "PASSTHROUGH",
+                                    "description": "Direct table creation from source"
+                                }
+                                dep_chain["transformations"] = [passthrough_transformation]
                     
                     chain["dependencies"].append(dep_chain)
             

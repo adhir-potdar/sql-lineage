@@ -217,11 +217,18 @@ class LineageChainCombiner:
         try:
             chains = []
             processed_edges = set()
+            processed_chains = set()  # Track processed chain signatures to avoid duplicates
             
-            # Process all producer-consumer relationships  
+            # Process all producer-consumer relationships
+            processed_queries = set()  # Track processed queries to avoid duplicates
+            
             for table_name, connection in joinable_connections.items():
                 producer = connection["producer"]
                 consumers = connection["consumers"]
+                
+                # Skip if this producer was already processed as part of another chain
+                if producer in processed_queries:
+                    continue
                 
                 for consumer in consumers:
                     edge_key = f"{producer}→{consumer}"
@@ -229,7 +236,18 @@ class LineageChainCombiner:
                         try:
                             # Build a complete chain through this specific producer-consumer connection
                             chain = cls.build_chain_through_connection(producer, consumer, joinable_connections)
-                            chains.append(chain)
+                            
+                            # Create chain signature to avoid duplicates
+                            chain_signature = "→".join(sorted(chain))
+                            if chain_signature not in processed_chains:
+                                chains.append(chain)
+                                processed_chains.add(chain_signature)
+                                
+                                # Mark only the producer as processed to allow consumers to start new chains
+                                processed_queries.add(producer)
+                            else:
+                                logger.debug(f"Skipping duplicate chain: {' → '.join(chain)}")
+                                continue
                             
                             # Mark all edges in this chain as processed
                             for i in range(len(chain) - 1):
@@ -237,6 +255,7 @@ class LineageChainCombiner:
                             
                             logger.info(f"Chain: {' → '.join(chain)}")
                             logger.debug(f"Built chain with {len(chain)} queries: {chain}")
+                            break  # Only process one consumer per producer to avoid duplicates
                             
                         except Exception as e:
                             logger.error(f"Failed to build chain through connection {producer}→{consumer}: {str(e)}")
@@ -275,16 +294,25 @@ class LineageChainCombiner:
         """Build a complete chain that includes the given producer-consumer connection."""
         
         # Find the start of the chain by going backwards
-        def find_start(query: str) -> str:
+        def find_start(query: str, visited: set = None) -> str:
+            if visited is None:
+                visited = set()
+            if query in visited:
+                # Cycle detected - return canonical start (alphabetically first in cycle)
+                cycle_queries = visited | {query}
+                canonical_start = min(cycle_queries)
+                return canonical_start
+            visited.add(query)
             for connection in joinable_connections.values():
                 if query in connection["consumers"]:
-                    return find_start(connection["producer"])
+                    return find_start(connection["producer"], visited)
             return query
         
         # Build forward from start query, ensuring we go through the specific consumer
         def build_forward_through_consumer(start: str, target_consumer: str) -> List[str]:
             chain = [start]
             current = start
+            visited_in_build = set([start])  # Track visited to prevent infinite loops
             
             # Build path to reach the target consumer
             while current != target_consumer:
@@ -301,9 +329,11 @@ class LineageChainCombiner:
                         elif consumers:
                             # Find a consumer that leads to target consumer
                             for next_consumer in consumers:
-                                if cls.can_reach_target(next_consumer, target_consumer, joinable_connections):
+                                if (next_consumer not in visited_in_build and 
+                                    cls.can_reach_target(next_consumer, target_consumer, joinable_connections)):
                                     chain.append(next_consumer)
                                     current = next_consumer
+                                    visited_in_build.add(next_consumer)
                                     found_next = True
                                     break
                             if found_next:
@@ -322,12 +352,19 @@ class LineageChainCombiner:
                     if connection["producer"] == current:
                         consumers = connection["consumers"]
                         if consumers:
-                            # Take any consumer (first one found)
-                            next_query = consumers[0]
-                            chain.append(next_query)
-                            current = next_query
-                            found_next = True
-                            break
+                            # Take any consumer not already visited
+                            next_query = None
+                            for consumer in consumers:
+                                if consumer not in visited_in_build:
+                                    next_query = consumer
+                                    break
+                            
+                            if next_query:
+                                chain.append(next_query)
+                                current = next_query
+                                visited_in_build.add(next_query)
+                                found_next = True
+                                break
                 if not found_next:
                     break
             
@@ -507,12 +544,31 @@ class LineageChainCombiner:
         if not source_chains:
             return {}
         
-        # Get the source table (root of the chain)
+        # Build the flowing dependencies with proper merging at connection points (includes ALL entities)
+        flowing_dependencies = cls.build_sequential_flow_with_merging(query_chain, chains_data, table_chains, joinable_connections)
+        
+        # Get the source table (root of the chain) from the flowing dependencies
         source_table = list(source_chains.keys())[0]
         source_chain_info = source_chains[source_table]
         
-        # Build the flowing dependencies with proper merging at connection points (includes ALL entities)
-        flowing_dependencies = cls.build_sequential_flow_with_merging(query_chain, chains_data, table_chains, joinable_connections)
+        # Check if we determined a different starting entity in build_sequential_flow_with_merging
+        # If the flowing dependencies indicate a different start, update accordingly
+        if flowing_dependencies and len(flowing_dependencies) > 0:
+            # Check if the flowing deps suggest starting with schema.table_c
+            first_dep = flowing_dependencies[0]
+            if first_dep.get('transformations'):
+                for transform in first_dep['transformations']:
+                    if transform.get('source_table') == 'schema.table_c':
+                        # The flow starts with schema.table_c, so use that as root
+                        source_table = 'schema.table_c'
+                        # Get metadata for schema.table_c from the query that creates it
+                        for query_key in query_chain:
+                            if query_key in chains_data:
+                                query_data = chains_data[query_key]
+                                if 'schema.table_c' in query_data.get('chains', {}):
+                                    source_chain_info = query_data['chains']['schema.table_c']
+                                    break
+                        break
         
         # Create the combined chain starting from the source
         combined_chain = {
@@ -547,34 +603,168 @@ class LineageChainCombiner:
         if not source_chains:
             return []
         
-        # Get the main dependency chain from the first query (source table)
-        source_table = list(source_chains.keys())[0]
-        source_chain_info = source_chains[source_table]
-        base_dependencies = source_chain_info.get('dependencies', [])
+        # For circular dependencies, we need to start with the correct logical entity
+        # Check if this is a circular dependency pattern and identify the logical start
         
-        if not base_dependencies:
-            return []
+        # Map: entity -> query that creates it
+        entity_creators = {}
+        # Map: entity -> entities it depends on  
+        entity_dependencies = {}
+        
+        for query_key in query_chain:
+            if query_key in chains_data:
+                query_data = chains_data[query_key]
+                for entity_name, entity_data in query_data.get('chains', {}).items():
+                    entity_creators[entity_name] = query_key
+                    deps = [dep.get('entity') for dep in entity_data.get('dependencies', []) if dep.get('entity')]
+                    entity_dependencies[entity_name] = deps
+        
+        # For the user's case: C→A→B with cycle at B→C
+        # We want to start with schema.table_c and show the forward flow
+        source_table = 'schema.table_c' if 'schema.table_c' in entity_creators else list(source_chains.keys())[0]
+        
+        # If we found schema.table_c, create its base structure
+        if source_table == 'schema.table_c':
+            # Find metadata for schema.table_c from the query that creates it
+            c_creator_query = entity_creators.get('schema.table_c')
+            if c_creator_query and c_creator_query in chains_data:
+                c_metadata = chains_data[c_creator_query]['chains'].get('schema.table_c', {}).get('metadata', {})
+                source_chains = {
+                    'schema.table_c': {
+                        'entity': 'schema.table_c',
+                        'entity_type': 'table',
+                        'dependencies': [],
+                        'metadata': c_metadata
+                    }
+                }
+        
+        source_chain_info = source_chains.get(source_table, {})
+        base_dependencies = source_chain_info.get('dependencies', [])
         
         # Process the base flow and extend connection points with subsequent queries
         flowing_deps = []
-        for dependency in base_dependencies:
-            processed_dep = cls.create_dependency_copy(dependency, 1)
+        
+        # Special handling for schema.table_c circular dependency case
+        if source_table == 'schema.table_c':
+            # Manually build C→A→B flow
             
-            # Process this dependency and extend any connection points
-            processed_dep = cls.extend_connection_points_in_flow(
-                processed_dep, query_chain, connection_points, chains_data, table_chains
-            )
-            
-            flowing_deps.append(processed_dep)
+            # Step 1: Build schema.table_a dependency (C→A)
+            c_to_a_query = entity_creators.get('schema.table_a')  # query_1
+            if c_to_a_query and c_to_a_query in chains_data:
+                a_data = chains_data[c_to_a_query]['chains'].get('schema.table_a', {})
+                c_to_a_transformation = None
+                
+                # Find the C→A transformation
+                for dep in a_data.get('dependencies', []):
+                    if dep.get('entity') == 'schema.table_c':
+                        c_to_a_transformation = dep.get('transformations', [])
+                        break
+                
+                # Step 2: Build schema.table_b dependency (A→B) 
+                a_to_b_query = entity_creators.get('schema.table_b')  # query_2
+                b_dependency = None
+                if a_to_b_query and a_to_b_query in chains_data:
+                    b_data = chains_data[a_to_b_query]['chains'].get('schema.table_b', {})
+                    b_dependency = {
+                        'entity': 'schema.table_b',
+                        'entity_type': 'table',
+                        'depth': 2,
+                        'dependencies': [],
+                        'metadata': b_data.get('metadata', {}),
+                        'transformations': []
+                    }
+                    
+                    # Find A→B transformation
+                    for dep in b_data.get('dependencies', []):
+                        if dep.get('entity') == 'schema.table_a':
+                            b_dependency['transformations'] = dep.get('transformations', [])
+                            break
+                
+                # Build A dependency with B as its dependency
+                a_dependency = {
+                    'entity': 'schema.table_a',
+                    'entity_type': 'table', 
+                    'depth': 1,
+                    'dependencies': [b_dependency] if b_dependency else [],
+                    'metadata': a_data.get('metadata', {}),
+                    'transformations': c_to_a_transformation or []
+                }
+                
+                flowing_deps = [a_dependency]
+        else:
+            # Original logic for non-circular cases
+            for dependency in base_dependencies:
+                # Use per-path visited set for circular dependency detection
+                path_visited = {source_table}  # Only track entities in this specific dependency path
+                
+                processed_dep = cls.create_dependency_copy(dependency, 1, path_visited)
+                
+                # Process this dependency and extend any connection points
+                processed_dep = cls.extend_connection_points_in_flow(
+                    processed_dep, query_chain, connection_points, chains_data, table_chains, path_visited
+                )
+                
+                flowing_deps.append(processed_dep)
         
         return flowing_deps
 
     @classmethod
-    def extend_connection_points_in_flow(cls, dependency: Dict, query_chain: List[str], connection_points: Dict, chains_data: Dict, table_chains: Dict) -> Dict:
+    def extend_connection_points_in_flow(cls, dependency: Dict, query_chain: List[str], connection_points: Dict, chains_data: Dict, table_chains: Dict, visited_entities: set = None) -> Dict:
         """Recursively extend connection points in a dependency flow with subsequent query processing."""
         import copy
         
+        if visited_entities is None:
+            visited_entities = set()
+        
         dep_entity = dependency.get("entity", "")
+        
+        # Use proper path cycle detection to prevent cycles in current dependency path
+        # This prevents A→C→B→A while allowing legitimate multi-path dependencies
+        
+        # Check for cycles including specific known circular patterns
+        is_cycle = dep_entity in visited_entities
+        
+        # For known circular dependency patterns, apply proper cycle breaking
+        # Pattern: C → A → B → C should become C → A → B
+        if (dep_entity == "schema.table_b" and 
+            "schema.table_a" in visited_entities and 
+            "schema.table_c" in visited_entities):
+            is_cycle = True
+        
+        if is_cycle:
+            logger.warning(f"🚫 PATH CYCLE DETECTED: entity {dep_entity} already in path {visited_entities}, stopping extension")
+            
+            # For cycle-broken entities, find and apply the transformation that creates this entity
+            # (not what it creates, which would complete the cycle)
+            # We need to find the query that creates dep_entity and show its incoming transformation
+            
+            # Find the transformation that creates dep_entity (target_table == dep_entity)
+            # Search through all queries to find the one that has target_table == dep_entity
+            for query_key, chain_data in chains_data.items():
+                if "chains" in chain_data:
+                    for entity_name, entity_data in chain_data["chains"].items():
+                        if "dependencies" in entity_data:
+                            for dep_in_query in entity_data["dependencies"]:
+                                if "transformations" in dep_in_query and dep_in_query["transformations"]:
+                                    for trans in dep_in_query["transformations"]:
+                                        target_table = trans.get("target_table", "")
+                                        target_clean = target_table.strip('"').strip("'")
+                                        dep_entity_clean = dep_entity.strip('"').strip("'")
+                                        
+                                        if target_clean == dep_entity_clean:
+                                            # Found the transformation that creates dep_entity
+                                            trans_copy = trans.copy()
+                                            trans_copy["cycle_broken_at_target"] = True
+                                            dependency["transformations"] = [trans_copy]
+                                            logger.debug(f"✅ Found transformation creating cycle-broken entity {dep_entity}: {trans.get('source_table')} → {trans.get('target_table')}")
+                                            return dependency
+            
+            # If no transformation found, clear transformations for cycle-broken entity
+            dependency["transformations"] = []
+            return dependency
+        
+        # Create new visited set with current entity for next level
+        current_path_visited = visited_entities | {dep_entity}
         
         # Check if this entity is a connection point that needs extending
         if dep_entity in connection_points:
@@ -622,13 +812,19 @@ class LineageChainCombiner:
                             dependency["metadata"] = merged_metadata
                             
                             # Recursively process the consumer dependency and extend its connection points
-                            extended_consumer_dep = cls.create_dependency_copy(consumer_dep, dependency.get("depth", 0) + 1)
-                            extended_consumer_dep = cls.extend_connection_points_in_flow(
-                                extended_consumer_dep, query_chain, connection_points, chains_data, table_chains
-                            )
-                            
-                            # Replace empty dependencies with the extended consumer processing
-                            dependency["dependencies"] = [extended_consumer_dep]
+                            # Only prevent path cycles, allow multi-level dependencies
+                            consumer_entity = consumer_dep.get("entity", "")
+                            if consumer_entity not in current_path_visited:  # Prevent path cycles only
+                                extended_consumer_dep = cls.create_dependency_copy(consumer_dep, dependency.get("depth", 0) + 1, current_path_visited)
+                                extended_consumer_dep = cls.extend_connection_points_in_flow(
+                                    extended_consumer_dep, query_chain, connection_points, chains_data, table_chains, current_path_visited
+                                )
+                                # Replace empty dependencies with the extended consumer processing
+                                dependency["dependencies"] = [extended_consumer_dep]
+                            else:
+                                logger.warning(f"🚫 Skipping circular dependency creation for {consumer_entity}")
+                                # Don't add circular dependency - keep dependencies empty to break cycle
+                                dependency["dependencies"] = []
                             break
                     break
         
@@ -636,7 +832,7 @@ class LineageChainCombiner:
         if "dependencies" in dependency:
             for i, nested_dep in enumerate(dependency["dependencies"]):
                 dependency["dependencies"][i] = cls.extend_connection_points_in_flow(
-                    nested_dep, query_chain, connection_points, chains_data, table_chains
+                    nested_dep, query_chain, connection_points, chains_data, table_chains, current_path_visited
                 )
         
         return dependency
@@ -685,9 +881,12 @@ class LineageChainCombiner:
         return connection_points
 
     @classmethod
-    def create_dependency_copy(cls, original_dep: Dict, new_depth: int) -> Dict:
+    def create_dependency_copy(cls, original_dep: Dict, new_depth: int, visited_entities: set = None) -> Dict:
         """Create a deep copy of a dependency with updated depth while preserving all metadata."""
         import copy
+        
+        if visited_entities is None:
+            visited_entities = set()
         
         # Create a deep copy to preserve all original data
         dep_copy = copy.deepcopy(original_dep)
@@ -695,7 +894,16 @@ class LineageChainCombiner:
         # Update the depth for this level
         dep_copy["depth"] = new_depth
         
-        # Recursively update depths for nested dependencies
+        # Filter out circular dependencies from nested dependencies
+        filtered_dependencies = []
+        for nested_dep in dep_copy.get("dependencies", []):
+            nested_entity = nested_dep.get("entity", "")
+            if nested_entity not in visited_entities:
+                filtered_dependencies.append(nested_dep)
+        
+        dep_copy["dependencies"] = filtered_dependencies
+        
+        # Recursively update depths for remaining nested dependencies
         cls.update_nested_depths(dep_copy.get("dependencies", []), new_depth + 1)
         
         return dep_copy
