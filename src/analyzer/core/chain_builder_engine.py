@@ -2,7 +2,7 @@
 
 from typing import Dict, List, Any, Optional, Set
 import sqlglot
-from ..utils.sql_parsing_utils import is_column_from_table, extract_function_type, extract_clean_column_name, is_subquery_expression, is_subquery_relevant_to_table, extract_columns_referenced_by_table_in_union, clean_table_name_quotes
+from ..utils.sql_parsing_utils import is_column_from_table, extract_function_type, extract_clean_column_name, is_subquery_expression, is_subquery_relevant_to_table, extract_columns_referenced_by_table_in_union, clean_table_name_quotes, normalize_entity_name
 from ..utils.metadata_utils import create_metadata_entry
 from ..utils.regex_patterns import is_aggregate_function
 from ..utils.aggregate_utils import is_aggregate_function_for_table, extract_alias_from_expression
@@ -94,6 +94,7 @@ class ChainBuilderEngine:
     def _add_transformations_to_chain(self, dep_chain: Dict, entity_name: str, 
                                     dependent_table: str, result, sql: str) -> Dict:
         """Add transformation information to a dependency chain."""
+        
         if hasattr(result, 'table_lineage') and hasattr(result.table_lineage, 'transformations'):
             transformations = []
             for transformation_list in result.table_lineage.transformations.values():
@@ -128,12 +129,15 @@ class ChainBuilderEngine:
             # Filter transformations to only include those relevant to this entity
             relevant_transformations = []
             for trans in transformations:
-                if (trans.get("source_table") == entity_name and 
-                    trans.get("target_table") == dependent_table):
+                source_matches = trans.get("source_table") == entity_name
+                target_matches = trans.get("target_table") == dependent_table
+                if (source_matches and target_matches):
                     relevant_transformations.append(trans)
             
             if relevant_transformations:
                 dep_chain["transformations"] = relevant_transformations
+        else:
+            pass
         
         return dep_chain
     
@@ -144,9 +148,9 @@ class ChainBuilderEngine:
             "right_table": None,
             "conditions": [
                 {
-                    "left_column": jc.left_column,
+                    "left_column": normalize_entity_name(jc.left_column),
                     "operator": jc.operator.value if hasattr(jc.operator, 'value') else str(jc.operator),
-                    "right_column": jc.right_column
+                    "right_column": normalize_entity_name(jc.right_column)
                 }
                 for jc in trans.join_conditions
             ]
@@ -156,19 +160,22 @@ class ChainBuilderEngine:
         if trans.join_conditions:
             first_condition = trans.join_conditions[0]
             if hasattr(first_condition, 'right_column') and '.' in first_condition.right_column:
-                right_table = first_condition.right_column.split('.')[0]
+                # Normalize right_column before extracting table name
+                normalized_right_column = normalize_entity_name(first_condition.right_column)
+                parts = normalized_right_column.split('.')
+                if len(parts) >= 2:
+                    # For database.table.column format, take database.table
+                    right_table = '.'.join(parts[:-1])
+                else:
+                    right_table = parts[0]
                 join_entry["right_table"] = right_table
         
         return join_entry
     
     def _add_filter_conditions(self, trans_data: Dict, trans, entity_name: str, sql: str) -> Dict:
         """Add filter conditions to transformation data."""
-        print(f"DEBUG: _add_filter_conditions called for {entity_name}, trans has filter_conditions: {hasattr(trans, 'filter_conditions')}")
-        if hasattr(trans, 'filter_conditions'):
-            print(f"DEBUG: Filter conditions count: {len(trans.filter_conditions) if trans.filter_conditions else 0}")
         
         if hasattr(trans, 'filter_conditions') and trans.filter_conditions:
-            print(f"DEBUG: Processing filter conditions for {entity_name}: {[(fc.column, fc.operator, fc.value) for fc in trans.filter_conditions]}")
             # Determine context for column filtering
             is_single_table = (
                 trans.target_table == "QUERY_RESULT" or  # Regular SELECT
@@ -186,10 +193,11 @@ class ChainBuilderEngine:
             for fc in trans.filter_conditions:
                 # Only include filter conditions that reference columns from this entity
                 column_belongs = is_column_from_table(fc.column, entity_name, sql, self.dialect)
-                print(f"DEBUG: Filter condition '{fc.column}' belongs to {entity_name}? {column_belongs}")
                 if column_belongs:
+                    # Normalize column reference to ensure consistent quoting
+                    normalized_column = normalize_entity_name(fc.column)
                     relevant_filters.append({
-                        "column": fc.column,
+                        "column": normalized_column,
                         "operator": fc.operator.value if hasattr(fc.operator, 'value') else str(fc.operator),
                         "value": fc.value
                     })
@@ -217,7 +225,9 @@ class ChainBuilderEngine:
             relevant_group_by = []
             for col in trans.group_by_columns:
                 if is_column_from_table(col, entity_name, sql, self.dialect):
-                    relevant_group_by.append(col)
+                    # Normalize column reference to ensure consistent quoting
+                    normalized_col = normalize_entity_name(col)
+                    relevant_group_by.append(normalized_col)
             
             if relevant_group_by:
                 trans_data["group_by_columns"] = relevant_group_by
@@ -265,7 +275,15 @@ class ChainBuilderEngine:
                 # Extract just the column name part (before ASC/DESC)
                 col_name = col.split()[0] if ' ' in col else col
                 if is_column_from_table(col_name, entity_name, sql, self.dialect):
-                    relevant_order_by.append(col)
+                    # Normalize column reference to ensure consistent quoting, while preserving ASC/DESC/NULLS LAST
+                    parts = col.split()
+                    normalized_col_name = normalize_entity_name(parts[0])
+                    if len(parts) > 1:
+                        # Reconstruct with ASC/DESC/NULLS LAST parts
+                        normalized_col = normalized_col_name + ' ' + ' '.join(parts[1:])
+                    else:
+                        normalized_col = normalized_col_name
+                    relevant_order_by.append(normalized_col)
             
             if relevant_order_by:
                 trans_data["order_by_columns"] = relevant_order_by
@@ -435,7 +453,7 @@ class ChainBuilderEngine:
         if table_aliases_key not in self._alias_cache:
             table_to_aliases = {}
             for alias, table in alias_to_table.items():
-                table_clean = table.strip('"').replace('".', '.').replace('"', '')
+                table_clean = normalize_entity_name(table)
                 if table_clean not in table_to_aliases:
                     table_to_aliases[table_clean] = []
                 table_to_aliases[table_clean].append(alias)
@@ -449,8 +467,10 @@ class ChainBuilderEngine:
         result = False
         
         # PERFORMANCE OPTIMIZATION: Use string containment check instead of regex
-        if entity_name in table_to_aliases:
-            aliases = table_to_aliases[entity_name]
+        # Normalize entity_name to match the normalized keys in table_to_aliases
+        entity_name_normalized = normalize_entity_name(entity_name)
+        if entity_name_normalized in table_to_aliases:
+            aliases = table_to_aliases[entity_name_normalized]
             # Use any() for short-circuit evaluation
             result = any(f'{alias}.' in raw_expression for alias in aliases)
         
@@ -484,6 +504,13 @@ class ChainBuilderEngine:
             import sqlglot
             from ..utils.sql_parsing_utils import is_subquery_expression
             
+            # CRITICAL FIX: Helper function to normalize table names for comparison (quoted vs unquoted)
+            def normalize_table_for_comparison(table_name):
+                if not table_name:
+                    return ""
+                # Remove quotes and normalize
+                return table_name.replace('"', '').replace("'", "")
+            
             # PERFORMANCE OPTIMIZATION: Cache SQL parsing results
             sql_hash = hash(sql)
             if sql_hash not in self._sql_parse_cache:
@@ -506,10 +533,12 @@ class ChainBuilderEngine:
             # PERFORMANCE OPTIMIZATION: Extract columns for all tables at once
             from ..utils.sql_parsing_utils import extract_table_columns_from_sql_batch
             entity_names = list(chains.keys())
+            # Use processed entity names for cache key to match what's used in column extraction
+            processed_entity_names = [name.replace('"', '') for name in entity_names]
             
-            batch_cache_key = f"batch_{sql_hash}_{hash(tuple(sorted(entity_names)))}"
+            batch_cache_key = f"batch_{sql_hash}_{hash(tuple(sorted(processed_entity_names)))}"
             if batch_cache_key not in self._column_cache:
-                all_table_columns_batch = extract_table_columns_from_sql_batch(sql, entity_names, self.dialect)
+                all_table_columns_batch = extract_table_columns_from_sql_batch(sql, processed_entity_names, self.dialect)
                 self._column_cache[batch_cache_key] = all_table_columns_batch
                 # Cache for later source column extraction
                 self._cached_table_columns_batch = all_table_columns_batch
@@ -546,6 +575,10 @@ class ChainBuilderEngine:
                         raw_expr = str(expr)
                         table_part = str(expr.table) if expr.table else stmt_source_table
                         column_name = str(expr.name) if expr.name else raw_expr
+                        
+                        # Resolve table aliases for proper source attribution
+                        if expr.table and table_part.lower() in alias_to_table:
+                            table_part = alias_to_table[table_part.lower()]
                         select_columns.append({
                             'raw_expression': raw_expr,
                             'column_name': column_name,
@@ -564,6 +597,7 @@ class ChainBuilderEngine:
                         
                         # For subquery expressions, set source_table to the subquery's table
                         source_table_for_expr = stmt_source_table
+                        
                         if is_subquery_expression(raw_expr, self.dialect):
                             # Extract the actual source table from the subquery
                             from ..utils.sql_parsing_utils import extract_tables_from_subquery
@@ -740,7 +774,11 @@ class ChainBuilderEngine:
                                 if is_union_query:
                                     entity_cache_key = f"union_cols_{entity_name}"
                                     if entity_cache_key not in self._expression_analysis_cache:
-                                        self._expression_analysis_cache[entity_cache_key] = [col for col in select_columns if col.get('source_table') == entity_name]
+                                        normalized_entity = normalize_table_for_comparison(entity_name)
+                                        self._expression_analysis_cache[entity_cache_key] = [
+                                            col for col in select_columns 
+                                            if normalize_table_for_comparison(col.get('source_table', '')) == normalized_entity
+                                        ]
                                     entity_select_columns = self._expression_analysis_cache[entity_cache_key]
                                 else:
                                     entity_select_columns = select_columns
@@ -799,11 +837,11 @@ class ChainBuilderEngine:
                                         is_aggregate_expr = col_data['is_aggregate']
                                         
                                         # Skip subquery columns for entities that don't match the subquery's source table
-                                        if (is_subquery_expr and source_table != entity_name):
+                                        if (is_subquery_expr and normalize_table_for_comparison(source_table) != normalize_table_for_comparison(entity_name)):
                                             continue
                                         
                                         # Skip individual aggregate functions that are part of subqueries
-                                        if (is_aggregate_expr and not is_subquery_expr and source_table != entity_name):
+                                        if (is_aggregate_expr and not is_subquery_expr and normalize_table_for_comparison(source_table) != normalize_table_for_comparison(entity_name)):
                                             # Check if this aggregate function is part of a subquery by looking at other columns
                                             skip_aggregate = False
                                             for j, other_col in enumerate(entity_select_columns):
@@ -812,7 +850,6 @@ class ChainBuilderEngine:
                                                 other_is_subquery = other_preanalyzed.get('is_subquery', False)
                                                 if (other_is_subquery and raw_expression in other_expr):
                                                     skip_aggregate = True
-                                                    print(f"DEBUG: Skipping aggregate '{raw_expression}' as it's part of subquery '{other_expr[:50]}...'")
                                                     break
                                             if skip_aggregate:
                                                 continue
@@ -901,7 +938,9 @@ class ChainBuilderEngine:
                                                 upstream_ref = f"{entity_name}.{raw_expression}"
                                             else:
                                                 column_name_to_use = display_name
-                                                upstream_ref = f"{entity_name}.{clean_name}"
+                                                # Normalize entity_name to ensure consistent quoting for upstream references
+                                                entity_name_normalized = normalize_entity_name(entity_name)
+                                                upstream_ref = f"{entity_name_normalized}.{clean_name}"
                                                 
                                             column_info = {
                                                 "name": column_name_to_use,
@@ -942,7 +981,7 @@ class ChainBuilderEngine:
                                                             alias, col = parts
                                                             # Resolve alias to full table name
                                                             if alias in alias_to_table:
-                                                                table_clean = alias_to_table[alias].strip('"').replace('".', '.').replace('"', '')
+                                                                table_clean = normalize_entity_name(alias_to_table[alias])
                                                                 resolved_upstream.append(f"{table_clean}.{col}")
                                                             else:
                                                                 resolved_upstream.append(upstream_col)
@@ -950,7 +989,9 @@ class ChainBuilderEngine:
                                                             resolved_upstream.append(upstream_col)
                                                     else:
                                                         # Unqualified column - use current entity
-                                                        resolved_upstream.append(f"{entity_name}.{upstream_col}")
+                                                        # Normalize entity_name to ensure consistent quoting
+                                                        entity_name_normalized = normalize_entity_name(entity_name)
+                                                        resolved_upstream.append(f"{entity_name_normalized}.{upstream_col}")
                                                 
                                                 # Update upstream with actual source columns instead of calculated column
                                                 if resolved_upstream:
@@ -976,7 +1017,9 @@ class ChainBuilderEngine:
                                     if (source_table in alias_to_table and 
                                         alias_to_table[source_table] == entity_name):
                                         # Regular table-prefixed column
-                                        upstream_col = f"{entity_name}.{column_name}"
+                                        # Normalize entity_name to ensure consistent quoting
+                                        entity_name_normalized = normalize_entity_name(entity_name)
+                                        upstream_col = f"{entity_name_normalized}.{column_name}"
                                         
                                         if raw_expression not in existing_column_names:
                                             column_info = {
@@ -1001,9 +1044,11 @@ class ChainBuilderEngine:
                                             
                                             column_name_to_use = alias or column_name
                                             if column_name_to_use not in existing_column_names:
+                                                # Normalize entity_name to ensure consistent quoting
+                                                entity_name_normalized = normalize_entity_name(entity_name)
                                                 column_info = {
                                                     "name": column_name_to_use,
-                                                    "upstream": [f"{entity_name}.{column_name_to_use}"],
+                                                    "upstream": [f"{entity_name_normalized}.{column_name_to_use}"],
                                                     "type": "DIRECT",
                                                     "transformation": {
                                                         "source_expression": raw_expression.replace(f" as {alias}", "").replace(f" AS {alias}", "") if alias else raw_expression,
@@ -1021,9 +1066,11 @@ class ChainBuilderEngine:
                                     clean_name = extract_clean_column_name(column_expr, column_expr)
                                     
                                     if clean_name not in existing_column_names:
+                                        # Normalize entity_name to ensure consistent quoting
+                                        entity_name_normalized = normalize_entity_name(entity_name)
                                         column_info = {
                                             "name": clean_name,
-                                            "upstream": [f"{entity_name}.{clean_name}"],
+                                            "upstream": [f"{entity_name_normalized}.{clean_name}"],
                                             "type": "DIRECT"
                                         }
                                         table_columns.append(column_info)
@@ -1107,6 +1154,9 @@ class ChainBuilderEngine:
                         if 'metadata' not in dep:
                             dep['metadata'] = {}
                         dep['metadata']['table_columns'] = table_columns
+                        self.logger.debug(f"Set table_columns for {dep_entity}: {len(table_columns)} columns")
+                    else:
+                        self.logger.debug(f"No table_columns to set for {dep_entity} (empty list)")
                 
             # Handle source table missing columns
             metadata = entity_data.get('metadata', {})
@@ -1198,7 +1248,7 @@ class ChainBuilderEngine:
         self.logger.debug("Adding missing source columns to all entities")
         
         # PERFORMANCE OPTIMIZATION: Use cached batch column extraction from preprocessing
-        entity_names = list(chains.keys())
+        entity_names = [name.replace('"', '') for name in chains.keys()]
         
         # Use the batch column extraction we already computed in preprocessing
         if hasattr(self, '_cached_table_columns_batch') and self._cached_table_columns_batch:
@@ -1225,8 +1275,10 @@ class ChainBuilderEngine:
             existing_columns = entity_data['metadata']['table_columns']
             existing_column_names = {col.get('name', '') for col in existing_columns}
             
-            # Add referenced columns that are missing
-            referenced_columns = all_referenced_columns.get(entity_name, [])
+            # Add referenced columns that are missing  
+            # Use processed entity name (without quotes) to match the keys in all_referenced_columns
+            processed_entity_name = entity_name.replace('"', '')
+            referenced_columns = all_referenced_columns.get(processed_entity_name, [])
             # Convert to set if it's a list for consistent handling
             if isinstance(referenced_columns, list):
                 referenced_columns = set(referenced_columns)

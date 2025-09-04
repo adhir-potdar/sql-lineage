@@ -16,6 +16,30 @@ def clean_table_name_quotes(table_name: str) -> str:
     return '.'.join(cleaned_parts)
 
 
+def normalize_entity_name(entity_name: str) -> str:
+    """
+    Normalize entity name by removing structural quotes while preserving semantics.
+    
+    This function handles the specific normalization pattern used for fixing 
+    quoting inconsistencies in multi-database queries.
+    
+    Args:
+        entity_name: The entity name to normalize (table, column, etc.)
+        
+    Returns:
+        Normalized entity name with structural quotes removed
+        
+    Examples:
+        '"oracle".schema.table' -> 'oracle.schema.table'
+        '"database"."schema"."table"' -> 'database.schema.table'
+        'database.schema."table"' -> 'database.schema.table'
+    """
+    if not entity_name:
+        return entity_name
+    
+    return entity_name.strip('"').replace('".', '.').replace('"', '')
+
+
 def normalize_table_name(table_name: str) -> str:
     """Normalize table name by removing quotes and standardizing format."""
     if not table_name:
@@ -426,12 +450,17 @@ def is_column_from_table(column_name: str, table_name: str, sql: str = None, dia
     if not column_name or not table_name:
         return False
     
+    # Normalize both table_name and column_name to handle quoting inconsistencies
+    # This fixes issues with multi-database quoted table names where entity names have different quoting than column references
+    table_name_normalized = normalize_entity_name(table_name)
+    column_name_normalized = normalize_entity_name(column_name)
+    
     # Handle qualified column names (e.g., "users.active", "u.salary", "ecommerce.users.status")
-    if '.' in column_name:
-        parsed = parse_qualified_name(column_name)
+    if '.' in column_name_normalized:
+        parsed = parse_qualified_name(column_name_normalized)
         
         # For database.table.column format, reconstruct full table name
-        if parsed["schema"] and parsed["table"] and '.' in table_name:
+        if parsed["schema"] and parsed["table"] and '.' in table_name_normalized:
             # This is likely database.table.column format
             column_table = f"{parsed['schema']}.{parsed['table']}"
         else:
@@ -440,8 +469,8 @@ def is_column_from_table(column_name: str, table_name: str, sql: str = None, dia
         if not column_table:
             return False
             
-        # Direct table name match
-        if column_table == table_name:
+        # Direct table name match using normalized names
+        if column_table == table_name_normalized:
             return True
             
         # Check if it's an alias match using SQL context
@@ -449,7 +478,7 @@ def is_column_from_table(column_name: str, table_name: str, sql: str = None, dia
         if sql:
             alias_mapping = build_alias_to_table_mapping(sql, dialect)
             actual_table = alias_mapping.get(column_table.lower())
-            if actual_table and actual_table == table_name:
+            if actual_table and actual_table == table_name_normalized:
                 return True
         
         # Smart name matching for database.table vs simple table names
@@ -787,7 +816,7 @@ def extract_table_columns_from_sql(sql: str, table_name: str, dialect: str = "tr
                     actual_table = alias_mapping.get(table_ref.lower())
                     if actual_table:
                         # Remove quotes from actual_table for comparison
-                        actual_table_clean = actual_table.strip('"').replace('".', '.').replace('"', '')
+                        actual_table_clean = normalize_entity_name(actual_table)
                         if actual_table_clean == table_name or actual_table == table_name:
                             columns.add(column_name)
                     else:
@@ -846,7 +875,7 @@ def extract_table_columns_from_sql_batch(sql: str, table_names: List[str], diale
                         actual_table = alias_mapping.get(table_ref.lower())
                         if actual_table:
                             # Remove quotes from actual_table for comparison
-                            actual_table_clean = actual_table.strip('"').replace('".', '.').replace('"', '')
+                            actual_table_clean = normalize_entity_name(actual_table)
                             if actual_table_clean == table_name or actual_table == table_name:
                                 all_columns[table_name].add(column_name)
                         else:

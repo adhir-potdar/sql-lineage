@@ -112,8 +112,25 @@ def get_join_conditions(sql: str, dialect: str = "trino") -> List[Dict[str, Any]
     join_nodes = traverse_ast_nodes(parsed, exp.Join)
     
     for join in join_nodes:
+        # Extract correct JOIN type preserving the full syntax
+        if join.kind == 'OUTER':
+            if join.side == 'LEFT':
+                join_type = "LEFT OUTER"
+            elif join.side == 'RIGHT': 
+                join_type = "RIGHT OUTER"
+            elif join.side == 'FULL':
+                join_type = "FULL OUTER"
+            else:
+                join_type = "OUTER"
+        elif join.side:
+            join_type = str(join.side)
+        elif join.kind:
+            join_type = str(join.kind)  
+        else:
+            join_type = "INNER"
+        
         join_info = {
-            "join_type": str(join.kind) if join.kind else "INNER",
+            "join_type": join_type,
             "right_table": str(join.this) if join.this else None,
             "conditions": []
         }

@@ -14,7 +14,7 @@ from ...utils.sql_parsing_utils import (
     infer_query_result_columns_simple, extract_clean_column_name,
     infer_query_result_columns_simple_fallback, extract_table_columns_from_sql,
     extract_join_columns_from_sql, extract_all_referenced_columns,
-    extract_qualified_filter_columns, CircularDependencyError
+    extract_qualified_filter_columns, CircularDependencyError, normalize_entity_name
 )
 from ...utils.column_extraction_utils import (
     extract_aggregate_columns, choose_best_column, process_select_expression
@@ -460,10 +460,9 @@ class LineageChainBuilder(BaseAnalyzer):
                                     for jc in trans.join_conditions:
                                         # Include join condition if it references this specific entity table
                                         # Check both left and right columns for entity table references
-                                        is_relevant = (
-                                            is_column_from_table(jc.left_column, entity_name, sql) or
-                                            is_column_from_table(jc.right_column, entity_name, sql)
-                                        )
+                                        left_match = is_column_from_table(jc.left_column, entity_name, sql)
+                                        right_match = is_column_from_table(jc.right_column, entity_name, sql)
+                                        is_relevant = left_match or right_match
                                         if is_relevant:
                                             relevant_join_conditions.append(jc)
                                     
@@ -474,9 +473,9 @@ class LineageChainBuilder(BaseAnalyzer):
                                             "right_table": None,
                                             "conditions": [
                                                 {
-                                                    "left_column": jc.left_column,
+                                                    "left_column": normalize_entity_name(jc.left_column),
                                                     "operator": jc.operator.value if hasattr(jc.operator, 'value') else str(jc.operator),
-                                                    "right_column": jc.right_column
+                                                    "right_column": normalize_entity_name(jc.right_column)
                                                 }
                                                 for jc in relevant_join_conditions
                                             ]
@@ -486,8 +485,9 @@ class LineageChainBuilder(BaseAnalyzer):
                                         if relevant_join_conditions:
                                             first_condition = relevant_join_conditions[0]
                                             if hasattr(first_condition, 'right_column') and '.' in first_condition.right_column:
-                                                # Extract table name from column string using consistent logic
-                                                column_parts = first_condition.right_column.split('.')
+                                                # Normalize right_column before extracting table name
+                                                normalized_right_column = normalize_entity_name(first_condition.right_column)
+                                                column_parts = normalized_right_column.split('.')
                                                 if len(column_parts) >= 3:
                                                     # For database.table.column format, take database.table
                                                     # This handles MySQL database.table naming and Trino catalog.schema.table naming
@@ -523,8 +523,10 @@ class LineageChainBuilder(BaseAnalyzer):
                                     for fc in trans.filter_conditions:
                                         # Include filter conditions that reference columns from this entity (including subquery context)
                                         if is_column_from_table(fc.column, entity_name, sql):
+                                            # Normalize column reference to ensure consistent quoting
+                                            normalized_column = normalize_entity_name(fc.column)
                                             relevant_filters.append({
-                                                "column": fc.column,
+                                                "column": normalized_column,
                                                 "operator": fc.operator.value if hasattr(fc.operator, 'value') else str(fc.operator),
                                                 "value": fc.value
                                             })
@@ -536,7 +538,9 @@ class LineageChainBuilder(BaseAnalyzer):
                                     relevant_group_by = []
                                     for col in trans.group_by_columns:
                                         if is_column_from_table(col, entity_name, sql):
-                                            relevant_group_by.append(col)
+                                            # Normalize column reference to ensure consistent quoting
+                                            normalized_col = normalize_entity_name(col)
+                                            relevant_group_by.append(normalized_col)
                                     if relevant_group_by:
                                         trans_data["group_by_columns"] = relevant_group_by
                                 
@@ -619,7 +623,15 @@ class LineageChainBuilder(BaseAnalyzer):
                                         # Extract just the column name part (before ASC/DESC)
                                         col_name = col.split()[0] if ' ' in col else col
                                         if is_column_from_table(col_name, entity_name, sql):
-                                            relevant_order_by.append(col)
+                                            # Normalize column reference to ensure consistent quoting, while preserving ASC/DESC/NULLS LAST
+                                            parts = col.split()
+                                            normalized_col_name = normalize_entity_name(parts[0])
+                                            if len(parts) > 1:
+                                                # Reconstruct with ASC/DESC/NULLS LAST parts
+                                                normalized_col = normalized_col_name + ' ' + ' '.join(parts[1:])
+                                            else:
+                                                normalized_col = normalized_col_name
+                                            relevant_order_by.append(normalized_col)
                                     if relevant_order_by:
                                         trans_data["order_by_columns"] = relevant_order_by
                                 

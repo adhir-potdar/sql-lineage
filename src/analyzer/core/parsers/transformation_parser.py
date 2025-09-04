@@ -146,8 +146,19 @@ class TransformationParser(BaseParser):
         return transformations
     
     def _get_join_type(self, join: exp.Join) -> str:
-        """Get JOIN type string."""
-        if join.side:
+        """Get JOIN type string with proper OUTER JOIN support."""
+        # Handle explicit OUTER JOIN variants first
+        if join.kind == 'OUTER':
+            if join.side == 'LEFT':
+                return "LEFT OUTER JOIN"
+            elif join.side == 'RIGHT':
+                return "RIGHT OUTER JOIN"
+            elif join.side == 'FULL':
+                return "FULL OUTER JOIN"
+            else:
+                return "OUTER JOIN"
+        # Handle other JOIN types
+        elif join.side:
             return f"{join.side.upper()} JOIN"
         elif join.kind:
             return f"{join.kind.upper()} JOIN"
