@@ -1284,12 +1284,27 @@ class CTEAnalyzer(BaseAnalyzer):
                         final_source = cte_to_source_map.get(from_table, from_table)
                         if self._tables_match(final_source, source_table):
                             # All columns belong to this source
+                            # CRITICAL FIX: Track existing column names to prevent duplicates
+                            existing_column_names = {col.get('name', '').lower() for col in table_columns}
+                            
                             for col_name in column_lineage_data.keys():
-                                table_columns.append({
-                                    "name": col_name,
-                                    "upstream": list(column_lineage_data[col_name]),
-                                    "type": "DIRECT"
-                                })
+                                # CRITICAL FIX: Normalize column name to prevent malformed entity references
+                                from ...utils.sql_parsing_utils import normalize_entity_name
+                                normalized_col_name = col_name
+                                # If column name contains entity references, extract just the column part
+                                if '.' in col_name:
+                                    # Extract the actual column name from patterns like "postgresql.customer_demo.items.item_name"
+                                    parts = normalize_entity_name(col_name).split('.')
+                                    normalized_col_name = parts[-1]  # Get just the column name
+                                
+                                # CRITICAL FIX: Only add if not already exists (prevent duplicates)
+                                if normalized_col_name.lower() not in existing_column_names:
+                                    table_columns.append({
+                                        "name": normalized_col_name,
+                                        "upstream": list(column_lineage_data[col_name]),
+                                        "type": "DIRECT"
+                                    })
+                                    existing_column_names.add(normalized_col_name.lower())
                     else:
                         # Complex SELECT * with JOINs - use original logic
                         for key, values in column_lineage_data.items():

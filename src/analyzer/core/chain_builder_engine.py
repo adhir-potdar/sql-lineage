@@ -510,6 +510,20 @@ class ChainBuilderEngine:
                     return ""
                 # Remove quotes and normalize
                 return table_name.replace('"', '').replace("'", "")
+                
+            # CRITICAL FIX: Helper function to normalize column names for duplicate detection
+            def normalize_column_for_comparison(column_name):
+                """Normalize column names for duplicate detection to prevent malformed name duplication."""
+                if not column_name:
+                    return ""
+                # Remove quotes, normalize case and structure
+                normalized = normalize_entity_name(column_name) if '.' in column_name else column_name
+                # Extract just the column name part if it's fully qualified
+                if '.' in normalized:
+                    parts = normalized.split('.')
+                    return parts[-1].lower()  # Return just the column name in lowercase
+                return normalized.lower()
+                
             
             # PERFORMANCE OPTIMIZATION: Cache SQL parsing results
             sql_hash = hash(sql)
@@ -938,9 +952,10 @@ class ChainBuilderEngine:
                                                 upstream_ref = f"{entity_name}.{raw_expression}"
                                             else:
                                                 column_name_to_use = display_name
-                                                # Normalize entity_name to ensure consistent quoting for upstream references
+                                                # Normalize entity_name to ensure consistent quoting for upstream references and prevent malformed names
                                                 entity_name_normalized = normalize_entity_name(entity_name)
-                                                upstream_ref = f"{entity_name_normalized}.{clean_name}"
+                                                clean_name_normalized = normalize_entity_name(clean_name) if '.' in clean_name else clean_name
+                                                upstream_ref = f"{entity_name_normalized}.{clean_name_normalized}"
                                                 
                                             column_info = {
                                                 "name": column_name_to_use,
@@ -1017,9 +1032,10 @@ class ChainBuilderEngine:
                                     if (source_table in alias_to_table and 
                                         alias_to_table[source_table] == entity_name):
                                         # Regular table-prefixed column
-                                        # Normalize entity_name to ensure consistent quoting
+                                        # Normalize entity_name to ensure consistent quoting and prevent malformed names
                                         entity_name_normalized = normalize_entity_name(entity_name)
-                                        upstream_col = f"{entity_name_normalized}.{column_name}"
+                                        column_name_normalized = normalize_entity_name(column_name) if '.' in column_name else column_name
+                                        upstream_col = f"{entity_name_normalized}.{column_name_normalized}"
                                         
                                         if raw_expression not in existing_column_names:
                                             column_info = {
@@ -1044,11 +1060,12 @@ class ChainBuilderEngine:
                                             
                                             column_name_to_use = alias or column_name
                                             if column_name_to_use not in existing_column_names:
-                                                # Normalize entity_name to ensure consistent quoting
+                                                # Normalize entity_name to ensure consistent quoting and prevent malformed names
                                                 entity_name_normalized = normalize_entity_name(entity_name)
+                                                column_name_to_use_normalized = normalize_entity_name(column_name_to_use) if '.' in column_name_to_use else column_name_to_use
                                                 column_info = {
                                                     "name": column_name_to_use,
-                                                    "upstream": [f"{entity_name_normalized}.{column_name_to_use}"],
+                                                    "upstream": [f"{entity_name_normalized}.{column_name_to_use_normalized}"],
                                                     "type": "DIRECT",
                                                     "transformation": {
                                                         "source_expression": raw_expression.replace(f" as {alias}", "").replace(f" AS {alias}", "") if alias else raw_expression,
@@ -1066,11 +1083,12 @@ class ChainBuilderEngine:
                                     clean_name = extract_clean_column_name(column_expr, column_expr)
                                     
                                     if clean_name not in existing_column_names:
-                                        # Normalize entity_name to ensure consistent quoting
+                                        # Normalize entity_name to ensure consistent quoting and prevent malformed names
                                         entity_name_normalized = normalize_entity_name(entity_name)
+                                        clean_name_normalized = normalize_entity_name(clean_name) if '.' in clean_name else clean_name
                                         column_info = {
                                             "name": clean_name,
-                                            "upstream": [f"{entity_name_normalized}.{clean_name}"],
+                                            "upstream": [f"{entity_name_normalized}.{clean_name_normalized}"],
                                             "type": "DIRECT"
                                         }
                                         table_columns.append(column_info)
@@ -1090,11 +1108,13 @@ class ChainBuilderEngine:
                                 clean_name = extract_clean_column_name(raw_expression, column_name)
                                 
                                 if clean_name not in existing_column_names:
-                                    # Get source table for proper upstream reference
+                                    # Get source table for proper upstream reference and normalize it
                                     source_table = preanalyzed.get('source_table', sel_col.get('source_table', entity_name))
+                                    source_table_normalized = normalize_entity_name(source_table)
+                                    clean_name_normalized = normalize_entity_name(clean_name) if '.' in clean_name else clean_name
                                     column_info = {
                                         "name": clean_name,
-                                        "upstream": [f"{source_table}.{clean_name}"],
+                                        "upstream": [f"{source_table_normalized}.{clean_name_normalized}"],
                                         "type": "DIRECT"
                                     }
                                     
@@ -1137,9 +1157,11 @@ class ChainBuilderEngine:
                                     # Extract the alias/column name for this subquery result
                                     clean_name = extract_clean_column_name(raw_expression, f"subquery_{len(table_columns)}")
                                     if clean_name not in existing_column_names:
+                                        entity_name_normalized = normalize_entity_name(entity_name)
+                                        clean_name_normalized = normalize_entity_name(clean_name) if '.' in clean_name else clean_name
                                         column_info = {
                                             "name": clean_name,
-                                            "upstream": [f"{entity_name}.{clean_name}"],
+                                            "upstream": [f"{entity_name_normalized}.{clean_name_normalized}"],
                                             "type": "DIRECT",
                                             "transformation": {
                                                 "source_expression": raw_expression,
