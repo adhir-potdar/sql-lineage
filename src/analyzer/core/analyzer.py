@@ -209,6 +209,12 @@ class SQLLineageAnalyzer:
             return result
             
         except Exception as e:
+            # Re-raise SQLGlot ParseError to be handled as 400 Bad Request
+            if "ParseError" in str(type(e)) or "No expression was parsed from" in str(e):
+                self.logger.error(f"SQL parsing failed - re-raising ParseError: {str(e)}")
+                raise e
+            
+            # Handle other errors normally
             self.logger.error(f"Analysis failed: {str(e)}", exc_info=True)
             return LineageResult(
                 sql=sql,

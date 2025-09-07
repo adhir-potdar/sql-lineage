@@ -9,7 +9,7 @@ from typing import Dict, List, Any, Optional, Tuple
 import sqlglot
 from sqlglot import exp
 from ...utils.logging_config import get_logger
-from ...utils.sql_parsing_utils import clean_table_name_quotes
+from ...utils.sql_parsing_utils import clean_table_name_quotes, normalize_entity_name
 
 
 class DerivedTableAnalyzer:
@@ -23,6 +23,7 @@ class DerivedTableAnalyzer:
     def analyze_derived_tables(self, sql: str) -> Dict[str, Any]:
         """
         Analyze derived tables in FROM clauses and create 3-layer lineage structure.
+        Enhanced with JOIN detection debugging.
         
         Args:
             sql: SQL query string to analyze
@@ -36,6 +37,24 @@ class DerivedTableAnalyzer:
         try:
             parsed = sqlglot.parse_one(sql, dialect=self.dialect)
             
+            # ENHANCED DEBUG: Check if this is a JOIN query
+            is_create_view = isinstance(parsed, exp.Create) and parsed.kind == "VIEW"
+            if is_create_view:
+                self.logger.info(f"DERIVED TABLE ANALYZER - Processing CREATE VIEW statement")
+                # Check for JOINs in the CREATE VIEW
+                join_count = 0
+                if hasattr(parsed, 'expression') and parsed.expression:
+                    for node in parsed.expression.walk():
+                        if isinstance(node, (exp.Join,)):
+                            join_count += 1
+                            self.logger.info(f"DERIVED TABLE ANALYZER - Found JOIN in CREATE VIEW: {type(node).__name__}")
+                self.logger.info(f"DERIVED TABLE ANALYZER - Total JOINs detected in CREATE VIEW: {join_count}")
+            else:
+                self.logger.info(f"DERIVED TABLE ANALYZER - Processing regular SELECT statement")
+            
+            # Detect if this is a CREATE VIEW or CREATE TABLE statement
+            target_table_name = self._extract_target_table_name(parsed, sql)
+            
             # Find derived tables in FROM clauses
             derived_tables = self._extract_from_subqueries(parsed)
             
@@ -45,9 +64,13 @@ class DerivedTableAnalyzer:
             # Process each derived table
             analysis_result = {}
             for derived_table in derived_tables:
-                table_analysis = self._process_derived_table(derived_table, parsed)
+                table_analysis = self._process_derived_table(derived_table, parsed, target_table_name)
                 if table_analysis:
                     analysis_result.update(table_analysis)
+            
+            # Post-process CREATE VIEW/TABLE entities if any were detected
+            if target_table_name:
+                self._create_table_entity(analysis_result, target_table_name, parsed)
             
             return analysis_result
             
@@ -85,7 +108,38 @@ class DerivedTableAnalyzer:
         
         return derived_tables
     
-    def _process_derived_table(self, derived_table: Dict, outer_query) -> Dict[str, Any]:
+    def _extract_target_table_name(self, parsed_sql, sql: str) -> Optional[str]:
+        """Extract the target table name from CREATE VIEW or CREATE TABLE statements."""
+        try:
+            # Check if this is a CREATE VIEW or CREATE TABLE statement
+            if isinstance(parsed_sql, exp.Create) and parsed_sql.kind in ["VIEW", "TABLE"]:
+                if parsed_sql.this and isinstance(parsed_sql.this, exp.Table):
+                    table = parsed_sql.this
+                    
+                    # Extract fully qualified table/view name using same logic as source tables
+                    if table.catalog and table.db:
+                        # Handle three-part naming (e.g., "catalog"."schema"."table")
+                        from ...utils.sql_parsing_utils import normalize_quoted_identifier
+                        catalog = normalize_quoted_identifier(str(table.catalog))
+                        schema = normalize_quoted_identifier(str(table.db))  
+                        table_name_part = normalize_quoted_identifier(str(table.name))
+                        return f"{catalog}.{schema}.{table_name_part}"
+                    elif table.db:
+                        # Handle database.table naming (e.g., "promethium.table_name")
+                        from ...utils.sql_parsing_utils import normalize_quoted_identifier
+                        db = normalize_quoted_identifier(str(table.db))
+                        table_name_part = normalize_quoted_identifier(str(table.name))
+                        return f"{db}.{table_name_part}"
+                    else:
+                        # Handle simple table naming (e.g., "table_name")
+                        from ...utils.sql_parsing_utils import normalize_quoted_identifier
+                        return normalize_quoted_identifier(str(table.name))
+        except Exception as e:
+            self.logger.debug(f"Could not extract view name: {e}")
+        
+        return None
+    
+    def _process_derived_table(self, derived_table: Dict, outer_query, target_table_name: Optional[str] = None) -> Dict[str, Any]:
         """Process a single derived table and create 3-layer lineage."""
         subquery = derived_table['subquery']
         alias = derived_table['alias']
@@ -99,79 +153,59 @@ class DerivedTableAnalyzer:
         derived_table_entity = f"derived_table_{alias}"
         
         # Analyze columns and transformations in each layer
-        layer_analysis = self._analyze_three_layers(source_table, derived_table_entity, subquery, outer_query, alias)
+        layer_analysis = self._analyze_three_layers(source_table, derived_table_entity, subquery, outer_query, alias, target_table_name)
         
         return layer_analysis
     
     def _extract_source_table(self, subquery) -> Optional[str]:
-        """Extract the source table name from the subquery."""
+        """Extract the fully qualified source table name from the subquery."""
         from_clause = subquery.find(exp.From)
         if from_clause and isinstance(from_clause.this, exp.Table):
-            return str(from_clause.this.name)
+            table = from_clause.this
+            
+            # Extract fully qualified table name (same logic as in sql_parsing_utils)
+            if table.catalog and table.db:
+                # Handle three-part naming (e.g., "catalog"."schema"."table")
+                from ...utils.sql_parsing_utils import normalize_quoted_identifier
+                catalog = normalize_quoted_identifier(str(table.catalog))
+                schema = normalize_quoted_identifier(str(table.db))  
+                table_name_part = normalize_quoted_identifier(str(table.name))
+                return f'"{catalog}"."{schema}"."{table_name_part}"'
+            elif table.db:
+                # Handle database.table naming (e.g., "ecommerce.users")
+                from ...utils.sql_parsing_utils import normalize_quoted_identifier
+                db = normalize_quoted_identifier(str(table.db))
+                table_name_part = normalize_quoted_identifier(str(table.name))
+                return f"{db}.{table_name_part}"
+            else:
+                # Handle simple table naming (e.g., "users")
+                from ...utils.sql_parsing_utils import normalize_quoted_identifier
+                return normalize_quoted_identifier(str(table.name))
         return None
     
     def _analyze_three_layers(self, source_table: str, derived_table_entity: str, 
-                            subquery, outer_query, alias: str) -> Dict[str, Any]:
+                            subquery, outer_query, alias: str, target_table_name: Optional[str] = None) -> Dict[str, Any]:
         """Analyze the complete 3-layer flow: source → derived → result."""
         
-        # Layer 1: Source table columns (from subquery SELECT and aggregations)
-        source_columns = self._extract_source_table_columns(subquery, source_table)
+        # Layer 1: Source table columns - empty, populated by main chain builder
+        source_columns = []
         
         # Layer 2: Derived table columns (subquery SELECT expressions)
         derived_columns = self._extract_derived_table_columns(subquery)
         
         # Layer 3: Query result columns (outer SELECT expressions)
-        result_columns = self._extract_query_result_columns(outer_query, alias, derived_columns)
+        result_columns = self._extract_query_result_columns(outer_query, alias, derived_columns, target_table_name)
         
         # Layer transformations
         source_to_derived_trans = self._extract_source_to_derived_transformations(subquery, source_table, derived_table_entity)
-        derived_to_result_trans = self._extract_derived_to_result_transformations(outer_query, derived_table_entity, alias)
+        derived_to_result_trans = self._extract_derived_to_result_transformations(outer_query, derived_table_entity, alias, target_table_name)
         
         # Build the 3-layer structure
         return self._build_three_layer_structure(
             source_table, derived_table_entity, source_columns, derived_columns, result_columns,
-            source_to_derived_trans, derived_to_result_trans
+            source_to_derived_trans, derived_to_result_trans, target_table_name
         )
     
-    def _extract_source_table_columns(self, subquery, source_table: str) -> List[Dict]:
-        """Extract columns needed from the source table."""
-        columns = []
-        
-        # Get columns from SELECT expressions
-        for expr in subquery.expressions:
-            if isinstance(expr, exp.Column):
-                # Direct column reference
-                col_name = str(expr.name)
-                columns.append({
-                    "name": col_name,
-                    "upstream": [],
-                    "type": "SOURCE"
-                })
-            elif isinstance(expr, exp.Alias):
-                # Check if the alias contains column references
-                referenced_cols = self._extract_column_references(expr.this, source_table)
-                for col_name in referenced_cols:
-                    if not any(c["name"] == col_name for c in columns):
-                        columns.append({
-                            "name": col_name,
-                            "upstream": [],
-                            "type": "SOURCE"
-                        })
-        
-        # Get columns from GROUP BY
-        group_by = subquery.find(exp.Group)
-        if group_by:
-            for group_expr in group_by.expressions:
-                if isinstance(group_expr, exp.Column):
-                    col_name = str(group_expr.name)
-                    if not any(c["name"] == col_name for c in columns):
-                        columns.append({
-                            "name": col_name,
-                            "upstream": [],
-                            "type": "SOURCE"
-                        })
-        
-        return columns
     
     def _extract_column_references(self, expression, source_table: str) -> List[str]:
         """Extract column references from an expression."""
@@ -187,6 +221,15 @@ class DerivedTableAnalyzer:
     def _extract_derived_table_columns(self, subquery) -> List[Dict]:
         """Extract columns produced by the derived table."""
         columns = []
+        
+        # Check if this is a SELECT * query
+        has_star = any(isinstance(expr, exp.Star) for expr in subquery.expressions)
+        
+        if has_star:
+            # For SELECT *, we need to indicate that all source columns pass through
+            # We'll create a special marker that the main chain builder can populate
+            # with actual column names from the source table
+            return [{"name": "*", "upstream": [], "type": "PASSTHROUGH"}]
         
         for expr in subquery.expressions:
             if isinstance(expr, exp.Column):
@@ -226,28 +269,66 @@ class DerivedTableAnalyzer:
         
         return columns
     
-    def _extract_query_result_columns(self, outer_query, alias: str, derived_columns: List[Dict]) -> List[Dict]:
-        """Extract columns in the final query result."""
+    def _extract_create_table_columns(self, outer_query, target_table_name: str) -> List[Dict]:
+        """Extract all columns for a CREATE VIEW or CREATE TABLE statement."""
         columns = []
         
+        # Extract all columns from the CREATE VIEW/TABLE SELECT statement
         for expr in outer_query.expressions:
             if isinstance(expr, exp.Column):
                 col_name = str(expr.name)
                 table_ref = str(expr.table) if expr.table else None
                 
-                if table_ref == alias:
-                    # Reference to derived table column
-                    full_name = f"{alias}.{col_name}"
+                if table_ref:
+                    # Column with table reference (e.g., t1.country → country)
+                    column_name = col_name  # Use just the column name for the target table
                     
-                    # Find corresponding derived table column
-                    derived_col = next((c for c in derived_columns if c["name"] == col_name), None)
-                    if derived_col:
+                    # Map to the appropriate derived table  
+                    derived_table_ref = f"derived_table_{table_ref}"
+                    columns.append({
+                        "name": column_name,
+                        "upstream": [f"{derived_table_ref}.{col_name}"],
+                        "type": "DIRECT"
+                    })
+                    self.logger.debug(f"CREATE TABLE/VIEW: Added column {column_name} from {derived_table_ref}.{col_name}")
+                else:
+                    # Column without table reference (shouldn't happen for CREATE with subqueries)
+                    columns.append({
+                        "name": col_name,
+                        "upstream": [f"derived_table_unknown.{col_name}"],
+                        "type": "DIRECT"
+                    })
+        
+        self.logger.debug(f"_extract_create_table_columns: Extracted {len(columns)} columns for table {target_table_name}")
+        return columns
+
+    def _extract_query_result_columns(self, outer_query, alias: str, derived_columns: List[Dict], target_table_name: Optional[str] = None) -> List[Dict]:
+        """Extract columns in the final query result."""
+        columns = []
+        
+        if target_table_name:
+            # For CREATE VIEW/TABLE, we don't extract columns here - they are handled separately
+            # This avoids duplication and allows proper merging
+            return []
+        else:
+            # For regular SELECT queries, only extract columns that reference this specific alias
+            for expr in outer_query.expressions:
+                if isinstance(expr, exp.Column):
+                    col_name = str(expr.name)
+                    table_ref = str(expr.table) if expr.table else None
+                    
+                    if table_ref == alias:
+                        # This column references our derived table
+                        full_name = f"{alias}.{col_name}"
+                        
+                        # Create column entry
                         columns.append({
                             "name": full_name,
                             "upstream": [f"derived_table_{alias}.{col_name}"],
                             "type": "DIRECT"
                         })
         
+        self.logger.debug(f"_extract_query_result_columns: Extracted {len(columns)} columns for target_table={target_table_name}, alias={alias}")
         return columns
     
     def _extract_source_to_derived_transformations(self, subquery, source_table: str, derived_table_entity: str) -> List[Dict]:
@@ -273,15 +354,16 @@ class DerivedTableAnalyzer:
         transformations.append(trans)
         return transformations
     
-    def _extract_derived_to_result_transformations(self, outer_query, derived_table_entity: str, alias: str) -> List[Dict]:
+    def _extract_derived_to_result_transformations(self, outer_query, derived_table_entity: str, alias: str, target_table_name: Optional[str] = None) -> List[Dict]:
         """Extract transformations from derived table to query result."""
         transformations = []
         
-        # Base transformation
+        # Base transformation - use actual table name if available, otherwise QUERY_RESULT
+        target_table = target_table_name if target_table_name else "QUERY_RESULT"
         trans = {
             "type": "table_transformation",
             "source_table": clean_table_name_quotes(derived_table_entity),
-            "target_table": "QUERY_RESULT"
+            "target_table": target_table
         }
         
         # Add WHERE conditions if they reference derived table columns
@@ -316,17 +398,40 @@ class DerivedTableAnalyzer:
     def _build_three_layer_structure(self, source_table: str, derived_table_entity: str,
                                    source_columns: List[Dict], derived_columns: List[Dict], 
                                    result_columns: List[Dict], source_to_derived_trans: List[Dict],
-                                   derived_to_result_trans: List[Dict]) -> Dict[str, Any]:
-        """Build the complete 3-layer lineage structure."""
+                                   derived_to_result_trans: List[Dict], target_table_name: Optional[str] = None) -> Dict[str, Any]:
+        """Build the complete 3-layer lineage structure using the original fully qualified source table name."""
         
-        # Update upstream references in derived columns
-        for derived_col in derived_columns:
-            derived_col["upstream"] = [ref.replace("SOURCE", source_table) for ref in derived_col["upstream"]]
+        # Handle PASSTHROUGH columns for SELECT * cases
+        if len(derived_columns) == 1 and derived_columns[0].get("name") == "*":
+            # This is a SELECT * - we need to defer column population to main chain builder
+            # For now, set as empty and let the merge process handle it
+            derived_columns = []
+        else:
+            # Update upstream references in derived columns and normalize quotes
+            for derived_col in derived_columns:
+                if "upstream" in derived_col:
+                    # Replace SOURCE placeholder with actual source table and normalize quotes
+                    updated_refs = []
+                    for ref in derived_col["upstream"]:
+                        updated_ref = ref.replace("SOURCE", source_table)
+                        # Use existing utility function to normalize quotes
+                        normalized_ref = normalize_entity_name(updated_ref)
+                        updated_refs.append(normalized_ref)
+                    derived_col["upstream"] = updated_refs
+        
+        # CRITICAL FIX: Use the original source_table name (with quotes) as the key
+        # This ensures we don't create duplicates with different naming conventions
+        # The main extractor creates entities like "hive"."promethium"."table_name"
+        # We should use the same key format to integrate with existing entities
+        source_table_key = source_table  # Keep original format with quotes
         
         # Build the nested structure: source → derived → result
+        # Normalize entity name using existing utility function
+        clean_entity_name = normalize_entity_name(source_table_key) if source_table_key else source_table_key
+        
         return {
-            clean_table_name_quotes(source_table): {
-                "entity": clean_table_name_quotes(source_table),
+            clean_entity_name: {
+                "entity": clean_entity_name,
                 "entity_type": "table",
                 "depth": 0,
                 "dependencies": [{
@@ -338,11 +443,11 @@ class DerivedTableAnalyzer:
                     },
                     "transformations": source_to_derived_trans,
                     "dependencies": [{
-                        "entity": "QUERY_RESULT",
-                        "entity_type": "table", 
+                        "entity": target_table_name if target_table_name else "QUERY_RESULT",
+                        "entity_type": self._get_target_entity_type(target_table_name) if target_table_name else "table", 
                         "depth": 2,
                         "metadata": {
-                            "table_columns": result_columns
+                            "table_columns": result_columns  # Will be empty for CREATE VIEW initially, populated later
                         },
                         "transformations": derived_to_result_trans
                     }]
@@ -367,3 +472,70 @@ class DerivedTableAnalyzer:
             if func in expr_upper:
                 return func
         return "UNKNOWN"
+    
+    def _get_target_entity_type(self, target_table_name: str) -> str:
+        """Determine if the target is a VIEW or TABLE based on the CREATE statement."""
+        # For now, we'll determine based on the parsed SQL in the create method
+        # This is a placeholder - the actual determination happens in _create_table_entity
+        return "view"  # Default to view for backward compatibility
+    
+    def _create_table_entity(self, chains: Dict, target_table_name: str, parsed_sql) -> None:
+        """Populate CREATE VIEW/TABLE columns in the existing 3-layer chain structure."""
+        try:
+            # Determine if this is CREATE VIEW or CREATE TABLE
+            create_type = "UNKNOWN"
+            table_type = "TABLE"
+            entity_type = "table"
+            
+            if isinstance(parsed_sql, exp.Create):
+                if parsed_sql.kind == "VIEW":
+                    create_type = "VIEW"
+                    table_type = "VIEW"
+                    entity_type = "view"
+                elif parsed_sql.kind == "TABLE":
+                    create_type = "TABLE"
+                    table_type = "TABLE" 
+                    entity_type = "table"
+            
+            # Find the SELECT statement within the CREATE statement
+            outer_query = None
+            if isinstance(parsed_sql, exp.Create) and parsed_sql.kind in ["VIEW", "TABLE"]:
+                if hasattr(parsed_sql, 'expression') and parsed_sql.expression:
+                    outer_query = parsed_sql.expression
+                elif hasattr(parsed_sql, 'this') and isinstance(parsed_sql.this, exp.Select):
+                    outer_query = parsed_sql.this
+            
+            if not outer_query:
+                self.logger.debug(f"Could not find SELECT statement in CREATE {create_type} {target_table_name}")
+                return
+                
+            # Extract all columns for the CREATE statement
+            table_columns = self._extract_create_table_columns(outer_query, target_table_name)
+            
+            if not table_columns:
+                self.logger.debug(f"No columns extracted for CREATE {create_type} {target_table_name}")
+                return
+            
+            # Find and populate the target entities in the 3-layer structure
+            target_entities_found = 0
+            for entity_name, chain_data in chains.items():
+                if chain_data.get('entity_type') == 'table':
+                    dependencies = chain_data.get('dependencies', [])
+                    for dep in dependencies:
+                        if dep.get('entity_type') == 'derived_table':
+                            nested_dependencies = dep.get('dependencies', [])
+                            for nested_dep in nested_dependencies:
+                                if nested_dep.get('entity') == target_table_name:
+                                    # Found a target entity - populate its columns and fix entity type
+                                    nested_dep['metadata']['table_columns'] = table_columns
+                                    nested_dep['metadata']['table_type'] = table_type
+                                    nested_dep['entity_type'] = entity_type
+                                    target_entities_found += 1
+                                    self.logger.debug(f"✅ Populated {len(table_columns)} columns for {create_type} entity in chain {entity_name}")
+            
+            self.logger.debug(f"✅ Populated CREATE {create_type} columns in {target_entities_found} chain entities for {target_table_name}")
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error populating CREATE {create_type} columns: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())

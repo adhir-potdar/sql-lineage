@@ -350,7 +350,12 @@ class LineageChainBuilder(BaseAnalyzer):
         try:
             result = self.main_analyzer.analyze(sql, **kwargs)
         except Exception as e:
-            # Create empty result on error
+            # Re-raise SQLGlot ParseError to be handled as 400 Bad Request
+            if "ParseError" in str(type(e)) or "No expression was parsed from" in str(e):
+                self.logger.error(f"SQL parsing failed in lineage chain builder - re-raising ParseError: {str(e)}")
+                raise e
+            
+            # Create empty result on other errors
             from types import SimpleNamespace
             result = SimpleNamespace()
             result.table_lineage = SimpleNamespace()
@@ -706,6 +711,9 @@ class LineageChainBuilder(BaseAnalyzer):
         
         # Post-process chains to add missing source columns from filter conditions
         self.chain_builder_engine.add_missing_source_columns(chains, sql, column_lineage_data, column_transformations_data)
+        
+        # Post-process to populate derived table columns (now that source columns are available)
+        self.chain_builder_engine.populate_derived_table_columns_post_process(chains)
         
         # Post-process to integrate column transformations into column metadata
         self.transformation_engine.integrate_column_transformations(chains, sql, self.main_analyzer)

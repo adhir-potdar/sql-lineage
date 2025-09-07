@@ -7,9 +7,10 @@ import json
 import os
 import logging
 from typing import Dict, List, Tuple, Optional
+from .utils.logging_config import get_logger
 
-# Setup logger for this module
-logger = logging.getLogger(__name__)
+# Setup logger for this module using SQL Lineage logging system
+logger = get_logger('lineage_chain_combiner')
 
 class LineageChainCombiner:
     """Class for combining individual JSON lineage files into consolidated chains."""
@@ -53,6 +54,12 @@ class LineageChainCombiner:
             
             logger.info(f"Successfully extracted table chain for {query_name}: {len(complete_flow)} entities")
             logger.debug(f"Complete flow for {query_name}: {' → '.join(complete_flow)}")
+            
+            # ENHANCED DEBUG: Check if this is a multi-table JOIN query
+            root_tables = [key for key, chain in chains.items() if chain.get('depth', 0) == 0]
+            if len(root_tables) > 1:
+                logger.info(f"DEBUG: {query_name} is multi-table JOIN with {len(root_tables)} root tables: {root_tables}")
+                logger.info(f"DEBUG: Flattened flow: {' → '.join(complete_flow)}")
             
             return query_name, complete_flow
             
@@ -547,7 +554,13 @@ class LineageChainCombiner:
         # Build the flowing dependencies with proper merging at connection points (includes ALL entities)
         flowing_dependencies = cls.build_sequential_flow_with_merging(query_chain, chains_data, table_chains, joinable_connections)
         
-        # Get the source table (root of the chain) from the flowing dependencies
+        # DETECTION: Check if this is a multi-table JOIN vs sequential flow
+        if cls.is_multi_table_join_query(source_chains):
+            # Handle multi-table JOIN scenario - preserve all source tables
+            logger.info(f"Detected multi-table JOIN query with {len(source_chains)} tables")
+            return cls.build_multi_table_join_chain(source_chains, flowing_dependencies)
+
+        # EXISTING LOGIC: Sequential flow - use original single-root approach
         source_table = list(source_chains.keys())[0]
         source_chain_info = source_chains[source_table]
         
@@ -938,6 +951,15 @@ class LineageChainCombiner:
             logger.info("Step 1: Analyzing table chains")
             table_chains, chains_data = cls.analyze_all_table_chains(lineage_data_list)
             
+            # ENHANCED LOGGING: Show extracted table chains
+            logger.info("=== LINEAGE COMBINER STEP 1 RESULTS ===")
+            for query_name, chain_flow in table_chains.items():
+                logger.info(f"  {query_name}: {' → '.join(chain_flow)}")
+                # Show original chains from JSON for comparison
+                original_chains = list(chains_data[query_name].get('chains', {}).keys()) if query_name in chains_data else []
+                logger.info(f"    Original JSON chains: {original_chains}")
+            logger.info("=== END STEP 1 RESULTS ===")
+            
             if not table_chains:
                 logger.error("No table chains found after analysis")
                 return []
@@ -953,18 +975,71 @@ class LineageChainCombiner:
             logger.info("Step 2 Part 1: Identifying joinable tables")
             joinable_connections = cls.identify_joinable_tables(table_chains)
             
+            # ENHANCED LOGGING: Show joinable connections
+            logger.info("=== LINEAGE COMBINER STEP 2.1 RESULTS ===")
+            logger.info(f"Found {len(joinable_connections)} joinable connections:")
+            for table_name, connection in joinable_connections.items():
+                producer = connection.get('producer')
+                consumers = connection.get('consumers', [])
+                logger.info(f"  {table_name}: {producer} → {consumers}")
+            logger.info("=== END STEP 2.1 RESULTS ===")
+            
             # Step 2 - Part 2: Build joinable query chains
             logger.info("Step 2 Part 2: Building joinable query chains")
             all_queries = list(table_chains.keys())  # Get all query names dynamically
             joinable_query_chains = cls.identify_joinable_query_chains(joinable_connections, all_queries)
             
-            if not joinable_query_chains:
-                logger.warning("No joinable query chains found")
+            # ENHANCED LOGGING: Show query chains
+            logger.info("=== LINEAGE COMBINER STEP 2.2 RESULTS ===")
+            logger.info(f"Found {len(joinable_query_chains)} query chains:")
+            for i, chain in enumerate(joinable_query_chains):
+                logger.info(f"  Chain {i}: {' → '.join(chain)}")
+            logger.info("=== END STEP 2.2 RESULTS ===")
+            
+            # ENHANCED DEBUG: Check for multi-table JOIN queries that should be included
+            join_queries = []
+            for query_name, chain_data in chains_data.items():
+                if cls.is_multi_table_join_query(chain_data.get('chains', {})):
+                    join_queries.append(query_name)
+                    logger.info(f"DEBUG: Detected JOIN query: {query_name}")
+            
+            # Include standalone JOIN queries that are not already part of sequential chains
+            if join_queries:
+                # Find JOIN queries already included in sequential chains
+                queries_in_chains = set()
+                for chain in joinable_query_chains:
+                    queries_in_chains.update(chain)
+                
+                # Find standalone JOIN queries (not in any sequential chain)
+                standalone_join_queries = [q for q in join_queries if q not in queries_in_chains]
+                
+                if standalone_join_queries:
+                    logger.info(f"Found {len(standalone_join_queries)} standalone JOIN queries not in sequential chains: {standalone_join_queries}")
+                    # Add each standalone JOIN query as its own chain
+                    for standalone_query in standalone_join_queries:
+                        joinable_query_chains.append([standalone_query])
+                        logger.info(f"Added standalone JOIN query as individual chain: {standalone_query}")
+                elif not joinable_query_chains:
+                    # No sequential chains and no standalone JOINs - use all JOIN queries
+                    logger.info(f"No sequential chains found, but detected {len(join_queries)} JOIN queries - including them")
+                    joinable_query_chains = [[q] for q in join_queries]  # Each JOIN query as its own chain
+            elif not joinable_query_chains:
+                logger.warning("No joinable query chains found and no JOIN queries detected")
                 return []
             
             # Step 3: Create combined lineage JSON for each query chain with proper merging
             logger.info("Step 3: Creating combined lineage JSON")
             combined_lineages = cls.create_combined_lineage_json(joinable_query_chains, chains_data, table_chains, joinable_connections)
+            
+            # ENHANCED LOGGING: Show final results
+            logger.info("=== LINEAGE COMBINER STEP 3 RESULTS ===")
+            logger.info(f"Created {len(combined_lineages)} combined lineages:")
+            for idx, lineage in enumerate(combined_lineages):
+                chains = lineage.get('chains', {})
+                summary = lineage.get('summary', {})
+                logger.info(f"  Combined lineage {idx}: {len(chains)} chains - {list(chains.keys())}")
+                logger.info(f"    Summary: chain_count={summary.get('chain_count', 'N/A')}, total_tables={summary.get('total_tables', 'N/A')}")
+            logger.info("=== END STEP 3 RESULTS ===")
             
             logger.info(f"=== Successfully completed lineage processing: {len(combined_lineages)} combined lineages created ===")
             return combined_lineages
@@ -972,3 +1047,93 @@ class LineageChainCombiner:
         except Exception as e:
             logger.error(f"Critical failure in complete lineage processing: {str(e)}", exc_info=True)
             return []
+
+    @classmethod
+    def is_multi_table_join_query(cls, source_chains: Dict) -> bool:
+        """
+        Detect if this represents a multi-table JOIN query vs sequential flow.
+        
+        Args:
+            source_chains: Dictionary of chains from the query
+            
+        Returns:
+            True if multi-table JOIN scenario, False for sequential queries
+        """
+        # Criteria 1: Multiple root tables at depth 0
+        root_tables = [
+            key for key, chain in source_chains.items() 
+            if chain.get('entity_type') == 'table' and chain.get('depth', 0) == 0
+        ]
+        
+        logger.info(f"JOIN Detection - Found {len(root_tables)} root tables: {root_tables}")
+        
+        # Criteria 2: Check for JOIN transformations
+        has_joins = False
+        total_transforms_checked = 0
+        for chain_key, chain in source_chains.items():
+            for dep in chain.get('dependencies', []):
+                for transform in dep.get('transformations', []):
+                    total_transforms_checked += 1
+                    logger.debug(f"JOIN Detection - Checking transform in {chain_key}: {transform}")
+                    
+                    # Enhanced debugging for JOIN detection
+                    if transform.get('joins'):
+                        has_joins = True
+                        joins = transform.get('joins')
+                        logger.info(f"JOIN Detection - Found JOIN transformation in {chain_key}: {len(joins)} joins")
+                        for join in joins:
+                            join_type = join.get('join_type', 'UNKNOWN')
+                            logger.info(f"JOIN Detection - JOIN type: {join_type}")
+                        break
+                    else:
+                        # Log what's actually in the transformation
+                        transform_type = transform.get('type', 'UNKNOWN')
+                        logger.debug(f"JOIN Detection - No joins in {chain_key} transform type {transform_type}")
+        
+        logger.info(f"JOIN Detection - Checked {total_transforms_checked} transformations total")
+        
+        # ENHANCED: If multiple root tables but no explicit JOIN transformations,
+        # check if this could still be a multi-table scenario
+        result = len(root_tables) > 1
+        if len(root_tables) > 1 and not has_joins:
+            logger.info(f"JOIN Detection - Multiple root tables ({len(root_tables)}) but no JOIN transformations found")
+            logger.info("JOIN Detection - Treating as multi-table query anyway (relaxed criteria)")
+        elif len(root_tables) > 1 and has_joins:
+            logger.info(f"JOIN Detection - Multi-table JOIN confirmed: {len(root_tables)} tables with JOIN transformations")
+        else:
+            logger.info(f"JOIN Detection - Not a multi-table query: {len(root_tables)} root tables, has_joins={has_joins}")
+        
+        # Multi-table JOIN: multiple root tables (relaxed criteria - don't require explicit JOIN transforms)
+        return result
+
+    @classmethod
+    def build_multi_table_join_chain(cls, source_chains: Dict, flowing_dependencies: List[Dict]) -> Dict:
+        """
+        Build combined chain preserving ALL source tables for JOIN queries.
+        
+        Args:
+            source_chains: All source table chains
+            flowing_dependencies: Dependencies between tables
+            
+        Returns:
+            Combined chain with all source tables preserved
+        """
+        logger.info(f"Building multi-table JOIN chain with {len(source_chains)} source tables")
+        
+        combined_chain = {}
+        
+        # Preserve ALL source tables as separate entities
+        for table_name, table_info in source_chains.items():
+            if table_info.get('entity_type') == 'table':
+                combined_chain[table_name] = {
+                    "entity": table_info.get("entity", table_name),
+                    "entity_type": "table",
+                    "depth": 0,  # All source tables start at depth 0
+                    "dependencies": table_info.get("dependencies", []),  # Use original dependencies
+                    "metadata": table_info.get("metadata", {}),
+                    "transformations": table_info.get("transformations", [])
+                }
+        
+        logger.info(f"Successfully built multi-table JOIN chain with {len(combined_chain)} tables")
+        return combined_chain
+

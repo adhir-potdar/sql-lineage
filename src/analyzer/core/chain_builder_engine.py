@@ -425,6 +425,100 @@ class ChainBuilderEngine:
         
         return merged
     
+    def _populate_derived_table_columns(self, chain_data: Dict, base_metadata: Dict) -> None:
+        """Populate derived table columns for SELECT * cases."""
+        try:
+            self.logger.debug(f"Attempting to populate derived table columns for {chain_data.get('entity', 'unknown')}")
+            
+            dependencies = chain_data.get('dependencies', [])
+            if not dependencies:
+                self.logger.debug("No dependencies found")
+                return
+            
+            # Get source table columns from base metadata
+            source_columns = base_metadata.get('table_columns', [])
+            if not source_columns:
+                self.logger.debug("No source columns found in base metadata")
+                return
+                
+            self.logger.debug(f"Found {len(source_columns)} source columns: {[c.get('name') for c in source_columns]}")
+            
+            # Find the derived table dependency
+            for dep in dependencies:
+                self.logger.debug(f"Checking dependency: {dep.get('entity', 'unknown')} type: {dep.get('entity_type', 'unknown')}")
+                if dep.get('entity_type') == 'derived_table':
+                    dep_metadata = dep.get('metadata', {})
+                    dep_columns = dep_metadata.get('table_columns', [])
+                    
+                    self.logger.debug(f"Derived table has {len(dep_columns)} columns")
+                    
+                    # If derived table has empty columns, populate with source columns
+                    if not dep_columns:
+                        # For SELECT * cases, derived table has same columns as source
+                        derived_columns = []
+                        for source_col in source_columns:
+                            derived_columns.append({
+                                "name": source_col.get('name', ''),
+                                "upstream": [f"{chain_data.get('entity', '')}.{source_col.get('name', '')}"],
+                                "type": "DIRECT"
+                            })
+                        
+                        dep_metadata['table_columns'] = derived_columns
+                        self.logger.debug(f"✅ Populated {len(derived_columns)} columns for derived table {dep.get('entity', '')}")
+                    else:
+                        self.logger.debug(f"Derived table already has columns, not populating")
+                        
+        except Exception as e:
+            self.logger.debug(f"❌ Error populating derived table columns: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
+    
+    def populate_derived_table_columns_post_process(self, chains: Dict) -> None:
+        """Post-process to populate derived table columns after source columns are available."""
+        try:
+            for entity_name, chain_data in chains.items():
+                if chain_data.get('entity_type') == 'table':
+                    # Get source table columns (now populated)
+                    source_columns = chain_data.get('metadata', {}).get('table_columns', [])
+                    if not source_columns:
+                        continue
+                    
+                    # Process dependencies to find derived tables
+                    self._populate_derived_table_columns_recursive(chain_data, source_columns)
+                    
+        except Exception as e:
+            self.logger.debug(f"Error in post-process derived table column population: {e}")
+    
+    def _populate_derived_table_columns_recursive(self, chain_data: Dict, source_columns: List[Dict]) -> None:
+        """Recursively populate derived table columns in dependencies."""
+        dependencies = chain_data.get('dependencies', [])
+        
+        for dep in dependencies:
+            if dep.get('entity_type') == 'derived_table':
+                dep_metadata = dep.get('metadata', {})
+                dep_columns = dep_metadata.get('table_columns', [])
+                
+                # If derived table has empty columns, populate with source columns
+                if not dep_columns and source_columns:
+                    # Normalize entity name using existing utility function
+                    entity_name = chain_data.get('entity', '')
+                    clean_entity_name = normalize_entity_name(entity_name) if entity_name else ''
+                    
+                    derived_columns = []
+                    for source_col in source_columns:
+                        derived_columns.append({
+                            "name": source_col.get('name', ''),
+                            "upstream": [f"{clean_entity_name}.{source_col.get('name', '')}"],
+                            "type": "DIRECT"
+                        })
+                    
+                    dep_metadata['table_columns'] = derived_columns
+                    self.logger.debug(f"✅ Post-process populated {len(derived_columns)} columns for derived table {dep.get('entity', '')}")
+            
+            # Recurse into nested dependencies
+            if 'dependencies' in dep:
+                self._populate_derived_table_columns_recursive(dep, source_columns)
+    
     def _apply_cached_column_data(self, chains: Dict, cached_data: Dict) -> None:
         """Apply cached column data to chains for performance."""
         try:

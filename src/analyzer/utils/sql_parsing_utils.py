@@ -409,6 +409,32 @@ def build_alias_to_table_mapping(sql: str, dialect: str = "trino") -> Dict[str, 
                 alias = normalize_quoted_identifier(str(table.alias)).lower()
                 alias_to_table[alias] = table_name
                 
+        # Handle subquery aliases (e.g., (SELECT * FROM table) t1)
+        subqueries = list(parsed.find_all(sqlglot.exp.Subquery))
+        for subquery in subqueries:
+            if subquery.alias:
+                # Find the table inside the subquery
+                subquery_tables = list(subquery.find_all(sqlglot.exp.Table))
+                if subquery_tables:
+                    # Use the first (and usually only) table in the subquery
+                    table = subquery_tables[0]
+                    
+                    # Extract full qualified table name 
+                    if table.catalog and table.db:
+                        catalog = normalize_quoted_identifier(str(table.catalog))
+                        schema = normalize_quoted_identifier(str(table.db))  
+                        table_name_part = normalize_quoted_identifier(str(table.name))
+                        table_name = f'"{catalog}"."{schema}"."{table_name_part}"'
+                    elif table.db:
+                        db = normalize_quoted_identifier(str(table.db))
+                        table_name_part = normalize_quoted_identifier(str(table.name))
+                        table_name = f"{db}.{table_name_part}"
+                    else:
+                        table_name = normalize_quoted_identifier(str(table.name))
+                    
+                    alias = normalize_quoted_identifier(str(subquery.alias)).lower()
+                    alias_to_table[alias] = table_name
+        
         # Also find CTE aliases in WITH clauses for better CTE column resolution
         if 'WITH' in sql.upper():
             ctes = list(parsed.find_all(sqlglot.exp.CTE))
