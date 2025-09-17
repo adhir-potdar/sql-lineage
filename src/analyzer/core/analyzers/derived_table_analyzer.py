@@ -355,7 +355,7 @@ class DerivedTableAnalyzer:
         return transformations
     
     def _extract_derived_to_result_transformations(self, outer_query, derived_table_entity: str, alias: str, target_table_name: Optional[str] = None) -> List[Dict]:
-        """Extract transformations from derived table to query result."""
+        """Extract comprehensive transformations from derived table to query result."""
         transformations = []
         
         # Base transformation - use actual table name if available, otherwise QUERY_RESULT
@@ -366,34 +366,44 @@ class DerivedTableAnalyzer:
             "target_table": target_table
         }
         
-        # Add WHERE conditions if they reference derived table columns
-        where_clause = outer_query.find(exp.Where)
-        if where_clause:
-            filter_conditions = self._extract_filter_conditions(where_clause, alias)
-            if filter_conditions:
-                trans["filter_conditions"] = filter_conditions
+        # Use comprehensive transformation parsing from transformation parser
+        from ..parsers.transformation_parser import TransformationParser
+        parser = TransformationParser()
+        
+        # Extract JOIN information
+        joins = parser.parse_transformation_joins(outer_query)
+        if joins:
+            trans["joins"] = joins
+        
+        # Extract comprehensive filter conditions (WHERE clause)
+        filter_result = parser.parse_transformation_filters(outer_query)
+        filter_conditions = filter_result.get('filters', [])
+        if filter_conditions:
+            trans["filter_conditions"] = filter_conditions
+        
+        # Extract GROUP BY and HAVING information
+        aggregation_result = parser.parse_transformation_aggregations(outer_query)
+        group_by_columns = aggregation_result.get('group_by_columns', [])
+        if group_by_columns:
+            trans["group_by_columns"] = group_by_columns
+        having_conditions = aggregation_result.get('having_conditions', [])
+        if having_conditions:
+            trans["having_conditions"] = having_conditions
+        
+        # Extract ORDER BY information
+        sorting_result = parser.parse_transformation_sorting(outer_query)
+        order_by_columns = sorting_result.get('order_by_columns', [])
+        if order_by_columns:
+            trans["order_by_columns"] = order_by_columns
+        
+        # Extract LIMIT information
+        limiting_result = parser.parse_transformation_limiting(outer_query)
+        if limiting_result.get('limit') is not None:
+            trans["limiting"] = limiting_result
         
         transformations.append(trans)
         return transformations
     
-    def _extract_filter_conditions(self, where_clause, alias: str) -> List[Dict]:
-        """Extract filter conditions from WHERE clause that reference this derived table alias."""
-        # Use the existing transformation parser's comprehensive filter extraction logic
-        from ..parsers.transformation_parser import TransformationParser
-        
-        # Create a temporary parser instance to leverage existing logic
-        temp_parser = TransformationParser()
-        
-        # Extract all filter conditions using the existing comprehensive logic
-        all_conditions = temp_parser._extract_filter_conditions(where_clause.this)
-        
-        # Filter to only include conditions that reference this derived table alias
-        relevant_conditions = []
-        for condition in all_conditions:
-            if condition.get("column", "").startswith(f"{alias}."):
-                relevant_conditions.append(condition)
-        
-        return relevant_conditions
     
     def _build_three_layer_structure(self, source_table: str, derived_table_entity: str,
                                    source_columns: List[Dict], derived_columns: List[Dict], 

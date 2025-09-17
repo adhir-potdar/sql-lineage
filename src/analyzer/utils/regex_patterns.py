@@ -40,7 +40,7 @@ class SQLPatterns:
     LIKE_CONDITION = re.compile(r'(\w+(?:\.\w+)?)\s+LIKE\s+(.+)', re.IGNORECASE)
     
     # CTAS patterns
-    CTAS_PATTERN = re.compile(r'CREATE\s+TABLE\s+.+\s+AS\s+SELECT', re.IGNORECASE)
+    CTAS_PATTERN = re.compile(r'CREATE\s+(TABLE|VIEW)\s+.+\s+AS\s+SELECT', re.IGNORECASE)
     
     # CTE patterns
     WITH_CLAUSE = re.compile(r'WITH\s+(.+?)\s+SELECT', re.IGNORECASE | re.DOTALL)

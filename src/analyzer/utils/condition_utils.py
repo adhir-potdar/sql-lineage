@@ -147,8 +147,11 @@ class GenericConditionHandler:
         if hasattr(comp, 'expressions') and comp.expressions:
             return [str(expr).strip() for expr in comp.expressions]
         elif hasattr(comp, 'low') and hasattr(comp, 'high'):
-            # BETWEEN has low/high attributes
+            # BETWEEN has low/high attributes (direct access)
             return [str(comp.low).strip(), str(comp.high).strip()]
+        elif hasattr(comp, 'args') and isinstance(comp.args, dict) and 'low' in comp.args and 'high' in comp.args:
+            # BETWEEN has low/high in args dictionary (SQLGlot structure)
+            return [str(comp.args['low']).strip(), str(comp.args['high']).strip()]
         elif hasattr(comp, 'expression'):
             # Most binary operations have expression attribute
             return str(comp.expression).strip()

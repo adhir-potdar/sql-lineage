@@ -699,14 +699,87 @@ class CTEAnalyzer(BaseAnalyzer):
             cte_data = ctes[target_entity]
             transformations = cte_data.get('transformations', [])
             if transformations:
-                return [{
+                # Extract ALL transformation details BEFORE calling _separate_transformation_types
+                having_conditions = []
+                aggregate_functions = []
+                window_functions = []
+                case_statements = []
+                limiting = None
+                joins = []
+
+                for trans in transformations:
+                    trans_type = trans.get("type")
+                    
+                    # HAVING conditions (stored as separate transformation objects)
+                    if trans_type == "HAVING":
+                        conditions = trans.get("conditions", [])
+                        having_conditions.extend(conditions)
+                    
+                    # Handle other transformation types from transformation parser (if available)
+                    elif trans.get("having_conditions"):
+                        having_conditions.extend(trans["having_conditions"])
+                    
+                    # Aggregate functions
+                    if trans.get("aggregate_functions"):
+                        aggregate_functions.extend(trans["aggregate_functions"])
+                    
+                    # Window functions
+                    if trans.get("window_functions"):
+                        window_functions.extend(trans["window_functions"])
+                    
+                    # CASE statements
+                    if trans.get("case_statements"):
+                        case_statements.extend(trans["case_statements"])
+                    
+                    # LIMIT/OFFSET (take the first non-null one)
+                    if trans.get("limiting") and limiting is None:
+                        limiting = trans["limiting"]
+                    
+                    # JOINs (preserve existing joins)
+                    if trans.get("joins"):
+                        joins.extend(trans["joins"])
+
+                # Keep the existing GROUP BY separation logic (this preserves the GROUP BY fix!)
+                filtered_conditions, group_by_columns = self._separate_transformation_types(transformations, source_entity)
+                
+                # Build complete transformation object
+                transformation = {
                     "type": "table_transformation",
                     "source_table": clean_table_name_quotes(source_entity),
                     "target_table": clean_table_name_quotes(target_entity),
-                    "filter_conditions": self._filter_nested_conditions(transformations, source_entity),
+                    "filter_conditions": filtered_conditions,
                     "group_by_columns": [],
-                    "joins": []
-                }]
+                    "joins": joins
+                }
+
+                # Add GROUP BY to filter_conditions if they exist
+                if group_by_columns:
+                    group_by_filter = {
+                        "type": "GROUP_BY",
+                        "columns": group_by_columns
+                    }
+                    transformation["filter_conditions"].append(group_by_filter)
+
+                # Add HAVING conditions to filter_conditions if they exist
+                if having_conditions:
+                    having_filter = {
+                        "type": "HAVING",
+                        "conditions": having_conditions
+                    }
+                    transformation["filter_conditions"].append(having_filter)
+                if aggregate_functions:
+                    transformation["aggregate_functions"] = aggregate_functions
+                if window_functions:
+                    transformation["window_functions"] = window_functions
+                if case_statements:
+                    transformation["case_statements"] = case_statements
+                if limiting:
+                    transformation["limiting"] = limiting
+
+                # Build the transformations list starting with the main table transformation
+                result_transformations = [transformation]
+
+                return result_transformations
         return []
     
     def _get_final_transformations(self, source_entity: str, table_lineage_data: dict, sql: str = None, ctas_target: str = None) -> list:
@@ -757,6 +830,8 @@ class CTEAnalyzer(BaseAnalyzer):
                                 "value": condition.get('value', '')
                             })
                         transformation["having_conditions"] = having_conditions
+                    else:
+                        print("DEBUG: _get_final_transformations found no having_conditions in aggregations")
                     
                     # Aggregate functions
                     if aggregations.get('aggregate_functions'):
@@ -859,6 +934,54 @@ class CTEAnalyzer(BaseAnalyzer):
                         relevant_filters.append(filter_item)
         
         return relevant_filters
+    
+    def _separate_transformation_types(self, transformations: list, entity_name: str) -> tuple:
+        """
+        Separate different transformation types, extracting GROUP BY columns properly.
+        
+        Returns:
+            tuple: (filter_conditions, group_by_columns)
+        """
+        filter_conditions = []
+        group_by_columns = []
+        
+        for transformation in transformations:
+            if isinstance(transformation, dict):
+                transform_type = transformation.get('type')
+                
+                if transform_type == 'GROUP_BY':
+                    # Extract GROUP BY columns
+                    columns = transformation.get('columns', [])
+                    # Only include columns relevant to this entity
+                    for col in columns:
+                        if self._is_column_from_table(col, entity_name) or '.' not in col:
+                            group_by_columns.append(col)
+                
+                elif transform_type == 'FILTER':
+                    # Keep filter conditions
+                    conditions = transformation.get('conditions', [])
+                    relevant_conditions = []
+                    for condition in conditions:
+                        if isinstance(condition, dict) and 'column' in condition:
+                            column_name = condition['column']
+                            if (self._is_column_from_table(column_name, entity_name) or 
+                                ('.' not in column_name)):
+                                relevant_conditions.append(condition)
+                    
+                    if relevant_conditions:
+                        filter_conditions.append({
+                            'type': 'FILTER',
+                            'conditions': relevant_conditions
+                        })
+                
+                # Handle flat condition structure
+                elif 'column' in transformation:
+                    column_name = transformation['column']
+                    if (self._is_column_from_table(column_name, entity_name) or 
+                        ('.' not in column_name)):
+                        filter_conditions.append(transformation)
+        
+        return filter_conditions, group_by_columns
     
     def _is_column_from_table(self, column_name: str, table_name: str, context_info: dict = None) -> bool:
         """Check if a column belongs to a specific table based on naming patterns."""

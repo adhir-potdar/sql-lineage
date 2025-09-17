@@ -3,7 +3,9 @@
 from typing import Optional, Dict, Any, List
 import sqlglot
 from sqlglot import Expression
+from sqlglot.errors import ParseError
 import json
+import re
 
 from .models import LineageResult, TableMetadata
 from .extractor import LineageExtractor
@@ -11,6 +13,7 @@ from .parsers import SelectParser, TransformationParser, CTEParser, CTASParser, 
 from ..utils.validation import validate_sql_input
 from ..utils.sql_parsing_utils import TableNameRegistry, CompatibilityMode, validate_cte_dependencies, CircularDependencyError
 from ..utils.logging_config import get_logger
+from .dialect_auto_detector import DialectAutoDetector
 
 # Import the new modular analyzers
 from .analyzers import (
@@ -42,6 +45,12 @@ class SQLLineageAnalyzer:
         self.compatibility_mode = compatibility_mode
         self.table_registry = TableNameRegistry(dialect, compatibility_mode)
         self.extractor = LineageExtractor(dialect, compatibility_mode)
+        
+        # Track dialect auto-corrections
+        self._dialect_correction = None
+        
+        # Initialize centralized dialect auto-detector
+        self._dialect_auto_detector = DialectAutoDetector()
         
         self.logger.debug("Core components initialized")
         
@@ -208,13 +217,69 @@ class SQLLineageAnalyzer:
             self.logger.info("Analysis completed successfully")
             return result
             
-        except Exception as e:
-            # Re-raise SQLGlot ParseError to be handled as 400 Bad Request
-            if "ParseError" in str(type(e)) or "No expression was parsed from" in str(e):
-                self.logger.error(f"SQL parsing failed - re-raising ParseError: {str(e)}")
+        except ParseError as e:
+            # Try dialect auto-detection for ParseError using centralized DialectAutoDetector
+            self.logger.warning(f"Initial parsing failed with dialect '{self.dialect}': {str(e)}")
+            
+            # Use centralized auto-detector to get corrected dialect
+            corrected_dialect = self._dialect_auto_detector.detect_and_correct_dialect(sql, self.dialect)
+            
+            if corrected_dialect == self.dialect:
+                # No auto-correction suggested - it's a genuine syntax error
+                self.logger.error(f"SQL parsing failed - genuine syntax error: {str(e)}")
                 raise e
             
-            # Handle other errors normally
+            # Try the corrected dialect
+            try:
+                self.logger.info(f"Attempting dialect auto-correction: {self.dialect} → {corrected_dialect}")
+                parsed = sqlglot.parse_one(sql, dialect=corrected_dialect)
+                
+                # Success! Permanently update analyzer dialect and all components
+                self.logger.info(f"Success with dialect: {corrected_dialect}")
+                
+                # Store correction info before updating dialect
+                self._dialect_correction = {
+                    'original_dialect': self.dialect,
+                    'corrected_dialect': corrected_dialect,
+                    'auto_corrected': True,
+                    'reason': f"Detected dialect-specific features incompatible with {self.dialect}"
+                }
+                
+                # Permanently update the analyzer dialect and all components
+                self.logger.info(f"Permanently updating analyzer dialect: {self.dialect} → {corrected_dialect}")
+                self._update_dialect_permanently(corrected_dialect)
+                
+                # Extract lineage using updated extractor
+                self.logger.debug("Extracting table lineage with corrected dialect")
+                table_lineage = self.extractor.extract_table_lineage(parsed)
+                self.logger.debug("Extracting column lineage with corrected dialect")
+                column_lineage = self.extractor.extract_column_lineage(parsed)
+                self.logger.info("Lineage extraction completed with auto-corrected dialect")
+                
+                # Extract metadata
+                self.logger.debug("Collecting metadata")
+                metadata = self._collect_metadata(table_lineage)
+                
+                result = LineageResult(
+                    sql=sql,
+                    dialect=corrected_dialect,  # Use corrected dialect
+                    table_lineage=table_lineage,
+                    column_lineage=column_lineage,
+                    metadata=metadata
+                )
+                self.logger.info(f"Analysis completed successfully with auto-corrected dialect: {corrected_dialect}")
+                return result
+                
+            except ParseError as inner_e:
+                # Auto-correction also failed, re-raise original error
+                self.logger.error(f"Dialect auto-correction to '{corrected_dialect}' also failed, re-raising original ParseError: {str(e)}")
+                raise e
+            except Exception as inner_e:
+                self.logger.error(f"Dialect auto-correction to '{corrected_dialect}' failed with non-parse error: {str(inner_e)}")
+                raise e
+            
+        except Exception as e:
+            # Handle other non-ParseError exceptions normally
             self.logger.error(f"Analysis failed: {str(e)}", exc_info=True)
             return LineageResult(
                 sql=sql,
@@ -223,6 +288,54 @@ class SQLLineageAnalyzer:
                 column_lineage=self.extractor.extract_column_lineage(sqlglot.expressions.Anonymous()),
                 errors=[f"Analysis failed: {str(e)}"]
             )
+    
+    
+    def get_dialect_correction_info(self) -> Optional[Dict[str, Any]]:
+        """
+        Get information about any dialect auto-correction that occurred.
+        
+        Returns:
+            Dictionary with correction details if auto-correction occurred, None otherwise
+        """
+        return self._dialect_correction
+    
+    def reset_dialect_correction(self):
+        """Reset dialect correction tracking."""
+        self._dialect_correction = None
+    
+    def _update_dialect_permanently(self, new_dialect: str):
+        """
+        Permanently update the analyzer dialect and all its components.
+        
+        Args:
+            new_dialect: The new dialect to use for all components
+        """
+        old_dialect = self.dialect
+        self.dialect = new_dialect
+        
+        # Update core components
+        self.table_registry = TableNameRegistry(new_dialect, self.compatibility_mode)
+        self.extractor = LineageExtractor(new_dialect, self.compatibility_mode)
+        
+        # Update modular parsers
+        self.select_parser = SelectParser(new_dialect)
+        self.transformation_parser = TransformationParser(new_dialect)
+        self.cte_parser = CTEParser(new_dialect)
+        self.ctas_parser = CTASParser(new_dialect)
+        self.insert_parser = InsertParser(new_dialect)
+        self.update_parser = UpdateParser(new_dialect)
+        
+        # Update modular analyzers with proper references
+        self.base_analyzer = BaseAnalyzer(new_dialect, self.compatibility_mode, self.table_registry)
+        self.select_analyzer = SelectAnalyzer(new_dialect, self.compatibility_mode, self.table_registry)
+        self.insert_analyzer = InsertAnalyzer(new_dialect, self.compatibility_mode, self.table_registry)
+        self.update_analyzer = UpdateAnalyzer(new_dialect, self.compatibility_mode, self.table_registry)
+        self.cte_analyzer = CTEAnalyzer(new_dialect, main_analyzer=self, table_registry=self.table_registry)
+        self.ctas_analyzer = CTASAnalyzer(new_dialect, self.compatibility_mode, self.table_registry)
+        self.transformation_analyzer = TransformationAnalyzer(new_dialect, self.compatibility_mode, self.table_registry)
+        self.lineage_chain_builder = LineageChainBuilder(new_dialect, main_analyzer=self, table_registry=self.table_registry)
+        
+        self.logger.info(f"All analyzer components updated from {old_dialect} to {new_dialect}")
     
     def _collect_metadata(self, table_lineage) -> Dict[str, TableMetadata]:
         """Collect metadata for tables involved in lineage."""

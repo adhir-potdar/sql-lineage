@@ -342,7 +342,17 @@ class LineageChainBuilder(BaseAnalyzer):
         if depth < 0:
             raise ValueError("depth must be 0 or greater (0 means unlimited depth)")
         
-        # Check if this is a CTE query and use CTE-specific processing
+        # STEP 1: Auto-detect and correct dialect FIRST (before any parsing)
+        from ..dialect_auto_detector import DialectAutoDetector
+        auto_detector = DialectAutoDetector()
+        corrected_dialect = auto_detector.detect_and_correct_dialect(sql, self.dialect)
+        
+        if corrected_dialect != self.dialect:
+            self.logger.info(f"Dialect auto-correction applied: {self.dialect} → {corrected_dialect}")
+            # Permanently update all analyzer components with corrected dialect
+            self._update_all_dialects(corrected_dialect)
+        
+        # STEP 2: Check if this is a CTE query and use CTE-specific processing
         if "WITH" in sql.upper():
             return self._build_cte_lineage_chain(sql, chain_type, depth, target_entity, **kwargs)
         
@@ -831,7 +841,16 @@ class LineageChainBuilder(BaseAnalyzer):
         chain_data = self.get_lineage_chain(sql, chain_type, depth, target_entity, **kwargs)
         return json.dumps(chain_data, indent=2)
 
-
+    def _update_all_dialects(self, new_dialect: str):
+        """Update dialect across all analyzer components."""
+        # Update this builder's dialect
+        old_dialect = self.dialect
+        self.dialect = new_dialect
+        
+        # Update main analyzer's dialect using existing method
+        self.main_analyzer._update_dialect_permanently(new_dialect)
+        
+        self.logger.info(f"Updated all analyzer components from {old_dialect} to {new_dialect}")
 
     def _build_cte_lineage_chain(self, sql: str, chain_type: str, depth: int, target_entity: Optional[str], **kwargs) -> Dict[str, Any]:
         """Build lineage chain for CTE queries with proper single-flow chains."""

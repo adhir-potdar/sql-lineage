@@ -63,7 +63,7 @@ class CTASAnalyzer(BaseAnalyzer):
     
     def add_ctas_result_columns(self, entity_data: Dict[str, Any], entity_name: str, sql: str = None) -> None:
         """Add result columns for CTAS target tables by extracting from SELECT clause."""
-        if not sql or not sql.strip().upper().startswith('CREATE TABLE'):
+        if not sql or not (sql.strip().upper().startswith('CREATE TABLE') or sql.strip().upper().startswith('CREATE VIEW')):
             return
         
         # Check if this is a target table created by CTAS
@@ -143,7 +143,7 @@ class CTASAnalyzer(BaseAnalyzer):
     
     def handle_ctas_lineage_chain_logic(self, chains: Dict, sql: str, chain_type: str, table_lineage_data: Dict) -> Dict:
         """Handle CTAS-specific logic in lineage chain building."""
-        if not sql or not sql.strip().upper().startswith('CREATE TABLE'):
+        if not sql or not (sql.strip().upper().startswith('CREATE TABLE') or sql.strip().upper().startswith('CREATE VIEW')):
             return chains
         
         if chain_type == "downstream":
@@ -213,7 +213,7 @@ class CTASAnalyzer(BaseAnalyzer):
     def should_skip_query_result_for_ctas(self, sql: str, dependent_table: str) -> bool:
         """Check if QUERY_RESULT should be skipped for CTAS queries."""
         # For CTAS queries, don't add QUERY_RESULT since the target table itself is the final result
-        if (sql and sql.strip().upper().startswith('CREATE TABLE') and 
+        if (sql and (sql.strip().upper().startswith('CREATE TABLE') or sql.strip().upper().startswith('CREATE VIEW')) and 
             dependent_table == 'QUERY_RESULT'):
             return True
         return False
@@ -230,7 +230,7 @@ class CTASAnalyzer(BaseAnalyzer):
         # For COUNT(*) and similar general aggregations in CTAS queries
         if source_expression.upper().strip() == 'COUNT(*)':
             # Special handling for CTAS queries - COUNT(*) is always relevant to the source table
-            if sql and sql.strip().upper().startswith('CREATE TABLE'):
+            if sql and (sql.strip().upper().startswith('CREATE TABLE') or sql.strip().upper().startswith('CREATE VIEW')):
                 return True
         
         return False
@@ -327,8 +327,15 @@ def is_ctas_target_table(sql: str, table_name: str) -> bool:
     """Check if this table is a CTAS target table."""
     if not is_ctas_query(sql):
         return False
-    # Simple check if table name appears after CREATE TABLE
-    return table_name.lower() in sql.lower() and 'CREATE TABLE' in sql.upper()
+    
+    if not ('CREATE TABLE' in sql.upper() or 'CREATE VIEW' in sql.upper()):
+        return False
+    
+    # Normalize by removing quotes from both SQL and table name for comparison
+    sql_normalized = sql.replace('"', '').replace("'", "").lower()
+    table_normalized = table_name.replace('"', '').replace("'", "").lower()
+    
+    return table_normalized in sql_normalized
 
 
 def build_ctas_target_columns(sql: str, select_columns: List[Dict]) -> List[Dict]:
@@ -340,8 +347,11 @@ def build_ctas_target_columns(sql: str, select_columns: List[Dict]) -> List[Dict
         column_name = sel_col.get('column_name', raw_expression)
         
         # Extract clean name (prefer alias over raw column name)
-        from ...utils.sql_parsing_utils import extract_clean_column_name
+        from ...utils.sql_parsing_utils import extract_clean_column_name, normalize_entity_name
         clean_name = extract_clean_column_name(raw_expression, column_name)
+        
+        # Normalize column name to remove quotes
+        normalized_name = normalize_entity_name(clean_name)
         
         # Check if this is an aggregate function
         from ...utils.aggregate_utils import is_aggregate_function
@@ -352,20 +362,24 @@ def build_ctas_target_columns(sql: str, select_columns: List[Dict]) -> List[Dict
             func_type = extract_function_type(raw_expression)
             alias = extract_alias_from_expression(raw_expression)
             
+            # Normalize source expression to remove quotes
+            normalized_source_expr = raw_expression.replace(f" as {alias}", "").replace(f" AS {alias}", "") if alias else raw_expression
+            normalized_source_expr = normalize_entity_name(normalized_source_expr)
+            
             column_info = {
-                "name": alias or clean_name,
+                "name": alias or normalized_name,
                 "upstream": [],
                 "type": "RESULT",
                 "transformation": {
-                    "source_expression": raw_expression.replace(f" as {alias}", "").replace(f" AS {alias}", "") if alias else raw_expression,
+                    "source_expression": normalized_source_expr,
                     "transformation_type": "AGGREGATE",
                     "function_type": func_type
                 }
             }
         else:
-            # Regular column (pass-through)
+            # Regular column (pass-through)  
             column_info = {
-                "name": clean_name,
+                "name": normalized_name,
                 "upstream": [],
                 "type": "SOURCE"
             }
@@ -385,6 +399,10 @@ def add_group_by_to_ctas_transformations(dep: Dict, sql: str) -> None:
         group_by_clause = group_by_match.group(1).strip()
         group_by_columns = [col.strip() for col in group_by_clause.split(',')]
         
+        # Normalize group by columns to remove quotes
+        from ...utils.sql_parsing_utils import normalize_entity_name
+        normalized_group_by_columns = [normalize_entity_name(col) for col in group_by_columns]
+        
         # Add to transformations
         for transformation in dep.get('transformations', []):
-            transformation['group_by_columns'] = group_by_columns
+            transformation['group_by_columns'] = normalized_group_by_columns
